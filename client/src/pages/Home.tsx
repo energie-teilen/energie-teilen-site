@@ -1,3 +1,4 @@
+import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ArrowRight,
@@ -16,8 +17,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import Header from "@/components/Header";
 import Footer from "@/components/Footer";
+import Header from "@/components/Header";
+import { CapacityBanner } from "@/components/pilot/CapacityBanner";
+import { PilotCheckoutForm } from "@/components/pilot/PilotCheckoutForm";
+import { PilotOfferCards } from "@/components/pilot/PilotOfferCards";
+import { getPilotOfferContent, type PilotOfferCode } from "@/lib/pilot-api";
 
 /**
  * Energy Civic Ledger design reminder for this file:
@@ -72,29 +77,52 @@ const valueRows = [
   ["Projektbild", "Ein klar strukturiertes Gesamtbild aus Erzeugung, Verbrauch, Rollen und Standortlogik."],
   ["Operative Lesbarkeit", "Komplexe Konstellationen werden in eine verständliche, geschäftsfähige Darstellung überführt."],
   ["Stakeholder-Fähigkeit", "Beteiligte erhalten eine gemeinsame Sprache für Entscheidungen, Einordnung und Abstimmung."],
-  ["Portfolio-Relevanz", "Einzelstandorte und Quartiere lassen sich in konsistente Bewertungs- und Steuerungslogiken einordnen."],
+  ["Pilotfähigkeit", "Relevante Vorhaben können direkt in eine bezahlte Pilotaufnahme und strukturierte Dokumentenphase überführt werden."],
 ];
 
 const flowSteps = [
   {
     number: "01",
-    title: "Erzeugung erfassen",
-    text: "Lokale Energiequellen eines Standorts oder Quartiers werden in eine klar definierte Struktur aufgenommen.",
+    title: "Konstellation erfassen",
+    text: "Standorttyp, Rollenbild und Projektziel werden in eine belastbare Ausgangslage überführt.",
   },
   {
     number: "02",
-    title: "Verbrauch zuordnen",
-    text: "Verbrauchsgruppen, Nutzungseinheiten und betriebliche Kontexte werden in ein belastbares Bild überführt.",
+    title: "Paket auswählen",
+    text: "Die bezahlte Pilotstufe wird passend zur Komplexität der Konstellation serverseitig vorbereitet.",
   },
   {
     number: "03",
-    title: "Verteilung strukturieren",
-    text: "Die operative Beziehung zwischen Erzeugung, Nutzung und standortbezogener Verteilung wird nachvollziehbar dargestellt.",
+    title: "Checkout abschließen",
+    text: "Die Pilotaufnahme wird per sicherem Checkout ausgelöst, ohne clientseitige Preislogik oder manuelle Angebotsbrüche.",
   },
   {
     number: "04",
-    title: "Auswertung bereitstellen",
-    text: "Ergebnisbilder, Kennzahlen und Kommunikationsgrundlagen werden für Projekte und Beteiligte aufbereitet.",
+    title: "Intake und Unterlagen fortsetzen",
+    text: "Nach erfolgreicher Zahlung folgen strukturierte Intake- und Dokumentenschritte für die operative Bearbeitung.",
+  },
+];
+
+const readinessSignals = [
+  {
+    title: "Gebäude und Standorte",
+    text: "Einzelobjekte, Areale und Portfolios mit lokaler Erzeugung, Nutzungsbezug oder geplanter Projektstruktur.",
+    icon: Building2,
+  },
+  {
+    title: "Quartiere und Betriebslogiken",
+    text: "Vorhaben mit mehreren Nutzergruppen, Betreiberrollen oder organisationaler Abstimmungslast.",
+    icon: BatteryCharging,
+  },
+  {
+    title: "Kommunale und institutionelle Fälle",
+    text: "Konstellationen mit Entscheidungsdruck, Dokumentationsbedarf und mehreren Beteiligungsebenen.",
+    icon: Landmark,
+  },
+  {
+    title: "Infrastruktur- und Partnerfälle",
+    text: "Partner, Dienstleister und technische Akteure, die eine klare Projektlogik benötigen.",
+    icon: Factory,
   },
 ];
 
@@ -125,6 +153,16 @@ function SectionIntro({ chapter, eyebrow, title, text }: { chapter: string; eyeb
 }
 
 export default function Home() {
+  const [selectedOfferCode, setSelectedOfferCode] = useState<PilotOfferCode>("et_structuring");
+  const selectedOffer = useMemo(() => getPilotOfferContent(selectedOfferCode), [selectedOfferCode]);
+  const pilotCapacityRemaining = Number.parseInt(import.meta.env.VITE_PILOT_CAPACITY_REMAINING || "", 10);
+  const hasCapacitySignal = Number.isFinite(pilotCapacityRemaining) && pilotCapacityRemaining >= 0;
+
+  function handleProceedToForm() {
+    const target = document.getElementById("pilot-checkout-form");
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
   return (
     <div className="min-h-screen bg-background text-foreground">
       <Header />
@@ -137,16 +175,18 @@ export default function Home() {
               <motion.div className="space-y-8" initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.75 }}>
                 <div className="space-y-4">
                   <Badge className="rounded-full border border-primary/20 bg-primary/10 px-4 py-1.5 font-body text-[0.72rem] font-medium uppercase tracking-[0.22em] text-primary hover:bg-primary/10">
-                    Energie Civic Ledger
+                    Paid Pilot Platform
                   </Badge>
                   <div className="grid gap-4 md:grid-cols-[auto_1fr] md:items-start">
                     <div className="chapter-pill">Kapitel 01</div>
                     <div className="space-y-5">
                       <h1 className="font-display max-w-4xl text-4xl leading-[0.96] font-semibold tracking-[-0.05em] text-foreground sm:text-5xl lg:text-[4.5rem]">
-                        Energie Teilen ordnet lokale Energieprojekte in eine belastbare geschäftliche Struktur.
+                        Energie Teilen führt lokale Energieprojekte in eine bezahlte, belastbare Pilotaufnahme.
                       </h1>
                       <p className="max-w-2xl font-body text-lg leading-8 text-muted-foreground sm:text-xl">
-                        Die Website beschreibt, was Energie Teilen für Eigentümer, Quartiere, Projektträger und kommunale Akteure leistet: eine professionelle Struktur für lokale Erzeugung, Nutzung, Verteilung und operative Lesbarkeit.
+                        Die Website ist nicht länger nur eine Darstellung. Sie wird zum operativen Einstieg für Eigentümer,
+                        Quartiere, Projektträger und kommunale Akteure, die ihre Konstellation professionell qualifizieren,
+                        strukturieren und in eine belastbare nächste Stufe überführen wollen.
                       </p>
                     </div>
                   </div>
@@ -156,29 +196,29 @@ export default function Home() {
                   <Card className="ledger-panel border-border/70 bg-card/85 shadow-[0_16px_60px_rgba(18,32,27,0.10)] backdrop-blur-sm">
                     <CardContent className="space-y-3 p-5">
                       <div className="flex items-center justify-between text-sm text-muted-foreground">
-                        <span>Positionierung</span>
+                        <span>Monetisierbar</span>
                         <ShieldCheck className="h-4 w-4 text-primary" />
                       </div>
                       <p className="font-display text-xl leading-snug font-semibold text-foreground">
-                        Professionelle Energieplattform für strukturierte Projektkonstellationen
+                        Drei serverseitig geführte Pilotpakete statt unverbindlicher Kontaktstrecke
                       </p>
                     </CardContent>
                   </Card>
                   <Card className="ledger-panel border-border/70 bg-card/85 shadow-[0_16px_60px_rgba(18,32,27,0.10)] backdrop-blur-sm">
                     <CardContent className="space-y-3 p-5">
                       <div className="flex items-center justify-between text-sm text-muted-foreground">
-                        <span>Schwerpunkt</span>
+                        <span>Betrieblicher Fokus</span>
                         <Leaf className="h-4 w-4 text-primary" />
                       </div>
                       <p className="font-display text-xl leading-snug font-semibold text-foreground">
-                        Lokale Erzeugung, Verbrauch, Verteilung und betriebliche Einordnung
+                        Lokale Erzeugung, Verbrauch, Verteilung und belastbare Projektaufnahme
                       </p>
                     </CardContent>
                   </Card>
                   <Card className="ledger-panel border-border/70 bg-card/85 shadow-[0_16px_60px_rgba(18,32,27,0.10)] backdrop-blur-sm sm:col-span-2 xl:col-span-1">
                     <CardContent className="space-y-3 p-5">
                       <div className="flex items-center justify-between text-sm text-muted-foreground">
-                        <span>Zielgruppe</span>
+                        <span>Zielgruppenfit</span>
                         <Landmark className="h-4 w-4 text-primary" />
                       </div>
                       <p className="font-display text-xl leading-snug font-semibold text-foreground">
@@ -188,10 +228,12 @@ export default function Home() {
                   </Card>
                 </div>
 
+                {hasCapacitySignal ? <CapacityBanner remaining={pilotCapacityRemaining} /> : null}
+
                 <div className="flex flex-col gap-3 sm:flex-row">
                   <Button asChild size="lg" className="rounded-full bg-primary px-6 text-primary-foreground shadow-[0_12px_30px_rgba(29,73,58,0.24)] hover:bg-primary/92">
-                    <a href="#kontakt">
-                      Gespräch anfragen
+                    <a href="#pilot-start">
+                      Pilot starten
                       <ArrowRight className="ml-2 h-4 w-4" />
                     </a>
                   </Button>
@@ -213,7 +255,8 @@ export default function Home() {
                 <div className="hero-note lg:absolute lg:-bottom-6 lg:-left-12">
                   <span className="hero-note-label">Frankfurt · Deutschland</span>
                   <p>
-                    Energie Teilen präsentiert sich als belastbare Struktur für lokale Energiekonstellationen im deutschen Markt.
+                    Energie Teilen verbindet anspruchsvolle Projektkommunikation mit einer klaren bezahlten Einstiegslinie,
+                    damit aus Interesse eine geordnete Pilotbearbeitung wird.
                   </p>
                 </div>
               </motion.div>
@@ -226,58 +269,27 @@ export default function Home() {
             <SectionIntro
               chapter="02"
               eyebrow="Überblick"
-              title="Was Energie Teilen macht"
-              text="Energie Teilen beschreibt und strukturiert lokale Energieprojekte so, dass geschäftliche, technische und standortbezogene Zusammenhänge in einer professionellen Form sichtbar werden. Im Mittelpunkt stehen belastbare Projektbilder für Immobilien, Areale, Quartiere und partnerbasierte Konstellationen."
+              title="Die stärkste Position entsteht dort, wo Darstellung und bezahlter Start zusammenlaufen"
+              text="Energie Teilen übersetzt lokale Energiekonstellationen nicht nur in ein professionelles Bild, sondern auch in einen klaren operativen Einstieg. Interessenten müssen nicht mehr erst eine lose Anfrage formulieren, sondern können die passende Pilotstufe auswählen und direkt in eine belastbare Aufnahme übergehen."
             />
 
-            <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-              <Card className="ledger-panel overflow-hidden border-border/70 bg-card">
-                <CardContent className="grid gap-8 p-8 lg:grid-cols-[1.1fr_0.9fr] lg:p-10">
-                  <div className="space-y-5">
-                    <p className="section-kicker">Mandat</p>
-                    <h3 className="font-display text-2xl font-semibold tracking-[-0.03em] text-foreground">
-                      Eine klare operative Sprache für lokale Energiebeziehungen.
-                    </h3>
-                    <p className="text-base leading-8 text-muted-foreground">
-                      Die Leistung von Energie Teilen besteht darin, Energiebeziehungen in Gebäuden und Quartieren in einer Weise zu ordnen, die für Eigentümer, Projektpartner und institutionelle Gesprächskontexte geschäftlich lesbar wird. Statt diffuser Komplexität entsteht ein strukturierter Rahmen mit klaren Einheiten, Rollen und Bezugspunkten.
-                    </p>
-                  </div>
-                  <div className="editorial-aside">
-                    <div>
-                      <span className="aside-label">Fokus</span>
-                      <p>Gebäude, Portfolios, Areale und Quartiere mit lokaler Erzeugung und standortbezogenen Verbrauchsbeziehungen.</p>
-                    </div>
-                    <div>
-                      <span className="aside-label">Darstellung</span>
-                      <p>Professionell, präzise und anschlussfähig für Eigentümer, Betreiber, Gemeinden und Infrastrukturpartner.</p>
-                    </div>
-                    <div>
-                      <span className="aside-label">Kommunikation</span>
-                      <p>Konzentriert auf das, was Energie Teilen leistet, ohne geschützte operative Detailtiefe offenzulegen.</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card className="ledger-panel border-border/70 bg-[linear-gradient(180deg,rgba(245,241,233,0.92),rgba(231,226,216,0.82))]">
-                <CardContent className="space-y-5 p-8 lg:p-10">
-                  <p className="section-kicker">Einordnung</p>
-                  <div className="space-y-4">
-                    <div className="inline-flex items-center gap-3 rounded-full border border-primary/15 bg-white/80 px-4 py-2 text-sm text-foreground">
-                      <BatteryCharging className="h-4 w-4 text-primary" />
-                      Lokale Energiepotenziale in strukturierter Form
-                    </div>
-                    <div className="inline-flex items-center gap-3 rounded-full border border-primary/15 bg-white/80 px-4 py-2 text-sm text-foreground">
-                      <MapPinned className="h-4 w-4 text-primary" />
-                      Geeignet für einzelne Objekte und Quartierskontexte
-                    </div>
-                    <div className="inline-flex items-center gap-3 rounded-full border border-primary/15 bg-white/80 px-4 py-2 text-sm text-foreground">
-                      <Factory className="h-4 w-4 text-primary" />
-                      Anschlussfähig für operative und institutionelle Gesprächslagen
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
+            <div className="grid gap-6 xl:grid-cols-4">
+              {readinessSignals.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <Card key={item.title} className="ledger-panel border-border/70 bg-card">
+                    <CardContent className="space-y-4 p-6">
+                      <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                        <Icon className="h-5 w-5" />
+                      </div>
+                      <div className="space-y-2">
+                        <h3 className="font-display text-xl font-semibold tracking-[-0.03em] text-foreground">{item.title}</h3>
+                        <p className="text-base leading-7 text-muted-foreground">{item.text}</p>
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
             </div>
           </div>
         </motion.section>
@@ -286,17 +298,17 @@ export default function Home() {
           <div className="container space-y-12">
             <SectionIntro
               chapter="03"
-              eyebrow="Leistungsbild"
-              title="Leistungsbausteine für professionelle Energieprojekte"
-              text="Die Leistung wird nicht als generisches Produkt beschrieben, sondern als modulare Struktur für reale Projektkonstellationen. So entsteht ein präzises Bild davon, was Energie Teilen für Marktteilnehmer bereitstellt."
+              eyebrow="Leistungen"
+              title="Die Leistung wird so aufbereitet, dass aus Komplexität ein verkäuflicher, bearbeitbarer Projektzugang entsteht"
+              text="Die Plattform ist auf Konstellationen ausgelegt, in denen mehrere technische, organisatorische oder betriebliche Ebenen zusammenkommen. Der Wert entsteht aus Struktur, professioneller Lesbarkeit und der Fähigkeit, eine Konstellation in ein belastbares nächstes Arbeitsformat zu überführen."
             />
 
-            <div className="grid gap-6 md:grid-cols-2">
-              {serviceModules.map(({ icon: Icon, title, text }) => (
+            <div className="grid gap-6 lg:grid-cols-2 xl:grid-cols-4">
+              {serviceModules.map(({ title, text, icon: Icon }) => (
                 <Card key={title} className="ledger-panel group border-border/70 bg-card transition-transform duration-300 hover:-translate-y-1">
-                  <CardContent className="space-y-5 p-7 sm:p-8">
+                  <CardContent className="space-y-6 p-6">
                     <div className="flex items-center justify-between">
-                      <div className="icon-disc">
+                      <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/10 text-primary">
                         <Icon className="h-5 w-5" />
                       </div>
                       <ChevronRight className="h-5 w-5 text-muted-foreground transition-transform duration-300 group-hover:translate-x-1" />
@@ -317,8 +329,8 @@ export default function Home() {
             <SectionIntro
               chapter="04"
               eyebrow="Struktur"
-              title="Ein verständliches Gesamtbild aus Erzeugung, Nutzung, Verteilung und Auswertung"
-              text="Die Darstellung von Energie Teilen folgt einer klaren Leselogik. Aus einzelnen technischen und betrieblichen Bestandteilen wird ein zusammenhängendes Projektbild, das für Entscheidungen, Kommunikation und Einordnung geeignet ist."
+              title="Ein verständliches Gesamtbild aus Einordnung, Paketwahl, Checkout und Intake"
+              text="Die operative Leselogik endet nicht bei der Beschreibung eines Projekts. Sie setzt sich in der bezahlten Pilotaufnahme fort. Dadurch wird aus einer Marketingoberfläche eine funktionierende geschäftliche Oberfläche mit klaren Übergängen zwischen Interesse, Zahlung und Bearbeitung."
             />
 
             <div className="grid gap-6 xl:grid-cols-[0.82fr_1.18fr]">
@@ -356,8 +368,8 @@ export default function Home() {
             <SectionIntro
               chapter="05"
               eyebrow="Adressaten"
-              title="Relevanz für die Beteiligten, die lokale Energieprojekte tragen"
-              text="Energie Teilen ist für Konstellationen gedacht, in denen mehrere Rollen, Standorte oder organisatorische Ebenen zusammenkommen. Entscheidend ist nicht nur die technische Ausgangslage, sondern die professionelle Lesbarkeit für alle Beteiligten."
+              title="Relevanz für die Beteiligten, die aus einer Darstellung einen belastbaren Projektstart machen müssen"
+              text="Energie Teilen ist für Konstellationen gedacht, in denen mehrere Rollen, Standorte oder organisatorische Ebenen zusammenkommen. Entscheidend ist nicht nur die technische Ausgangslage, sondern die Fähigkeit, daraus eine bezahlte und geordnete Bearbeitung zu machen."
             />
 
             <div className="grid gap-6 xl:grid-cols-[1.02fr_0.98fr] xl:items-start">
@@ -395,8 +407,8 @@ export default function Home() {
             <SectionIntro
               chapter="06"
               eyebrow="Geschäftsmehrwert"
-              title="Warum die Struktur selbst zum Projektwert wird"
-              text="In Energieprojekten entsteht Wert nicht nur aus Anlagen und Verträgen, sondern auch aus Klarheit. Energie Teilen schafft ein professionelles Bild der Konstellation und verbessert damit die Anschlussfähigkeit eines Projekts an interne, externe und institutionelle Gesprächslagen."
+              title="Warum die Struktur selbst zum kaufbaren Projektwert wird"
+              text="In Energieprojekten entsteht Wert nicht nur aus Anlagen und Verträgen, sondern aus Klarheit, Anschlussfähigkeit und operativer Weiterverarbeitung. Energie Teilen macht diese Qualität sichtbar und verbindet sie direkt mit einer bezahlten nächsten Stufe statt mit unstrukturierter Kontaktaufnahme."
             />
 
             <Card className="ledger-panel overflow-hidden border-border/70 bg-card">
@@ -424,48 +436,67 @@ export default function Home() {
           </div>
         </motion.section>
 
-        <motion.section id="kontakt" className="section-shell section-shell-contact" {...reveal}>
-          <div className="container">
-            <Card className="ledger-panel relative overflow-hidden border-primary/20 bg-[linear-gradient(135deg,rgba(29,73,58,0.98),rgba(18,32,27,0.98))] text-primary-foreground shadow-[0_24px_80px_rgba(18,32,27,0.28)]">
-              <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(199,146,54,0.18),transparent_26%),radial-gradient(circle_at_bottom_right,rgba(255,255,255,0.08),transparent_24%)]" />
-              <CardContent className="relative grid gap-8 p-8 sm:p-10 lg:grid-cols-[1fr_0.72fr] lg:p-12">
-                <div className="space-y-5">
-                  <p className="section-kicker text-primary-foreground/70">Kontakt</p>
-                  <h2 className="font-display text-3xl leading-tight font-semibold tracking-[-0.04em] text-primary-foreground sm:text-4xl">
-                    Professionelle Gespräche zu lokalen Energieprojekten beginnen mit einer klaren Ausgangslage.
-                  </h2>
-                  <p className="max-w-2xl text-base leading-8 text-primary-foreground/78 sm:text-lg">
-                    Wenn Sie ein Gebäude, ein Portfolio, ein Quartier oder eine standortbezogene Konstellation professionell einordnen möchten, kann Energie Teilen als strukturierende Plattform in den Dialog eingebracht werden.
-                  </p>
+        <motion.section id="pilot-start" className="section-shell section-shell-contact" {...reveal}>
+          <div className="container space-y-10">
+            <SectionIntro
+              chapter="07"
+              eyebrow="Pilotstart"
+              title="Wählen Sie die passende Pilotstufe und führen Sie die Konstellation in einen sauberen bezahlten Einstieg"
+              text="Die Pilotoberfläche ist bewusst als produktiver Einstieg gebaut. Sie wählen das Paket, prüfen die operative Ausgangslage und starten anschließend einen serverseitig kontrollierten Checkout, der das Projekt in eine geordnete Bearbeitung überführt."
+            />
+
+            <div className="grid gap-8">
+              <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr] lg:items-start">
+                <div className="space-y-6">
+                  <PilotOfferCards
+                    selectedOfferCode={selectedOfferCode}
+                    onSelectOffer={setSelectedOfferCode}
+                    onProceed={handleProceedToForm}
+                  />
                 </div>
-                <div className="rounded-[28px] border border-white/12 bg-white/6 p-6 backdrop-blur-sm sm:p-7">
-                  <div className="space-y-4">
-                    <div>
-                      <p className="text-sm uppercase tracking-[0.16em] text-primary-foreground/60">E-Mail</p>
-                      <a className="mt-1 block font-display text-xl text-primary-foreground transition-opacity hover:opacity-80" href="mailto:vincenzo.grimaldi.engineering@gmail.com">
-                        vincenzo.grimaldi.engineering@gmail.com
-                      </a>
+
+                <Card className="ledger-panel border-border/70 bg-card">
+                  <CardContent className="space-y-6 p-6 sm:p-7">
+                    <div className="space-y-3">
+                      <p className="text-[0.72rem] font-medium uppercase tracking-[0.2em] text-primary">Ausgewählter Fokus</p>
+                      <h3 className="font-display text-2xl font-semibold tracking-[-0.03em] text-foreground">
+                        {selectedOffer.title}
+                      </h3>
+                      <p className="text-base leading-8 text-muted-foreground">{selectedOffer.idealFor}</p>
                     </div>
-                    <div>
-                      <p className="text-sm uppercase tracking-[0.16em] text-primary-foreground/60">Standort</p>
-                      <p className="mt-1 text-base text-primary-foreground/82">Frankfurt am Main, Deutschland</p>
-                    </div>
-                    <div>
-                      <p className="text-sm uppercase tracking-[0.16em] text-primary-foreground/60">Nächster Schritt</p>
-                      <p className="mt-1 text-base leading-7 text-primary-foreground/82">
-                        Projektkontext, Standorttyp und Beteiligtenstruktur kurz skizzieren. Daraus lässt sich die passende Gesprächsgrundlage ableiten.
+
+                    <div className="rounded-[24px] border border-border/70 bg-background/70 p-5">
+                      <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">Nächster Schritt</p>
+                      <p className="mt-3 text-sm leading-7 text-foreground/90">
+                        Nach dem Checkout wird die Konstellation als bezahlte Pilotanwendung angelegt. Erst danach folgen
+                        Intake, Dokumente und die betriebliche Weiterverarbeitung.
                       </p>
                     </div>
-                    <Button asChild size="lg" className="mt-3 w-full rounded-full bg-accent px-6 text-accent-foreground hover:bg-accent/90">
-                      <a href="mailto:vincenzo.grimaldi.engineering@gmail.com?subject=Energie%20Teilen%20Anfrage">
-                        Kontakt aufnehmen
+
+                    <div className="rounded-[24px] border border-primary/15 bg-primary/6 p-5">
+                      <div className="flex items-start gap-3">
+                        <MapPinned className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+                        <p className="text-sm leading-7 text-foreground/90">
+                          Für besonders große Portfolios oder institutionelle Sonderfälle bleibt der direkte Kontakt möglich,
+                          aber die Standardlinie ist jetzt die bezahlte Pilotaufnahme.
+                        </p>
+                      </div>
+                    </div>
+
+                    <Button asChild size="lg" className="w-full rounded-full">
+                      <a href="#pilot-checkout-form">
+                        Zu den Projektangaben
                         <ArrowRight className="ml-2 h-4 w-4" />
                       </a>
                     </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <div id="pilot-checkout-form">
+                <PilotCheckoutForm selectedOfferCode={selectedOfferCode} />
+              </div>
+            </div>
           </div>
         </motion.section>
       </main>
