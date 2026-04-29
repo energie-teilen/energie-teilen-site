@@ -14,7 +14,7 @@ const navItems = [
   { label: "Leistungen", href: "#leistungen" },
   { label: "Struktur", href: "#struktur" },
   { label: "Stakeholder", href: "#stakeholder" },
-  { label: "Kontakt", href: "#kontakt" },
+  { label: "Pilotstart", href: "#pilot-start" },
 ];
 
 function useScrollDirection() {
@@ -82,7 +82,7 @@ export default function Header() {
             </span>
             <span className="brand-copy">
               <strong>Energie Teilen</strong>
-              <small>Lokale Energieprojekte professionell strukturiert</small>
+              <small>Bezahlte Pilotaufnahme für lokale Energieprojekte</small>
             </span>
           </a>
 
@@ -96,7 +96,7 @@ export default function Header() {
 
           <div className="hidden items-center gap-3 lg:flex">
             <Button asChild className="rounded-full bg-primary px-5 text-primary-foreground hover:bg-primary/92">
-              <a href="#kontakt">Anfrage starten</a>
+              <a href="#pilot-start">Pilot starten</a>
             </Button>
           </div>
 
@@ -126,8 +126,8 @@ export default function Header() {
               ))}
             </nav>
             <Button asChild className="mt-4 w-full rounded-full bg-primary text-primary-foreground hover:bg-primary/92">
-              <a href="#kontakt" onClick={() => setMenuOpen(false)}>
-                Kontakt aufnehmen
+              <a href="#pilot-start" onClick={() => setMenuOpen(false)}>
+                Bezahlte Pilotaufnahme starten
               </a>
             </Button>
           </div>
