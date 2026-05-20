@@ -3,19 +3,183 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
-    <title>Energie Teilen</title>
+
+    <!-- =========================================================
+         PRIMARY SEO
+         ========================================================= -->
+    <title>Energie Teilen — Bezahlte Pilotaufnahme für lokale Energieprojekte</title>
     <meta
       name="description"
-      content="Energie Teilen strukturiert lokale Energieprojekte für Gebäude, Quartiere und professionelle Marktteilnehmer in Deutschland." />
+      content="Strukturierte Pilotaufnahme für Mieterstrom und gemeinschaftliche Gebäudeversorgung nach §42b EnWG. Kostenloser Rendite-Rechner. Drei Pilotstufen für Gebäude, Quartiere und Portfolios." />
+    <meta name="keywords" content="Mieterstrom, Energie Teilen, §42b EnWG, gemeinschaftliche Gebäudeversorgung, Solarspitzengesetz, Quartiersversorgung, Eigenverbrauch, Photovoltaik Wirtschaftlichkeit" />
+    <meta name="author" content="Energie Teilen" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta name="theme-color" content="#1d493a" />
+    <meta name="color-scheme" content="light" />
+    <meta http-equiv="Content-Language" content="de" />
+
+    <link rel="canonical" href="https://energie-teilen-site.vercel.app/" />
+    <link rel="alternate" hreflang="de-DE" href="https://energie-teilen-site.vercel.app/" />
+    <link rel="alternate" hreflang="x-default" href="https://energie-teilen-site.vercel.app/" />
+
+    <!-- =========================================================
+         FAVICON SET (drop these files in client/public/)
+         ========================================================= -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+
+    <!-- =========================================================
+         OPENGRAPH — drives social previews on LinkedIn, WhatsApp,
+         Slack, Telegram, Twitter, etc. The /og-image.png file
+         (1200×630) should sit in client/public/.
+         ========================================================= -->
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="de_DE" />
+    <meta property="og:site_name" content="Energie Teilen" />
+    <meta property="og:title" content="Energie Teilen — Bezahlte Pilotaufnahme für lokale Energieprojekte" />
+    <meta
+      property="og:description"
+      content="Strukturierte Pilotaufnahme für Mieterstrom und gemeinschaftliche Gebäudeversorgung nach §42b EnWG. Kostenloser Rendite-Rechner. Drei Pilotstufen." />
+    <meta property="og:url" content="https://energie-teilen-site.vercel.app/" />
+    <meta property="og:image" content="https://energie-teilen-site.vercel.app/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Energie Teilen — vernetzte urbane Energieinfrastruktur" />
+
+    <!-- =========================================================
+         TWITTER CARD
+         ========================================================= -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Energie Teilen — Bezahlte Pilotaufnahme" />
+    <meta name="twitter:description" content="Strukturierte Pilotaufnahme für §42b EnWG. Kostenloser Mieterstrom-Rechner. Drei Pilotstufen." />
+    <meta name="twitter:image" content="https://energie-teilen-site.vercel.app/og-image.png" />
+
+    <!-- =========================================================
+         FONTS — Manrope (display) + IBM Plex Sans (body)
+         ========================================================= -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="dns-prefetch" href="https://fonts.googleapis.com" />
     <link
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap"
       rel="stylesheet" />
+
+    <!-- =========================================================
+         STRUCTURED DATA (JSON-LD)
+         Helps Google show a richer result and feeds AI knowledge
+         panels. No prices included — pricing stays server-side.
+         ========================================================= -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        "name": "Energie Teilen",
+        "url": "https://energie-teilen-site.vercel.app",
+        "logo": "https://energie-teilen-site.vercel.app/og-image.png",
+        "description": "Strukturierte Pilotaufnahme für lokale Energieprojekte: Mieterstrom, §42b EnWG, gemeinschaftliche Gebäudeversorgung.",
+        "areaServed": {
+          "@type": "Country",
+          "name": "Deutschland"
+        },
+        "knowsAbout": [
+          "Mieterstrom",
+          "§42b EnWG",
+          "Energy Sharing",
+          "Gemeinschaftliche Gebäudeversorgung",
+          "Photovoltaik Wirtschaftlichkeit",
+          "Quartiersversorgung",
+          "Solarspitzengesetz",
+          "Eigenverbrauchsoptimierung"
+        ],
+        "contactPoint": {
+          "@type": "ContactPoint",
+          "contactType": "customer service",
+          "email": "vincenzo.grimaldi.engineering@gmail.com",
+          "areaServed": "DE",
+          "availableLanguage": ["German"]
+        },
+        "address": {
+          "@type": "PostalAddress",
+          "addressLocality": "Frankfurt am Main",
+          "addressCountry": "DE"
+        }
+      }
+    </script>
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": "Energie Teilen",
+        "url": "https://energie-teilen-site.vercel.app",
+        "inLanguage": "de-DE",
+        "publisher": { "@type": "Organization", "name": "Energie Teilen" }
+      }
+    </script>
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Service",
+        "serviceType": "Strukturierte Pilotaufnahme für Energieprojekte",
+        "provider": { "@type": "Organization", "name": "Energie Teilen" },
+        "areaServed": { "@type": "Country", "name": "Deutschland" },
+        "audience": {
+          "@type": "BusinessAudience",
+          "audienceType": "Bestandshalter, Projektentwickler, Genossenschaften, Stadtwerke, kommunale Akteure"
+        },
+        "hasOfferCatalog": {
+          "@type": "OfferCatalog",
+          "name": "Pilotstufen",
+          "itemListElement": [
+            {
+              "@type": "Offer",
+              "itemOffered": {
+                "@type": "Service",
+                "name": "Pilot Eligibility Check",
+                "description": "Schnellste bezahlte Einordnung für Standorte, Gebäude und erste Betreiberkonstellationen."
+              }
+            },
+            {
+              "@type": "Offer",
+              "itemOffered": {
+                "@type": "Service",
+                "name": "Pilot Structuring Package",
+                "description": "Vertiefte Strukturierungsstufe für Projekte mit mehreren Rollen, Dokumenten und Entscheidungsanforderungen."
+              }
+            },
+            {
+              "@type": "Offer",
+              "itemOffered": {
+                "@type": "Service",
+                "name": "Full Pilot Preparation Mandate",
+                "description": "Intensivste Stufe für Portfolios und Vorhaben mit höherer Verbindlichkeit und Umsetzungsnähe."
+              }
+            }
+          ]
+        }
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
+    <noscript>
+      <p style="padding: 2rem; text-align: center; font-family: sans-serif">
+        Diese Anwendung benötigt JavaScript. Bitte aktivieren Sie JavaScript in Ihrem Browser.
+      </p>
+    </noscript>
+
     <script type="module" src="/src/main.tsx"></script>
+
+    <!-- =========================================================
+         ANALYTICS — Umami (preserved from previous config).
+         VITE_ANALYTICS_ENDPOINT + VITE_ANALYTICS_WEBSITE_ID are
+         replaced at build time. Leave the env vars empty in dev
+         and Vite will simply not load the script.
+         ========================================================= -->
     <script
       defer
       src="%VITE_ANALYTICS_ENDPOINT%/umami"
