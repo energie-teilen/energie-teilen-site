@@ -6,6 +6,10 @@
 // If anything goes wrong (import error, buildApp throw, request crash) you get
 // a JSON 500 with the actual exception message + name + stack — never the
 // opaque FUNCTION_INVOCATION_FAILED page.
+//
+// RUNTIME-CRITICAL: the dynamic import path below MUST end in ".js".
+// Node ESM on Vercel rejects extensionless paths at runtime. TypeScript is
+// happy with either form, but Node is not. Don't remove the extension.
 
 import type { IncomingMessage, ServerResponse } from "http";
 
@@ -18,11 +22,12 @@ async function getApp(): Promise<any> {
   if (!appPromise) {
     appPromise = (async () => {
       try {
-        // Dynamic import so import-time errors are caught here, not at boot
-        const mod = await import("../server/index");
+        // The ".js" extension is REQUIRED for Node ESM runtime resolution.
+        // Without it: Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/var/task/server/index'
+        const mod = await import("../server/index.js");
         if (typeof mod.buildApp !== "function") {
           throw new Error(
-            "server/index.ts does not export `buildApp`. Check the export.",
+            "server/index.js does not export `buildApp`. Check the export.",
           );
         }
         return await mod.buildApp();
@@ -49,7 +54,6 @@ export default async function handler(
     // eslint-disable-next-line no-console
     console.error("[api] handler error:", error);
 
-    // Always log full details to Vercel; only return safe info to the client.
     res.statusCode = 500;
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
@@ -57,11 +61,8 @@ export default async function handler(
     const body = {
       ok: false,
       error: "server_error",
-      // The next two ARE shown so you can debug. Once stable, gate them
-      // behind a header like x-debug-token if you don't want them public.
       name: error.name,
       message: error.message,
-      // Stack trace only when DEBUG flag is set, to avoid leaking paths.
       stack: process.env.DEBUG ? error.stack : undefined,
     };
     res.end(JSON.stringify(body, null, 2));
