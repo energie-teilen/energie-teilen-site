@@ -41,7 +41,14 @@
  *   add: server.proxy = { "/api": "http://localhost:3000" }).
  */
 
-import express, { type Request, type Response, type NextFunction } from "express";
+import express from "express";
+import type {
+  Request,
+  Response,
+  NextFunction,
+  RequestHandler,
+  Express,
+} from "express";
 import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -75,9 +82,9 @@ function apiError(
 }
 
 /** In-memory rate limiter. Per-IP token bucket, resets each window. */
-function createRateLimiter(opts: { windowMs: number; max: number }) {
+function createRateLimiter(opts: { windowMs: number; max: number }): RequestHandler {
   const hits = new Map<string, { count: number; resetAt: number }>();
-  return (req: Request, res: Response, next: NextFunction) => {
+  return (req: Request, res: Response, next: NextFunction): void => {
     const forwarded = req.headers["x-forwarded-for"];
     const ip =
       (typeof forwarded === "string"
@@ -96,12 +103,13 @@ function createRateLimiter(opts: { windowMs: number; max: number }) {
     }
     entry.count++;
     if (entry.count > opts.max) {
-      return apiError(
+      apiError(
         res,
         429,
         "rate_limited",
         "Zu viele Anfragen. Bitte später erneut versuchen.",
       );
+      return;
     }
     next();
   };
@@ -153,7 +161,7 @@ function escapeHtml(s: string): string {
 // APP BUILDER
 // ============================================================================
 
-export async function buildApp() {
+export async function buildApp(): Promise<Express> {
   const app = express();
   app.disable("x-powered-by");
 
@@ -163,7 +171,7 @@ export async function buildApp() {
   app.post(
     "/api/stripe/webhook",
     express.raw({ type: "application/json" }),
-    async (req, res) => {
+    async (req: Request, res: Response) => {
       const stripe = await getStripe();
       const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
@@ -235,7 +243,7 @@ export async function buildApp() {
   // --------------------------------------------------------------------------
   const pilotCheckoutLimiter = createRateLimiter({ windowMs: 60_000, max: 10 });
 
-  app.post("/api/pilot-checkout", pilotCheckoutLimiter, async (req, res) => {
+  app.post("/api/pilot-checkout", pilotCheckoutLimiter, async (req: Request, res: Response) => {
     const parsed = CreatePilotCheckoutInputSchema.safeParse(req.body);
     if (!parsed.success) {
       return apiError(
@@ -339,7 +347,7 @@ export async function buildApp() {
   // --------------------------------------------------------------------------
   const leadLimiter = createRateLimiter({ windowMs: 60_000, max: 20 });
 
-  app.post("/api/lead", leadLimiter, async (req, res) => {
+  app.post("/api/lead", leadLimiter, async (req: Request, res: Response) => {
     const parsed = LeadCaptureInputSchema.safeParse(req.body);
     if (!parsed.success) {
       return apiError(
@@ -380,7 +388,7 @@ export async function buildApp() {
   // --------------------------------------------------------------------------
   // GET /api/health — configuration probe (safe; no secrets exposed)
   // --------------------------------------------------------------------------
-  app.get("/api/health", (_req, res) => {
+  app.get("/api/health", (_req: Request, res: Response) => {
     res.json({
       ok: true,
       timestamp: new Date().toISOString(),
@@ -401,7 +409,7 @@ export async function buildApp() {
   // --------------------------------------------------------------------------
   // Reject any other /api/* path with a typed 404 (don't fall through to SPA)
   // --------------------------------------------------------------------------
-  app.all("/api/*", (_req, res) =>
+  app.all("/api/*", (_req: Request, res: Response) =>
     apiError(res, 404, "not_found", "Endpunkt nicht gefunden."),
   );
 
@@ -415,7 +423,7 @@ export async function buildApp() {
 
   app.use(express.static(staticPath));
 
-  app.get("*", (_req, res) => {
+  app.get("*", (_req: Request, res: Response) => {
     res.sendFile(path.join(staticPath, "index.html"));
   });
 
