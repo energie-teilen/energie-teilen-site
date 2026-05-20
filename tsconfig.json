@@ -1,18 +1,64 @@
 {
-  "include": ["client/src/**/*", "shared/**/*", "server/**/*"],
-  "exclude": ["node_modules", "build", "dist", "**/*.test.ts"],
+  // -------------------------------------------------------------------------
+  // Energie Teilen — ROOT tsconfig.
+  //
+  // Scope: local typechecking for client (Vite), shared, server, and api.
+  // Vercel's @vercel/node builder uses api/tsconfig.json for the function
+  // typecheck (separate context, no DOM lib). That's intentional — keeps the
+  // DOM globals from shadowing Express's Response type in server code.
+  //
+  // pnpm check / pnpm typecheck → runs against this file.
+  // -------------------------------------------------------------------------
+
+  "include": [
+    "client/src/**/*",
+    "shared/**/*",
+    "server/**/*",
+    "api/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "build",
+    "dist",
+    ".vercel",
+    ".turbo",
+    "**/*.test.ts",
+    "**/*.spec.ts"
+  ],
+
   "compilerOptions": {
-    "incremental": true,
-    "tsBuildInfoFile": "./node_modules/typescript/tsbuildinfo",
-    "noEmit": true,
+    // ---------- Output ----------
+    "target": "ES2022",
     "module": "ESNext",
-    "strict": true,
+    "moduleResolution": "bundler",
     "lib": ["esnext", "dom", "dom.iterable"],
     "jsx": "preserve",
+    "noEmit": true,
+    "incremental": true,
+    "tsBuildInfoFile": "./node_modules/typescript/tsbuildinfo",
+
+    // ---------- Strictness ----------
+    "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    // Left OFF intentionally — turning these on would break existing code:
+    //   "noUncheckedIndexedAccess": true,
+    //   "noUnusedLocals": true,
+    //   "noUnusedParameters": true,
+    //   "exactOptionalPropertyTypes": true,
+
+    // ---------- Interop & modules ----------
     "esModuleInterop": true,
-    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
     "allowImportingTsExtensions": true,
-    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": false,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "useDefineForClassFields": true,
+
+    // ---------- Paths (must match vite.config.ts aliases) ----------
     "baseUrl": ".",
     "types": ["node", "vite/client"],
     "paths": {
