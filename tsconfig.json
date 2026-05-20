@@ -1,20 +1,31 @@
 {
   // -------------------------------------------------------------------------
-  // Energie Teilen — ROOT tsconfig.
+  // Energie Teilen — ROOT tsconfig (CLIENT scope).
   //
-  // Scope: local typechecking for client (Vite), shared, server, and api.
-  // Vercel's @vercel/node builder uses api/tsconfig.json for the function
-  // typecheck (separate context, no DOM lib). That's intentional — keeps the
-  // DOM globals from shadowing Express's Response type in server code.
+  // What's in scope here:
+  //   client/src/**/*   — the Vite SPA
+  //   shared/**/*       — Zod schemas, shared types
   //
-  // pnpm check / pnpm typecheck → runs against this file.
+  // What's NOT in scope here:
+  //   server/**/*       — checked by api/tsconfig.json (no DOM lib)
+  //   api/**/*          — checked by api/tsconfig.json (no DOM lib)
+  //
+  // WHY THE SPLIT:
+  //   The client needs DOM types (document, fetch's Response, etc.) to compile.
+  //   The server uses Express which has its own Response type. When both are in
+  //   the SAME typecheck context, the DOM Response shadows Express's Response
+  //   and you get errors like "Property 'status' does not exist on Response".
+  //   Two tsconfigs = two contexts = no shadowing.
+  //
+  // To run a full local typecheck, run BOTH:
+  //   pnpm exec tsc --noEmit -p tsconfig.json
+  //   pnpm exec tsc --noEmit -p api/tsconfig.json
+  // (the "check" script in package.json should be updated to do both)
   // -------------------------------------------------------------------------
 
   "include": [
     "client/src/**/*",
-    "shared/**/*",
-    "server/**/*",
-    "api/**/*"
+    "shared/**/*"
   ],
   "exclude": [
     "node_modules",
@@ -41,11 +52,6 @@
     "strict": true,
     "noFallthroughCasesInSwitch": true,
     "noImplicitOverride": true,
-    // Left OFF intentionally — turning these on would break existing code:
-    //   "noUncheckedIndexedAccess": true,
-    //   "noUnusedLocals": true,
-    //   "noUnusedParameters": true,
-    //   "exactOptionalPropertyTypes": true,
 
     // ---------- Interop & modules ----------
     "esModuleInterop": true,
