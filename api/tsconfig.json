@@ -1,0 +1,68 @@
+{
+  // -------------------------------------------------------------------------
+  // api/tsconfig.json — SERVER scope.
+  //
+  // What's in scope here:
+  //   api/**/*          — the Vercel serverless function entry
+  //   ../server/**/*    — the Express app
+  //   ../shared/**/*    — Zod schemas (same as client uses)
+  //
+  // KEY DIFFERENCES from the root tsconfig:
+  //   1. NO "dom" or "dom.iterable" in lib. Browsers' Response/Request globals
+  //      would shadow Express's same-named types and break .status(), .json(),
+  //      .headers, .socket, etc.
+  //   2. Path aliases relative to the parent directory.
+  //   3. noImplicitAny relaxed — Vercel's builder sometimes re-infers types
+  //      differently than local tsc, and we don't want CI to fail over noise.
+  //
+  // Vercel's @vercel/node builder reads this file automatically because it
+  // sits in the api/ directory.
+  // -------------------------------------------------------------------------
+
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+
+    // CRITICAL: no DOM. DOM's Response shadows express's Response.
+    "lib": ["ES2022"],
+
+    // Only Node types. Express types load via the explicit imports.
+    "types": ["node"],
+
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+    "forceConsistentCasingInFileNames": true,
+    "allowImportingTsExtensions": true,
+
+    "strict": true,
+    "noImplicitAny": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+
+    "noEmit": true,
+
+    "baseUrl": "..",
+    "paths": {
+      "@shared/*": ["./shared/*"]
+    }
+  },
+  "include": [
+    "./**/*.ts",
+    "../server/**/*.ts",
+    "../shared/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "../node_modules",
+    "../dist",
+    "../.vercel",
+    "../build"
+  ]
+}
