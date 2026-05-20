@@ -2,7 +2,8 @@
 <html lang="de">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, viewport-fit=cover" />
+    <meta name="format-detection" content="telephone=no" />
 
     <!-- =========================================================
          PRIMARY SEO
@@ -11,30 +12,43 @@
     <meta
       name="description"
       content="Strukturierte Pilotaufnahme für Mieterstrom und gemeinschaftliche Gebäudeversorgung nach §42b EnWG. Kostenloser Rendite-Rechner. Drei Pilotstufen für Gebäude, Quartiere und Portfolios." />
-    <meta name="keywords" content="Mieterstrom, Energie Teilen, §42b EnWG, gemeinschaftliche Gebäudeversorgung, Solarspitzengesetz, Quartiersversorgung, Eigenverbrauch, Photovoltaik Wirtschaftlichkeit" />
+    <meta
+      name="keywords"
+      content="Mieterstrom, Energie Teilen, §42b EnWG, gemeinschaftliche Gebäudeversorgung, Solarspitzengesetz, Quartiersversorgung, Eigenverbrauch, Photovoltaik Wirtschaftlichkeit, Mieterstrom Rechner, Mieterstrom Rendite" />
     <meta name="author" content="Energie Teilen" />
-    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta name="publisher" content="Energie Teilen" />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
+    <meta name="googlebot" content="index, follow, max-image-preview:large" />
     <meta name="theme-color" content="#1d493a" />
     <meta name="color-scheme" content="light" />
     <meta http-equiv="Content-Language" content="de" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
 
     <link rel="canonical" href="https://energie-teilen-site.vercel.app/" />
     <link rel="alternate" hreflang="de-DE" href="https://energie-teilen-site.vercel.app/" />
     <link rel="alternate" hreflang="x-default" href="https://energie-teilen-site.vercel.app/" />
 
     <!-- =========================================================
-         FAVICON SET (drop these files in client/public/)
+         IOS / ANDROID / WINDOWS APP META
+         ========================================================= -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Energie Teilen" />
+    <meta name="application-name" content="Energie Teilen" />
+    <meta name="msapplication-TileColor" content="#1d493a" />
+
+    <!-- =========================================================
+         FAVICON SET (drop files in client/public/)
          ========================================================= -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
     <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="mask-icon" href="/safari-pinned-tab.svg" color="#1d493a" />
     <link rel="manifest" href="/site.webmanifest" />
 
     <!-- =========================================================
-         OPENGRAPH — drives social previews on LinkedIn, WhatsApp,
-         Slack, Telegram, Twitter, etc. The /og-image.png file
-         (1200×630) should sit in client/public/.
+         OPENGRAPH — LinkedIn, WhatsApp, Slack, Telegram, Twitter
          ========================================================= -->
     <meta property="og:type" content="website" />
     <meta property="og:locale" content="de_DE" />
@@ -45,6 +59,8 @@
       content="Strukturierte Pilotaufnahme für Mieterstrom und gemeinschaftliche Gebäudeversorgung nach §42b EnWG. Kostenloser Rendite-Rechner. Drei Pilotstufen." />
     <meta property="og:url" content="https://energie-teilen-site.vercel.app/" />
     <meta property="og:image" content="https://energie-teilen-site.vercel.app/og-image.png" />
+    <meta property="og:image:secure_url" content="https://energie-teilen-site.vercel.app/og-image.png" />
+    <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="Energie Teilen — vernetzte urbane Energieinfrastruktur" />
@@ -56,133 +72,310 @@
     <meta name="twitter:title" content="Energie Teilen — Bezahlte Pilotaufnahme" />
     <meta name="twitter:description" content="Strukturierte Pilotaufnahme für §42b EnWG. Kostenloser Mieterstrom-Rechner. Drei Pilotstufen." />
     <meta name="twitter:image" content="https://energie-teilen-site.vercel.app/og-image.png" />
+    <meta name="twitter:image:alt" content="Energie Teilen — vernetzte urbane Energieinfrastruktur" />
 
     <!-- =========================================================
-         FONTS — Manrope (display) + IBM Plex Sans (body)
+         PERFORMANCE — preconnects, dns-prefetches, font preload
+         Stripe is prefetched because checkout is the conversion
+         path and users WILL go there.
          ========================================================= -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="dns-prefetch" href="https://fonts.googleapis.com" />
+    <link rel="dns-prefetch" href="https://js.stripe.com" />
+    <link rel="dns-prefetch" href="https://checkout.stripe.com" />
+
     <link
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap"
       rel="stylesheet" />
 
     <!-- =========================================================
-         STRUCTURED DATA (JSON-LD)
-         Helps Google show a richer result and feeds AI knowledge
-         panels. No prices included — pricing stays server-side.
+         CRITICAL INLINE CSS
+         Renders a branded loading mark before React hydrates.
+         When React renders into #root, the :empty selector stops
+         matching and the loading state disappears automatically.
+         No JS, no flash, no layout shift.
+         ========================================================= -->
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #fafaf7;
+        color: #1a1a1a;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        text-rendering: optimizeLegibility;
+      }
+      body {
+        font-family: "Manrope", "IBM Plex Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        min-height: 100vh;
+      }
+      #root:empty::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background:
+          radial-gradient(circle at top left, rgba(199, 146, 54, 0.06), transparent 30%),
+          radial-gradient(circle at bottom right, rgba(29, 73, 58, 0.08), transparent 38%),
+          #fafaf7;
+        z-index: 0;
+        pointer-events: none;
+      }
+      #root:empty::after {
+        content: "Energie Teilen";
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        font-family: "Manrope", system-ui, sans-serif;
+        font-weight: 700;
+        font-size: 1.25rem;
+        letter-spacing: -0.02em;
+        color: #1d493a;
+        opacity: 0.85;
+        z-index: 1;
+        pointer-events: none;
+      }
+    </style>
+
+    <!-- =========================================================
+         STRUCTURED DATA — single @graph node
+         Combines Organization, WebSite, LocalBusiness, Service,
+         FAQPage, HowTo. Cross-referenced via @id so Google
+         understands they describe the same entity. No prices.
          ========================================================= -->
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
-        "@type": "Organization",
-        "name": "Energie Teilen",
-        "url": "https://energie-teilen-site.vercel.app",
-        "logo": "https://energie-teilen-site.vercel.app/og-image.png",
-        "description": "Strukturierte Pilotaufnahme für lokale Energieprojekte: Mieterstrom, §42b EnWG, gemeinschaftliche Gebäudeversorgung.",
-        "areaServed": {
-          "@type": "Country",
-          "name": "Deutschland"
-        },
-        "knowsAbout": [
-          "Mieterstrom",
-          "§42b EnWG",
-          "Energy Sharing",
-          "Gemeinschaftliche Gebäudeversorgung",
-          "Photovoltaik Wirtschaftlichkeit",
-          "Quartiersversorgung",
-          "Solarspitzengesetz",
-          "Eigenverbrauchsoptimierung"
-        ],
-        "contactPoint": {
-          "@type": "ContactPoint",
-          "contactType": "customer service",
-          "email": "vincenzo.grimaldi.engineering@gmail.com",
-          "areaServed": "DE",
-          "availableLanguage": ["German"]
-        },
-        "address": {
-          "@type": "PostalAddress",
-          "addressLocality": "Frankfurt am Main",
-          "addressCountry": "DE"
-        }
-      }
-    </script>
-
-    <script type="application/ld+json">
-      {
-        "@context": "https://schema.org",
-        "@type": "WebSite",
-        "name": "Energie Teilen",
-        "url": "https://energie-teilen-site.vercel.app",
-        "inLanguage": "de-DE",
-        "publisher": { "@type": "Organization", "name": "Energie Teilen" }
-      }
-    </script>
-
-    <script type="application/ld+json">
-      {
-        "@context": "https://schema.org",
-        "@type": "Service",
-        "serviceType": "Strukturierte Pilotaufnahme für Energieprojekte",
-        "provider": { "@type": "Organization", "name": "Energie Teilen" },
-        "areaServed": { "@type": "Country", "name": "Deutschland" },
-        "audience": {
-          "@type": "BusinessAudience",
-          "audienceType": "Bestandshalter, Projektentwickler, Genossenschaften, Stadtwerke, kommunale Akteure"
-        },
-        "hasOfferCatalog": {
-          "@type": "OfferCatalog",
-          "name": "Pilotstufen",
-          "itemListElement": [
-            {
-              "@type": "Offer",
-              "itemOffered": {
-                "@type": "Service",
-                "name": "Pilot Eligibility Check",
-                "description": "Schnellste bezahlte Einordnung für Standorte, Gebäude und erste Betreiberkonstellationen."
-              }
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://energie-teilen-site.vercel.app/#organization",
+            "name": "Energie Teilen",
+            "url": "https://energie-teilen-site.vercel.app",
+            "logo": {
+              "@type": "ImageObject",
+              "url": "https://energie-teilen-site.vercel.app/og-image.png",
+              "width": 1200,
+              "height": 630
             },
-            {
-              "@type": "Offer",
-              "itemOffered": {
-                "@type": "Service",
-                "name": "Pilot Structuring Package",
-                "description": "Vertiefte Strukturierungsstufe für Projekte mit mehreren Rollen, Dokumenten und Entscheidungsanforderungen."
-              }
+            "description": "Strukturierte Pilotaufnahme für lokale Energieprojekte: Mieterstrom, §42b EnWG, gemeinschaftliche Gebäudeversorgung.",
+            "areaServed": { "@type": "Country", "name": "Deutschland" },
+            "knowsAbout": [
+              "Mieterstrom",
+              "§42b EnWG",
+              "Energy Sharing",
+              "Gemeinschaftliche Gebäudeversorgung",
+              "Photovoltaik Wirtschaftlichkeit",
+              "Quartiersversorgung",
+              "Solarspitzengesetz",
+              "Eigenverbrauchsoptimierung"
+            ],
+            "contactPoint": {
+              "@type": "ContactPoint",
+              "contactType": "customer service",
+              "email": "vincenzo.grimaldi.engineering@gmail.com",
+              "areaServed": "DE",
+              "availableLanguage": ["German"]
             },
-            {
-              "@type": "Offer",
-              "itemOffered": {
-                "@type": "Service",
-                "name": "Full Pilot Preparation Mandate",
-                "description": "Intensivste Stufe für Portfolios und Vorhaben mit höherer Verbindlichkeit und Umsetzungsnähe."
-              }
+            "address": {
+              "@type": "PostalAddress",
+              "addressLocality": "Frankfurt am Main",
+              "addressRegion": "Hessen",
+              "addressCountry": "DE"
             }
-          ]
-        }
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://energie-teilen-site.vercel.app/#website",
+            "url": "https://energie-teilen-site.vercel.app",
+            "name": "Energie Teilen",
+            "inLanguage": "de-DE",
+            "publisher": { "@id": "https://energie-teilen-site.vercel.app/#organization" }
+          },
+          {
+            "@type": "LocalBusiness",
+            "@id": "https://energie-teilen-site.vercel.app/#localbusiness",
+            "name": "Energie Teilen",
+            "image": "https://energie-teilen-site.vercel.app/og-image.png",
+            "url": "https://energie-teilen-site.vercel.app",
+            "address": {
+              "@type": "PostalAddress",
+              "addressLocality": "Frankfurt am Main",
+              "addressRegion": "Hessen",
+              "addressCountry": "DE"
+            },
+            "areaServed": [
+              { "@type": "City", "name": "Frankfurt am Main" },
+              { "@type": "AdministrativeArea", "name": "Hessen" },
+              { "@type": "Country", "name": "Deutschland" }
+            ],
+            "priceRange": "€€",
+            "parentOrganization": { "@id": "https://energie-teilen-site.vercel.app/#organization" }
+          },
+          {
+            "@type": "Service",
+            "@id": "https://energie-teilen-site.vercel.app/#pilot-service",
+            "serviceType": "Strukturierte Pilotaufnahme für Energieprojekte",
+            "provider": { "@id": "https://energie-teilen-site.vercel.app/#organization" },
+            "areaServed": { "@type": "Country", "name": "Deutschland" },
+            "audience": {
+              "@type": "BusinessAudience",
+              "audienceType": "Bestandshalter, Projektentwickler, Genossenschaften, Stadtwerke, kommunale Akteure"
+            },
+            "hasOfferCatalog": {
+              "@type": "OfferCatalog",
+              "name": "Pilotstufen",
+              "itemListElement": [
+                {
+                  "@type": "Offer",
+                  "itemOffered": {
+                    "@type": "Service",
+                    "name": "Pilot Eligibility Check",
+                    "description": "Schnellste bezahlte Einordnung für Standorte, Gebäude und erste Betreiberkonstellationen."
+                  }
+                },
+                {
+                  "@type": "Offer",
+                  "itemOffered": {
+                    "@type": "Service",
+                    "name": "Pilot Structuring Package",
+                    "description": "Vertiefte Strukturierungsstufe für Projekte mit mehreren Rollen, Dokumenten und Entscheidungsanforderungen."
+                  }
+                },
+                {
+                  "@type": "Offer",
+                  "itemOffered": {
+                    "@type": "Service",
+                    "name": "Full Pilot Preparation Mandate",
+                    "description": "Intensivste Stufe für Portfolios und Vorhaben mit höherer Verbindlichkeit und Umsetzungsnähe."
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "@type": "FAQPage",
+            "@id": "https://energie-teilen-site.vercel.app/#faq",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "Was ist Mieterstrom nach §42b EnWG?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Mieterstrom nach §42b EnWG ist die direkte Lieferung von Strom aus einer dezentralen Erzeugungsanlage – meist Photovoltaik – an Letztverbraucher im selben Gebäude oder Quartier, ohne Nutzung des öffentlichen Netzes für die Verteilung."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Was bedeutet gemeinschaftliche Gebäudeversorgung?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Die gemeinschaftliche Gebäudeversorgung nach §42b EnWG erlaubt mehreren Letztverbrauchern im selben Gebäude, Strom aus einer gemeinsamen Erzeugungsanlage zu beziehen, ohne dass jeder ein separates Stromlieferverhältnis benötigt. Sie ist seit dem Solarspitzengesetz (Februar 2025) deutlich vereinfacht."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Für wen ist die bezahlte Pilotaufnahme geeignet?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Für Bestandshalter, Projektentwickler, Genossenschaften, Stadtwerke und kommunale Akteure mit konkreten Standorten und Entscheidungsdruck. Drei Stufen decken Einzelobjekte, Quartiere und Portfolios ab."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Was passiert nach der Pilotaufnahme?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Nach erfolgreicher Zahlung folgen strukturierte Intake- und Dokumentenschritte. Die Pilotaufnahme strukturiert Ihre spezifische Konstellation für die operative Bearbeitung."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Wie genau ist der Mieterstrom-Rechner?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Der Rechner liefert eine erste Orientierung auf Basis branchenüblicher Annahmen für die DACH-Region. Drei Szenarien – konservativ, realistisch, optimistisch – zeigen die Bandbreite von NPV, IRR und Amortisation. Die finale Bewertung erfordert eine projektspezifische Strukturierung."
+                }
+              }
+            ]
+          },
+          {
+            "@type": "HowTo",
+            "@id": "https://energie-teilen-site.vercel.app/#howto-rechner",
+            "name": "Mieterstrom-Rendite berechnen",
+            "description": "In vier Schritten zu einer ersten Renditeeinordnung Ihres Mieterstrom-Vorhabens.",
+            "totalTime": "PT3M",
+            "step": [
+              {
+                "@type": "HowToStep",
+                "position": 1,
+                "name": "Anlagengröße eingeben",
+                "text": "Geben Sie die geplante PV-Leistung in kWp und die Anzahl der Wohneinheiten ein."
+              },
+              {
+                "@type": "HowToStep",
+                "position": 2,
+                "name": "Eigenverbrauchsquote anpassen",
+                "text": "Schätzen Sie den Eigenverbrauchsanteil. Werte zwischen 30 % und 60 % sind für deutsche Wohngebäude typisch."
+              },
+              {
+                "@type": "HowToStep",
+                "position": 3,
+                "name": "Szenarien vergleichen",
+                "text": "Drei Szenarien zeigen die finanzielle Bandbreite: NPV, IRR, Amortisationsdauer und kumulierter Cashflow über 20 Jahre."
+              },
+              {
+                "@type": "HowToStep",
+                "position": 4,
+                "name": "Bericht freischalten",
+                "text": "Hinterlegen Sie eine geschäftliche E-Mail-Adresse für einen 20-Jahres-Bericht inkl. Messkonzept-Skizze."
+              }
+            ]
+          }
+        ]
       }
     </script>
   </head>
+
   <body>
     <div id="root"></div>
+
     <noscript>
-      <p style="padding: 2rem; text-align: center; font-family: sans-serif">
-        Diese Anwendung benötigt JavaScript. Bitte aktivieren Sie JavaScript in Ihrem Browser.
-      </p>
+      <div style="padding: 4rem 2rem; text-align: center; font-family: 'Manrope', system-ui, sans-serif; color: #1d493a; max-width: 32rem; margin: 0 auto">
+        <h1 style="font-size: 1.5rem; margin: 0 0 1rem 0; letter-spacing: -0.02em">Energie Teilen</h1>
+        <p style="line-height: 1.6; color: #5a5a5a">
+          Diese Anwendung benötigt JavaScript. Bitte aktivieren Sie JavaScript in Ihrem Browser, um auf den Mieterstrom-Rechner und die Pilotaufnahme zuzugreifen.
+        </p>
+        <p style="margin-top: 1.5rem">
+          Bei Fragen erreichen Sie uns unter
+          <a href="mailto:vincenzo.grimaldi.engineering@gmail.com" style="color: #1d493a">vincenzo.grimaldi.engineering@gmail.com</a>.
+        </p>
+      </div>
     </noscript>
 
     <script type="module" src="/src/main.tsx"></script>
 
     <!-- =========================================================
-         ANALYTICS — Umami (preserved from previous config).
-         VITE_ANALYTICS_ENDPOINT + VITE_ANALYTICS_WEBSITE_ID are
-         replaced at build time. Leave the env vars empty in dev
-         and Vite will simply not load the script.
+         ANALYTICS — Umami, safe conditional injection.
+         Vite leaves the literal "%VITE_*%" placeholder when the env
+         var is missing. We detect that and skip loading, so no 404
+         hits your Umami endpoint and no broken script tag ends up
+         in the DOM. Set both env vars in Vercel and Umami loads.
          ========================================================= -->
-    <script
-      defer
-      src="%VITE_ANALYTICS_ENDPOINT%/umami"
-      data-website-id="%VITE_ANALYTICS_WEBSITE_ID%"></script>
+    <script>
+      (function () {
+        var endpoint = "%VITE_ANALYTICS_ENDPOINT%";
+        var websiteId = "%VITE_ANALYTICS_WEBSITE_ID%";
+        // Skip when Vite couldn't substitute the var (env var unset)
+        if (!endpoint || endpoint.charAt(0) === "%") return;
+        if (!websiteId || websiteId.charAt(0) === "%") return;
+        var s = document.createElement("script");
+        s.defer = true;
+        s.src = endpoint.replace(/\/$/, "") + "/umami";
+        s.setAttribute("data-website-id", websiteId);
+        document.head.appendChild(s);
+      })();
+    </script>
   </body>
 </html>
