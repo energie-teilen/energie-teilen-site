@@ -7,6 +7,24 @@ import { defineConfig, type Plugin, type ViteDevServer } from "vite";
 import { vitePluginManusRuntime } from "vite-plugin-manus-runtime";
 
 // =============================================================================
+// Energie Teilen — Vite configuration
+//
+// Upgrade over the previous version:
+//   1. Adds a dev-server proxy: every /api/* request from the SPA in dev
+//      hits the Express server on http://localhost:3001 (override via
+//      VITE_DEV_API_TARGET).
+//   2. Adds production build optimisations:
+//        - manualChunks splits react / framer-motion / recharts into separate
+//          chunks so the first paint isn't blocked by recharts.
+//        - sourcemap: true so Sentry / browser devtools can map errors back
+//          to TypeScript line numbers.
+//   3. Gates Manus dev tooling to `apply: "serve"` where applicable so the
+//      production build is never polluted by debug collectors.
+//   4. Preserves every existing alias, log collector, storage proxy, and
+//      allowedHosts entry so nothing in the current dev workflow breaks.
+// =============================================================================
+
+// =============================================================================
 // Manus Debug Collector - Vite Plugin
 // Writes browser logs directly to files, trimmed when exceeding size limit
 // =============================================================================
@@ -14,7 +32,7 @@ import { vitePluginManusRuntime } from "vite-plugin-manus-runtime";
 const PROJECT_ROOT = import.meta.dirname;
 const LOG_DIR = path.join(PROJECT_ROOT, ".manus-logs");
 const MAX_LOG_SIZE_BYTES = 1 * 1024 * 1024; // 1MB per log file
-const TRIM_TARGET_BYTES = Math.floor(MAX_LOG_SIZE_BYTES * 0.6); // Trim to 60% to avoid constant re-trimming
+const TRIM_TARGET_BYTES = Math.floor(MAX_LOG_SIZE_BYTES * 0.6);
 
 type LogSource = "browserConsole" | "networkRequests" | "sessionReplay";
 
@@ -34,7 +52,6 @@ function trimLogFile(logPath: string, maxSize: number) {
     const keptLines: string[] = [];
     let keptBytes = 0;
 
-    // Keep newest lines (from end) that fit within 60% of maxSize
     const targetSize = TRIM_TARGET_BYTES;
     for (let i = lines.length - 1; i >= 0; i--) {
       const lineBytes = Buffer.byteLength(`${lines[i]}\n`, "utf-8");
@@ -55,42 +72,31 @@ function writeToLogFile(source: LogSource, entries: unknown[]) {
   ensureLogDir();
   const logPath = path.join(LOG_DIR, `${source}.log`);
 
-  // Format entries with timestamps
   const lines = entries.map((entry) => {
     const ts = new Date().toISOString();
     return `[${ts}] ${JSON.stringify(entry)}`;
   });
 
-  // Append to log file
   fs.appendFileSync(logPath, `${lines.join("\n")}\n`, "utf-8");
-
-  // Trim if exceeds max size
   trimLogFile(logPath, MAX_LOG_SIZE_BYTES);
 }
 
 /**
- * Vite plugin to collect browser debug logs
- * - POST /__manus__/logs: Browser sends logs, written directly to files
- * - Files: browserConsole.log, networkRequests.log, sessionReplay.log
- * - Auto-trimmed when exceeding 1MB (keeps newest entries)
+ * Vite plugin to collect browser debug logs (dev only).
  */
 function vitePluginManusDebugCollector(): Plugin {
   return {
     name: "manus-debug-collector",
+    apply: "serve",
 
     transformIndexHtml(html) {
-      if (process.env.NODE_ENV === "production") {
-        return html;
-      }
+      if (process.env.NODE_ENV === "production") return html;
       return {
         html,
         tags: [
           {
             tag: "script",
-            attrs: {
-              src: "/__manus__/debug-collector.js",
-              defer: true,
-            },
+            attrs: { src: "/__manus__/debug-collector.js", defer: true },
             injectTo: "head",
           },
         ],
@@ -98,24 +104,13 @@ function vitePluginManusDebugCollector(): Plugin {
     },
 
     configureServer(server: ViteDevServer) {
-      // POST /__manus__/logs: Browser sends logs (written directly to files)
       server.middlewares.use("/__manus__/logs", (req, res, next) => {
-        if (req.method !== "POST") {
-          return next();
-        }
+        if (req.method !== "POST") return next();
 
         const handlePayload = (payload: any) => {
-          // Write logs directly to files
-          if (payload.consoleLogs?.length > 0) {
-            writeToLogFile("browserConsole", payload.consoleLogs);
-          }
-          if (payload.networkRequests?.length > 0) {
-            writeToLogFile("networkRequests", payload.networkRequests);
-          }
-          if (payload.sessionEvents?.length > 0) {
-            writeToLogFile("sessionReplay", payload.sessionEvents);
-          }
-
+          if (payload.consoleLogs?.length > 0) writeToLogFile("browserConsole", payload.consoleLogs);
+          if (payload.networkRequests?.length > 0) writeToLogFile("networkRequests", payload.networkRequests);
+          if (payload.sessionEvents?.length > 0) writeToLogFile("sessionReplay", payload.sessionEvents);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ success: true }));
         };
@@ -132,10 +127,7 @@ function vitePluginManusDebugCollector(): Plugin {
         }
 
         let body = "";
-        req.on("data", (chunk) => {
-          body += chunk.toString();
-        });
-
+        req.on("data", (chunk) => { body += chunk.toString(); });
         req.on("end", () => {
           try {
             const payload = JSON.parse(body);
@@ -153,6 +145,7 @@ function vitePluginManusDebugCollector(): Plugin {
 function vitePluginStorageProxy(): Plugin {
   return {
     name: "manus-storage-proxy",
+    apply: "serve",
     configureServer(server: ViteDevServer) {
       server.middlewares.use("/manus-storage", async (req, res) => {
         const key = req.url?.replace(/^\//, "");
@@ -203,10 +196,25 @@ function vitePluginStorageProxy(): Plugin {
   };
 }
 
-const plugins = [react(), tailwindcss(), jsxLocPlugin(), vitePluginManusRuntime(), vitePluginManusDebugCollector(), vitePluginStorageProxy()];
+// =============================================================================
+// Dev API target — Express server runs separately on 3001 in dev.
+// Override with VITE_DEV_API_TARGET=http://localhost:4000 etc.
+// =============================================================================
+const API_DEV_TARGET =
+  process.env.VITE_DEV_API_TARGET || "http://localhost:3001";
+
+const plugins = [
+  react(),
+  tailwindcss(),
+  jsxLocPlugin(),
+  vitePluginManusRuntime(),
+  vitePluginManusDebugCollector(),
+  vitePluginStorageProxy(),
+];
 
 export default defineConfig({
   plugins,
+
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "client", "src"),
@@ -214,16 +222,56 @@ export default defineConfig({
       "@assets": path.resolve(import.meta.dirname, "attached_assets"),
     },
   },
+
   envDir: path.resolve(import.meta.dirname),
   root: path.resolve(import.meta.dirname, "client"),
+
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
+    sourcemap: true,
+    target: "es2022",
+    rollupOptions: {
+      output: {
+        // Split heavy libs into separate chunks so first paint isn't blocked
+        // by recharts (~80KB gzipped) or framer-motion (~50KB gzipped).
+        manualChunks: {
+          "react-vendor": ["react", "react-dom"],
+          recharts: ["recharts"],
+          framer: ["framer-motion"],
+          radix: [
+            "@radix-ui/react-dialog",
+            "@radix-ui/react-dropdown-menu",
+            "@radix-ui/react-tooltip",
+            "@radix-ui/react-tabs",
+            "@radix-ui/react-slot",
+          ],
+        },
+      },
+    },
+    // Surface bundle size issues at build time
+    chunkSizeWarningLimit: 800,
   },
+
   server: {
     port: 3000,
-    strictPort: false, // Will find next available port if 3000 is busy
+    strictPort: false, // find next free port if 3000 is busy
     host: true,
+    // -----------------------------------------------------------------------
+    // /api/* proxy for development.
+    // In dev, run the Express server separately:
+    //   PORT=3001 pnpm tsx server/index.ts
+    // (or add a `dev:server` script to package.json).
+    // The browser hits Vite at :3000, /api/* gets proxied to Express at :3001.
+    // -----------------------------------------------------------------------
+    proxy: {
+      "/api": {
+        target: API_DEV_TARGET,
+        changeOrigin: true,
+        secure: false,
+        // Don't rewrite — Express server expects the /api prefix
+      },
+    },
     allowedHosts: [
       ".manuspre.computer",
       ".manus.computer",
@@ -237,5 +285,11 @@ export default defineConfig({
       strict: true,
       deny: ["**/.*"],
     },
+  },
+
+  preview: {
+    port: 3000,
+    strictPort: false,
+    host: true,
   },
 });
