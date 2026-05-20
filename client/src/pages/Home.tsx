@@ -34,7 +34,6 @@ import {
   YAxis,
 } from "recharts";
 import { toast } from "sonner";
-import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -43,7 +42,13 @@ import Header from "@/components/Header";
 import { CapacityBanner } from "@/components/pilot/CapacityBanner";
 import { PilotCheckoutForm } from "@/components/pilot/PilotCheckoutForm";
 import { PilotOfferCards } from "@/components/pilot/PilotOfferCards";
-import { getPilotOfferContent, type PilotOfferCode } from "@/lib/pilot-api";
+import {
+  getPilotOfferContent,
+  submitLead,
+  PilotApiError,
+  type PilotOfferCode,
+  type MieterstromInputs,
+} from "@/lib/pilot-api";
 
 /**
  * Energy Civic Ledger design reminder for this file:
@@ -207,22 +212,10 @@ function SectionIntro({
 
 // ============================================================================
 // NEW: MIETERSTROM CALCULATOR — pure functions + UI
+// MieterstromInputs is imported from @/lib/pilot-api (single source of truth in
+// shared/schema.ts). MieterstromYear and MieterstromResult are local result
+// shapes; the engine output never crosses the network.
 // ============================================================================
-
-type MieterstromInputs = {
-  kwp: number;
-  anzahlWohneinheiten: number;
-  eigenverbrauchsquote: number; // 0..1
-  strompreisMieterCtPerKwh: number;
-  mieterstromZuschlagCtPerKwh: number;
-  einspeiseverguetungCtPerKwh: number;
-  investitionEurPerKwp: number;
-  betriebskostenEurPerKwpJahr: number;
-  laufzeitJahre: number;
-  diskontierungssatz: number;
-  degradationPctPerJahr: number;
-  spezifischerErtragKwhPerKwp: number;
-};
 
 type MieterstromYear = {
   jahr: number;
@@ -366,49 +359,9 @@ function eurFmt(n: number): string {
   return new Intl.NumberFormat("de-DE", { maximumFractionDigits: 0 }).format(n);
 }
 
-// --- Lead capture ---
-const LeadSchema = z.object({
-  email: z.string().email("Bitte eine gültige E-Mail eingeben."),
-  consent: z.literal(true, {
-    errorMap: () => ({ message: "Bitte Einwilligung bestätigen." }),
-  }),
-});
-
-async function submitLead(payload: {
-  email: string;
-  inputs: MieterstromInputs;
-  result: MieterstromResult;
-}): Promise<{ ok: true } | { ok: false; error: string }> {
-  try {
-    const res = await fetch("/api/lead", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email: payload.email,
-        source: "rechner-mieterstrom-rendite",
-        payload: { inputs: payload.inputs, kpis: payload.result.kpis },
-      }),
-    });
-    if (res.ok) return { ok: true };
-  } catch {
-    // network or server not yet ready — fall through to local fallback
-  }
-  // Graceful fallback: persist locally so no lead is lost during the migration phase.
-  try {
-    const key = "et:leads:pending";
-    const existing = JSON.parse(localStorage.getItem(key) || "[]");
-    existing.push({
-      email: payload.email,
-      ts: new Date().toISOString(),
-      inputs: payload.inputs,
-      kpis: payload.result.kpis,
-    });
-    localStorage.setItem(key, JSON.stringify(existing));
-    return { ok: true };
-  } catch {
-    return { ok: false, error: "Speichern fehlgeschlagen. Bitte erneut versuchen." };
-  }
-}
+// --- Lead capture is delegated to `submitLead` from @/lib/pilot-api.
+// It validates against the shared schema, POSTs to /api/lead, and falls back
+// to localStorage if the network/server is unreachable. No lead is ever lost.
 
 // --- Components for the calculator section ---
 
@@ -794,21 +747,39 @@ function LeadCaptureBand({
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    const parsed = LeadSchema.safeParse({ email, consent });
-    if (!parsed.success) {
-      toast.error(parsed.error.issues[0]?.message ?? "Eingabe ungültig.");
+    // Minimal client guard — the imported submitLead re-validates with the
+    // shared schema, and the server validates again. Defence in depth.
+    if (!email.trim() || !consent) {
+      toast.error("Bitte E-Mail eingeben und Einwilligung bestätigen.");
       return;
     }
     setSubmitting(true);
-    const res = await submitLead({ email, inputs, result });
-    setSubmitting(false);
-    if (res.ok) {
+    try {
+      const res = await submitLead({
+        email: email.trim(),
+        source: "rechner-mieterstrom-rendite",
+        consent: true,
+        payload: { inputs, kpis: result.kpis },
+      });
       setDone(true);
-      toast.success(
-        "Vielen Dank. Der Bericht wird vorbereitet und an Ihre Adresse gesendet.",
-      );
-    } else {
-      toast.error(res.error);
+      if (res.persisted === "server") {
+        toast.success(
+          "Vielen Dank. Der Bericht wird vorbereitet und an Ihre Adresse gesendet.",
+        );
+      } else {
+        // Local fallback — server unavailable, but the lead is queued
+        toast.success(
+          "Anfrage gespeichert. Wir melden uns, sobald die Verarbeitung möglich ist.",
+        );
+      }
+    } catch (err) {
+      const msg =
+        err instanceof PilotApiError
+          ? err.message
+          : "Speichern fehlgeschlagen. Bitte erneut versuchen.";
+      toast.error(msg);
+    } finally {
+      setSubmitting(false);
     }
   }
 
