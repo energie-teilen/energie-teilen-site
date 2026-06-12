@@ -129,10 +129,10 @@ export default function Footer() {
               <address className="not-italic space-y-2 text-sm text-foreground">
                 <p>Frankfurt am Main, Deutschland</p>
                 <a
-                  href="mailto:vincenzo.grimaldi.engineering@gmail.com"
+                  href="mailto:kontakt@energie-teilen.de"
                   className="block text-muted-foreground transition-opacity hover:opacity-70"
                 >
-                  vincenzo.grimaldi.engineering@gmail.com
+                  kontakt@energie-teilen.de
                 </a>
               </address>
             </div>

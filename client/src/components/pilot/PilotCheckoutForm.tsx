@@ -19,6 +19,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
 import {
   AlertCircle,
   ArrowRight,
@@ -101,7 +102,7 @@ export function PilotCheckoutForm({ selectedOfferCode }: PilotCheckoutFormProps)
     formState: { errors, isSubmitting },
     setValue,
     watch,
-  } = useForm<CreatePilotCheckoutInput>({
+  } = useForm<z.input<typeof CreatePilotCheckoutInputSchema>, any, CreatePilotCheckoutInput>({
     resolver: zodResolver(CreatePilotCheckoutInputSchema),
     mode: "onBlur",
     defaultValues: { ...defaultValues, offerCode: selectedOfferCode },

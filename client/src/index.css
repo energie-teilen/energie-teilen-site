@@ -484,6 +484,7 @@
   }
 
   .diagram-frame {
+    position: relative;
     overflow: hidden;
     border-radius: 1.6rem;
     aspect-ratio: 1.45;
@@ -491,6 +492,7 @@
   }
 
   .stakeholder-image-frame {
+    position: relative;
     overflow: hidden;
     border-radius: 1.7rem;
     aspect-ratio: 1.05;
@@ -609,4 +611,46 @@
       padding-top: 1.35rem;
     }
   }
+}
+
+/* ── HERO ROTATOR — cinematic crossfade + Ken Burns inside .hero-frame ── */
+.hero-frame { position: relative; overflow: hidden; }
+.hero-rotator { position: absolute; inset: 0; }
+.hero-rotator__layer { position: absolute; inset: 0; }
+.hero-rotator__img {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; will-change: transform, opacity;
+}
+.hero-rotator__img--kenburns { animation: hero-kenburns 14s ease-in-out infinite alternate; transform-origin: center; }
+@keyframes hero-kenburns {
+  from { transform: scale(1.02) translate3d(0, 0, 0); }
+  to   { transform: scale(1.12) translate3d(-1.5%, -1.5%, 0); }
+}
+.hero-rotator__scrim {
+  position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(180deg, rgba(15,28,23,0.18) 0%, rgba(15,28,23,0.05) 45%, rgba(15,28,23,0.45) 100%);
+}
+.hero-rotator__dots { position: absolute; bottom: 0.9rem; left: 50%; transform: translateX(-50%); display: flex; gap: 0.4rem; }
+.hero-rotator__dot { width: 6px; height: 6px; border-radius: 9999px; background: rgba(255,255,255,0.45); transition: background 0.4s, width 0.4s; }
+.hero-rotator__dot--on { width: 18px; background: rgba(255,255,255,0.95); }
+@media (prefers-reduced-motion: reduce) {
+  .hero-rotator__img--kenburns { animation: none; }
+}
+
+/* ── STRUKTUR — rotating photo pool behind the explanatory diagram ── */
+.diagram-frame .hero-rotator { position: absolute; inset: 0; z-index: 0; }
+.diagram-frame__overlay {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  width: 100%;
+  object-fit: contain;
+  /* let the moving photo read through, keep the diagram legible */
+  opacity: 0.92;
+  mix-blend-mode: normal;
+  filter: drop-shadow(0 6px 18px rgba(15, 28, 23, 0.25));
+}
+.diagram-frame__veil {
+  position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background: linear-gradient(180deg, rgba(250,250,247,0.55) 0%, rgba(250,250,247,0.35) 50%, rgba(250,250,247,0.6) 100%);
 }

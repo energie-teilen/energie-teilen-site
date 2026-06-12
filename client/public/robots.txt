@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://energie-teilen-site.vercel.app/sitemap.xml

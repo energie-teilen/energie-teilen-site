@@ -38,7 +38,16 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import Footer from "@/components/Footer";
+import {
+  calculateMieterstrom,
+  DEFAULTS,
+  type MieterstromResult,
+} from "@/lib/mieterstrom";
 import Header from "@/components/Header";
+import { HeroRotator } from "@/components/HeroRotator";
+import { HERO_IMAGES } from "@/lib/hero-images";
+import { SectionRotator } from "@/components/SectionRotator";
+import { ADRESSATEN_IMAGES } from "@/lib/adressaten-images";
 import { CapacityBanner } from "@/components/pilot/CapacityBanner";
 import { PilotCheckoutForm } from "@/components/pilot/PilotCheckoutForm";
 import { PilotOfferCards } from "@/components/pilot/PilotOfferCards";
@@ -217,143 +226,7 @@ function SectionIntro({
 // shapes; the engine output never crosses the network.
 // ============================================================================
 
-type MieterstromYear = {
-  jahr: number;
-  ertragKwh: number;
-  eigenverbrauchKwh: number;
-  einspeisungKwh: number;
-  cashflowEur: number;
-  kumulierterCashflowEur: number;
-};
-
-type MieterstromResult = {
-  inputs: MieterstromInputs;
-  jahre: MieterstromYear[];
-  kpis: {
-    investitionEur: number;
-    amortisationsdauerJahre: number | null;
-    npvEur: number;
-    irrPct: number | null;
-    erlosKumEur: number;
-    co2EinsparungT: number;
-  };
-};
-
-const DEFAULTS: MieterstromInputs = {
-  kwp: 30,
-  anzahlWohneinheiten: 12,
-  eigenverbrauchsquote: 0.45,
-  strompreisMieterCtPerKwh: 32,
-  mieterstromZuschlagCtPerKwh: 2.5,
-  einspeiseverguetungCtPerKwh: 7.86,
-  investitionEurPerKwp: 1400,
-  betriebskostenEurPerKwpJahr: 20,
-  laufzeitJahre: 20,
-  diskontierungssatz: 0.04,
-  degradationPctPerJahr: 0.005,
-  spezifischerErtragKwhPerKwp: 950,
-};
-
-const CO2_FACTOR_DE_T_PER_MWH = 0.38;
 const STORAGE_KEY = "et:rechner:v1";
-
-// Pure function — same math regardless of how many scenarios you run in parallel.
-function calculateMieterstrom(inputs: MieterstromInputs): MieterstromResult {
-  const investitionEur = inputs.investitionEurPerKwp * inputs.kwp;
-  const jahre: MieterstromYear[] = [];
-  let kumulierterCashflow = -investitionEur;
-  let npv = -investitionEur;
-
-  for (let j = 1; j <= inputs.laufzeitJahre; j++) {
-    const degradation = (1 - inputs.degradationPctPerJahr) ** (j - 1);
-    const ertragKwh =
-      inputs.kwp * inputs.spezifischerErtragKwhPerKwp * degradation;
-    const eigenverbrauchKwh = ertragKwh * inputs.eigenverbrauchsquote;
-    const einspeisungKwh = ertragKwh - eigenverbrauchKwh;
-
-    const erloesMieterstrom =
-      (eigenverbrauchKwh * inputs.strompreisMieterCtPerKwh) / 100;
-    const erloesZuschlag =
-      (eigenverbrauchKwh * inputs.mieterstromZuschlagCtPerKwh) / 100;
-    const erloesEinspeisung =
-      (einspeisungKwh * inputs.einspeiseverguetungCtPerKwh) / 100;
-    const betriebskosten =
-      inputs.betriebskostenEurPerKwpJahr * inputs.kwp * (1 + 0.02) ** (j - 1);
-
-    const cashflow =
-      erloesMieterstrom + erloesZuschlag + erloesEinspeisung - betriebskosten;
-    kumulierterCashflow += cashflow;
-    npv += cashflow / (1 + inputs.diskontierungssatz) ** j;
-
-    jahre.push({
-      jahr: j,
-      ertragKwh: round2(ertragKwh),
-      eigenverbrauchKwh: round2(eigenverbrauchKwh),
-      einspeisungKwh: round2(einspeisungKwh),
-      cashflowEur: round2(cashflow),
-      kumulierterCashflowEur: round2(kumulierterCashflow),
-    });
-  }
-
-  const amortisation = findAmortisation(jahre);
-  const irr = calculateIRR(
-    jahre.map((j) => j.cashflowEur),
-    investitionEur,
-  );
-  const erlosKumEur = jahre.reduce((s, j) => s + j.cashflowEur, 0) + investitionEur;
-  const totalEigenverbrauchKwh = jahre.reduce((s, j) => s + j.eigenverbrauchKwh, 0);
-
-  return {
-    inputs,
-    jahre,
-    kpis: {
-      investitionEur: round2(investitionEur),
-      amortisationsdauerJahre: amortisation,
-      npvEur: round2(npv),
-      irrPct: irr === null ? null : round2(irr * 100),
-      erlosKumEur: round2(erlosKumEur),
-      co2EinsparungT: round2((totalEigenverbrauchKwh / 1000) * CO2_FACTOR_DE_T_PER_MWH),
-    },
-  };
-}
-
-function findAmortisation(jahre: MieterstromYear[]): number | null {
-  for (let i = 0; i < jahre.length; i++) {
-    const j = jahre[i];
-    if (j.kumulierterCashflowEur >= 0) {
-      const prev = i > 0 ? jahre[i - 1] : null;
-      if (!prev || prev.kumulierterCashflowEur >= 0) return j.jahr;
-      const fraction =
-        Math.abs(prev.kumulierterCashflowEur) /
-        (Math.abs(prev.kumulierterCashflowEur) + j.kumulierterCashflowEur);
-      return round2(prev.jahr + fraction);
-    }
-  }
-  return null;
-}
-
-// Newton-Raphson IRR
-function calculateIRR(cashflows: number[], investition: number): number | null {
-  let r = 0.1;
-  for (let iter = 0; iter < 80; iter++) {
-    let npv = -investition;
-    let derivative = 0;
-    for (let i = 0; i < cashflows.length; i++) {
-      const t = i + 1;
-      const cf = cashflows[i];
-      npv += cf / (1 + r) ** t;
-      derivative -= (t * cf) / (1 + r) ** (t + 1);
-    }
-    if (Math.abs(npv) < 0.01) return r;
-    if (derivative === 0) return null;
-    const next = r - npv / derivative;
-    if (!Number.isFinite(next) || next < -0.99) return null;
-    r = next;
-  }
-  return null;
-}
-
-const round2 = (n: number) => Math.round(n * 100) / 100;
 
 function eurFmt(n: number): string {
   return new Intl.NumberFormat("de-DE", { maximumFractionDigits: 0 }).format(n);
@@ -759,6 +632,7 @@ function LeadCaptureBand({
         email: email.trim(),
         source: "rechner-mieterstrom-rendite",
         consent: true,
+        website: "",
         payload: { inputs, kpis: result.kpis },
       });
       setDone(true);
@@ -1008,11 +882,7 @@ export default function Home() {
               >
                 <div className="absolute -left-10 top-10 hidden h-36 w-36 rounded-full bg-primary/10 blur-3xl lg:block" />
                 <div className="hero-frame">
-                  <img
-                    src="https://d2xsxph8kpxj0f.cloudfront.net/107050196/atEQdzJHpzRWntNYZpob6k/energie-teilen-hero-network-VjgL6vHPc99hnkyTaNsfW5.webp"
-                    alt="Vernetzte urbane Energieinfrastruktur für Energie Teilen"
-                    className="h-full w-full object-cover"
-                  />
+                  <HeroRotator images={HERO_IMAGES} intervalMs={6000} />
                 </div>
                 <div className="hero-note lg:absolute lg:-bottom-6 lg:-left-12">
                   <span className="hero-note-label">Frankfurt · Deutschland</span>
@@ -1175,11 +1045,7 @@ export default function Home() {
               <Card className="ledger-panel overflow-hidden border-border/70 bg-card">
                 <CardContent className="p-3 sm:p-4">
                   <div className="diagram-frame">
-                    <img
-                      src="https://d2xsxph8kpxj0f.cloudfront.net/107050196/atEQdzJHpzRWntNYZpob6k/energie-teilen-grid-flow-diagram-7cH6CiSWqS8KtmD5Zq3tzP.webp"
-                      alt="Schematische Darstellung lokaler Energieflüsse im Kontext von Energie Teilen"
-                      className="h-full w-full object-cover"
-                    />
+                    <SectionRotator images={HERO_IMAGES} intervalMs={7000} />
                   </div>
                 </CardContent>
               </Card>
@@ -1203,11 +1069,7 @@ export default function Home() {
               <Card className="ledger-panel overflow-hidden border-border/70 bg-card">
                 <CardContent className="space-y-4 p-3 sm:p-4">
                   <div className="stakeholder-image-frame">
-                    <img
-                      src="https://d2xsxph8kpxj0f.cloudfront.net/107050196/atEQdzJHpzRWntNYZpob6k/energie-teilen-community-professional-T6CWZMwwB4P7GG8bYaBgmN.webp"
-                      alt="Professionelle Zusammenarbeit im Kontext von Energie Teilen"
-                      className="h-full w-full object-cover"
-                    />
+                    <SectionRotator images={ADRESSATEN_IMAGES} intervalMs={6500} />
                   </div>
                 </CardContent>
               </Card>

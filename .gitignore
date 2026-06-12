@@ -2,3 +2,11 @@ node_modules
 dist
 .DS_Store
 .manus-logs
+
+client/public/__manus__
+
+# never commit secrets or local backups
+.env
+.env.*
+!.env.example
+.fix-backup-*/
