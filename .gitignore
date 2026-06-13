@@ -10,3 +10,4 @@ client/public/__manus__
 .env.*
 !.env.example
 .fix-backup-*/
+.vercel

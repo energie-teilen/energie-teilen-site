@@ -1,3 +1,6 @@
+import { downloadReportPdf, type ScenarioBundle } from "@/lib/report-pdf";
+import { SensitivityTornado } from "@/components/SensitivityTornado";
+import { BreakEvenPanel } from "@/components/BreakEvenPanel";
 import {
   useDeferredValue,
   useEffect,
@@ -593,10 +596,17 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
           <ScenarioCard scenario="realistisch" result={baseScenario} isPrimary />
           <ScenarioCard scenario="optimistisch" result={optimisticScenario} />
         </div>
+        <div className="grid gap-5 lg:grid-cols-2 lg:items-start">
+          <div className="ledger-panel rounded-2xl border border-border/70 bg-card p-5 sm:p-6">
+            <SensitivityTornado inputs={inputs} />
+          </div>
+          <BreakEvenPanel inputs={inputs} />
+        </div>
 
         <LeadCaptureBand
           inputs={inputs}
           result={baseScenario}
+          scenarios={{ konservativ: conservativeScenario, realistisch: baseScenario, optimistisch: optimisticScenario }}
           onProceedToPilot={onProceedToPilot}
         />
       </div>
@@ -607,10 +617,12 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
 function LeadCaptureBand({
   inputs,
   result,
+  scenarios,
   onProceedToPilot,
 }: {
   inputs: MieterstromInputs;
   result: MieterstromResult;
+  scenarios: ScenarioBundle;
   onProceedToPilot: () => void;
 }) {
   const [email, setEmail] = useState("");
@@ -636,9 +648,10 @@ function LeadCaptureBand({
         payload: { inputs, kpis: result.kpis },
       });
       setDone(true);
+      try { downloadReportPdf(inputs, scenarios); } catch (err) { console.error("PDF generation failed", err); }
       if (res.persisted === "server") {
         toast.success(
-          "Vielen Dank. Der Bericht wird vorbereitet und an Ihre Adresse gesendet.",
+          "Vielen Dank. Ihr 20-Jahres-Bericht wurde als PDF heruntergeladen.",
         );
       } else {
         // Local fallback — server unavailable, but the lead is queued
@@ -678,7 +691,7 @@ function LeadCaptureBand({
           <div className="flex flex-col justify-between gap-4 rounded-2xl border border-primary/15 bg-primary/6 p-5">
             <div className="space-y-2">
               <p className="font-display text-base font-semibold text-foreground">
-                Bericht wird vorbereitet.
+                Bericht wurde heruntergeladen.
               </p>
               <p className="text-sm leading-7 text-muted-foreground">
                 Wenn Sie diese Konstellation jetzt als bezahlten Pilot strukturieren
