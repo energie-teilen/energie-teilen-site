@@ -6,25 +6,25 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 
 /**
- * Energy Civic Ledger — application shell.
+ * Energie Teilen — application shell.
  *
- * Upgrades over the previous version:
- *   - Home and NotFound are code-split via React.lazy so initial JS stays small.
- *   - A polished Suspense fallback matches the institutional aesthetic.
- *   - Smooth-scrolls to a hash anchor on first mount (e.g. /#rechner from social shares).
- *   - Restores window scroll position on plain navigation; respects hash anchors.
- *   - Track-page-view hook runs on every route change for Plausible / future analytics.
- *   - Stays on Vite + React 19 + wouter — no stack change.
+ *   - Home + NotFound code-split via React.lazy.
+ *   - Legal pages (Impressum / Datenschutz / AGB) are now ROUTED. They are
+ *     legally mandatory in Germany and were previously 404ing from the footer.
+ *   - Smooth-scrolls to a hash anchor on first mount (e.g. /#rechner).
+ *   - Restores scroll on plain navigation; respects hash anchors.
+ *   - Page-view hook runs on every route change (Plausible).
  */
 
 const Home = lazy(() => import("./pages/Home"));
 const NotFound = lazy(() => import("@/pages/NotFound"));
+const Impressum = lazy(() => import("@/pages/legal/Impressum"));
+const Datenschutz = lazy(() => import("@/pages/legal/Datenschutz"));
+const Agb = lazy(() => import("@/pages/legal/Agb"));
 
 function useScrollManagement() {
   const [location] = useLocation();
-
   useEffect(() => {
-    // Wait one frame so the new route has actually rendered
     const raf = requestAnimationFrame(() => {
       const hash = window.location.hash.replace("#", "");
       if (hash) {
@@ -42,10 +42,7 @@ function useScrollManagement() {
 
 function useAnalyticsPageView() {
   const [location] = useLocation();
-
   useEffect(() => {
-    // Plausible (loaded later via a <script> tag) listens on this event
-    // window.plausible?.("pageview")
     const fn = (window as unknown as { plausible?: (e: string) => void }).plausible;
     if (typeof fn === "function") fn("pageview");
   }, [location]);
@@ -61,8 +58,11 @@ function RouteShell() {
       {/* Deep-link routes for social share — render Home with the right hash */}
       <Route path={"/rechner"} component={Home} />
       <Route path={"/pilot"} component={Home} />
+      {/* Legally required pages */}
+      <Route path={"/impressum"} component={Impressum} />
+      <Route path={"/datenschutz"} component={Datenschutz} />
+      <Route path={"/agb"} component={Agb} />
       <Route path={"/404"} component={NotFound} />
-      {/* Final fallback */}
       <Route component={NotFound} />
     </Switch>
   );
@@ -83,7 +83,7 @@ function SuspenseFallback() {
 
 /**
  * Hash deep-link normaliser: /rechner → / + scroll to #rechner.
- * Runs once on first mount; non-blocking.
+ * Legal routes are explicitly excluded so they keep their own URL.
  */
 function useDeepLinkRewrite() {
   const [location, setLocation] = useLocation();
@@ -94,11 +94,9 @@ function useDeepLinkRewrite() {
     };
     const target = rewrites[location];
     if (target) {
-      // Update URL without reload; keep history clean
       window.history.replaceState({}, "", "/" + target);
       setLocation("/");
     }
-    // Only run on first mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 }
@@ -111,13 +109,6 @@ function AppInner() {
     </Suspense>
   );
 }
-
-// NOTE: About Theme
-// - First choose a default theme according to your design style (dark or light bg),
-//   than change color palette in index.css to keep consistent foreground/background
-//   color across components.
-// - If you want to make theme switchable, pass `switchable` ThemeProvider and use
-//   `useTheme` hook.
 
 function App() {
   return (

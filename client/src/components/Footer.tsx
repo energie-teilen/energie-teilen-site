@@ -104,20 +104,28 @@ export default function Footer() {
               Werkzeuge
             </p>
             <div className="flex flex-col gap-2">
-              {tools.map((item) => (
-                <a
-                  key={item.label}
-                  href={item.href}
-                  className="text-sm text-foreground transition-opacity hover:opacity-70"
-                >
-                  {item.label}
-                  {item.note ? (
-                    <span className="ml-2 text-xs text-muted-foreground">
-                      · {item.note}
-                    </span>
-                  ) : null}
-                </a>
-              ))}
+              {tools.map((item) =>
+                item.note ? (
+                  // Not built yet — render as a non-clickable roadmap label so it
+                  // never pretends to be a working tool (was a misleading link).
+                  <span
+                    key={item.label}
+                    className="text-sm text-muted-foreground"
+                    aria-disabled="true"
+                  >
+                    {item.label}
+                    <span className="ml-2 text-xs opacity-70">· {item.note}</span>
+                  </span>
+                ) : (
+                  <a
+                    key={item.label}
+                    href={item.href}
+                    className="text-sm text-foreground transition-opacity hover:opacity-70"
+                  >
+                    {item.label}
+                  </a>
+                ),
+              )}
             </div>
           </div>
 

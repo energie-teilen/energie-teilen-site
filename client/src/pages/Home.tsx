@@ -1,4 +1,4 @@
-import { downloadReportPdf, type ScenarioBundle } from "@/lib/report-pdf";
+import { type ScenarioBundle } from "@/lib/report-pdf";
 import { SensitivityTornado } from "@/components/SensitivityTornado";
 import { BreakEvenPanel } from "@/components/BreakEvenPanel";
 import {
@@ -648,7 +648,10 @@ function LeadCaptureBand({
         payload: { inputs, kpis: result.kpis },
       });
       setDone(true);
-      try { downloadReportPdf(inputs, scenarios); } catch (err) { console.error("PDF generation failed", err); }
+      try {
+        const { downloadReportPdf } = await import("@/lib/report-pdf");
+        downloadReportPdf(inputs, scenarios);
+      } catch (err) { console.error("PDF generation failed", err); }
       if (res.persisted === "server") {
         toast.success(
           "Vielen Dank. Ihr 20-Jahres-Bericht wurde als PDF heruntergeladen.",

@@ -2,7 +2,7 @@
 <html lang="de">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="format-detection" content="telephone=no" />
 
     <!-- =========================================================
@@ -336,6 +336,9 @@
         ]
       }
     </script>
+    <!-- Analytics: one coherent provider. Register the domain at plausible.io.
+         External script => compatible with the strict CSP (no inline scripts). -->
+    <script defer data-domain="energie-teilen.de" src="https://plausible.io/js/script.js"></script>
   </head>
 
   <body>
@@ -355,27 +358,5 @@
     </noscript>
 
     <script type="module" src="/src/main.tsx"></script>
-
-    <!-- =========================================================
-         ANALYTICS — Umami, safe conditional injection.
-         Vite leaves the literal "%VITE_*%" placeholder when the env
-         var is missing. We detect that and skip loading, so no 404
-         hits your Umami endpoint and no broken script tag ends up
-         in the DOM. Set both env vars in Vercel and Umami loads.
-         ========================================================= -->
-    <script>
-      (function () {
-        var endpoint = "%VITE_ANALYTICS_ENDPOINT%";
-        var websiteId = "%VITE_ANALYTICS_WEBSITE_ID%";
-        // Skip when Vite couldn't substitute the var (env var unset)
-        if (!endpoint || endpoint.charAt(0) === "%") return;
-        if (!websiteId || websiteId.charAt(0) === "%") return;
-        var s = document.createElement("script");
-        s.defer = true;
-        s.src = endpoint.replace(/\/$/, "") + "/umami";
-        s.setAttribute("data-website-id", websiteId);
-        document.head.appendChild(s);
-      })();
-    </script>
   </body>
 </html>
