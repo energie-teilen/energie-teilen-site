@@ -124,10 +124,14 @@ export default function Header() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setMenuOpen(false);
     };
+    // Prevent the page behind the open mobile panel from scrolling.
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     window.addEventListener("resize", close);
     window.addEventListener("hashchange", close);
     window.addEventListener("keydown", onKey);
     return () => {
+      document.body.style.overflow = prevOverflow;
       window.removeEventListener("resize", close);
       window.removeEventListener("hashchange", close);
       window.removeEventListener("keydown", onKey);
