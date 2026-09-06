@@ -1,0 +1,101 @@
+From 644ffcf5c5a10f899879886e35d49c2b05eff5b6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 6 Sep 2026 20:49:25 +0000
+Subject: [PATCH] ci: gate every push and PR on the same checks the operator
+ runs locally
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Six patches of guarantees are only guarantees if something enforces them. This
+runs typecheck (both tsconfig projects), the full deterministic suite, a
+production build, and a smoke test against that build — the exact sequence that
+caught every defect in this series.
+
+What it protects specifically:
+- the economics engine stays unit-tested; the wedge cannot silently drift
+- legal-models.test.ts scans client/index.html, so an SEO or marketing edit
+  cannot slip an unverified statutory citation back into production
+- analytics.test.ts blocks any personal data reaching an event property
+- the paid funnel's endpoints answer correctly before anything ships
+
+Job id is plain `verify` so it can be named directly as a required status check
+in branch protection.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CZaJuZgaAVS1HZZc7QZDsD
+---
+ .github/workflows/ci.yml | 61 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 61 insertions(+)
+ create mode 100644 .github/workflows/ci.yml
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+new file mode 100644
+index 0000000..517ad44
+--- /dev/null
++++ b/.github/workflows/ci.yml
+@@ -0,0 +1,61 @@
++name: CI
++
++# Every push to main and every pull request runs the same gate the operator
++# runs locally: typecheck both projects, the full deterministic test suite, a
++# production build, and a smoke test against that build.
++#
++# This is what stops the guarantees in this repo from being aspirational:
++#   - the economics engine stays unit-tested (the wedge)
++#   - no unverified statutory citation can reach a user (legal-models.test.ts
++#     scans client/index.html too, so an SEO edit cannot slip one back in)
++#   - no personal data can leak into an analytics property
++#   - the paid funnel's endpoints answer correctly before anything ships
++
++on:
++  push:
++    branches: [main]
++  pull_request:
++
++concurrency:
++  group: ci-${{ github.ref }}
++  cancel-in-progress: true
++
++jobs:
++  verify:
++    runs-on: ubuntu-latest
++    timeout-minutes: 15
++
++    steps:
++      - uses: actions/checkout@v4
++
++      # Version comes from the "packageManager" field in package.json.
++      - uses: pnpm/action-setup@v4
++
++      - uses: actions/setup-node@v4
++        with:
++          node-version: 22
++          cache: pnpm
++
++      - name: Install
++        run: pnpm install --frozen-lockfile
++
++      - name: Typecheck (client + server projects)
++        run: pnpm check
++
++      - name: Test
++        run: pnpm test
++
++      - name: Build
++        run: pnpm build
++
++      - name: Smoke test the production bundle
++        run: |
++          set -euo pipefail
++          NODE_ENV=production PORT=3000 node dist/index.js &
++          SRV=$!
++          for _ in $(seq 1 30); do
++            curl -sf http://localhost:3000/api/health >/dev/null && break
++            sleep 1
++          done
++          bash smoke-test.sh http://localhost:3000
++          kill "$SRV"
+-- 
+2.43.0
+
