@@ -58,6 +58,12 @@ import {
 } from "../shared/ledger.js";
 import { getKv } from "./kv.js";
 import {
+  Deadline,
+  STEP_TIMEOUT_MS,
+  isSignatureVerificationError,
+  withDeadlineOr,
+} from "../shared/deadline.js";
+import {
   getOrder,
   ledgerAvailable,
   listOrders,
@@ -349,21 +355,48 @@ export async function buildApp(): Promise<Express> {
         return res.status(400).send("missing signature");
       }
 
+      // Hoisted so the catch block can release the claim it may have taken.
+      let eventId: string | undefined;
+
       try {
         const event = stripe.webhooks.constructEvent(req.body, signature, webhookSecret);
+        eventId = event.id;
 
-        // Idempotency: process each Stripe event id at most once (when KV present).
+        // Idempotency, done as a CLAIM rather than a tombstone.
+        //
+        // The previous version wrote a 7-day "handled" marker BEFORE doing any
+        // work. If the invocation then timed out or threw, Stripe's retry hit
+        // that marker and was skipped, so a confirmation could be lost with no
+        // trace anywhere. That is a silent failure on a paid order.
+        //
+        // Now: claim for 5 minutes (long enough that concurrent deliveries of
+        // the same event cannot both run), extend to 7 days only after the work
+        // succeeds, and RELEASE the claim on failure so the retry can redo it.
         const kv = await getKv();
+        const claimKey = `stripe:evt:${event.id}`;
+        const CLAIM_TTL_S = 300;
+        const DONE_TTL_S = 60 * 60 * 24 * 7;
+
         if (kv) {
-          const fresh = await kv.set(`stripe:evt:${event.id}`, "1", {
-            nx: true,
-            ex: 60 * 60 * 24 * 7,
-          });
-          if (fresh === null) {
-            // Already handled — acknowledge without re-running side effects.
+          const claimed = await kv.set(claimKey, "claimed", { nx: true, ex: CLAIM_TTL_S });
+          if (claimed === null) {
+            // Already claimed or already done: acknowledge, run nothing.
             return res.status(200).send("ok");
           }
         }
+
+        const completeClaim = async () => {
+          if (!kv) return;
+          try {
+            await kv.set(claimKey, "done", { ex: DONE_TTL_S });
+          } catch (err) {
+            console.error(`[stripe] could not finalise claim ${claimKey}`, err);
+          }
+        };
+
+        // Bound the work so the platform never kills us mid-flight. See
+        // shared/deadline.ts for why "respond first, work after" is wrong here.
+        const deadline = new Deadline();
 
         if (
           event.type === "checkout.session.completed" ||
@@ -451,34 +484,57 @@ export async function buildApp(): Promise<Express> {
             <hr/>
             <p><small>Stripe Session ID: ${escapeHtml(session.id)}</small></p>
           `;
-          await sendNotificationEmail(
-            `[Energie Teilen] 💰 Bezahlt: ${order.reference} · ${md.offerLabel || md.offerCode}`,
-            html,
-          );
-
-          // ── FULFILLMENT: confirm to the CUSTOMER.
-          // Guarded per session (not per event) so `completed` followed by
+          // The two mails are independent. Sending them sequentially spent two
+          // full round-trips of the budget for no reason.
+          //
+          // Per-session guard (not per-event) so `completed` followed by
           // `async_payment_succeeded` on a SEPA debit cannot mail twice.
-          if (order.status === "paid" && order.email) {
-            let alreadySent = false;
-            const kvForMail = await getKv();
-            if (kvForMail) {
-              const fresh = await kvForMail.set(`order:confirmed:${session.id}`, "1", {
-                nx: true,
-                ex: 60 * 60 * 24 * 30,
-              });
-              alreadySent = fresh === null;
-            }
-            if (!alreadySent) {
-              const replyTo =
-                process.env.ET_CUSTOMER_REPLY_TO ||
-                process.env.LEAD_NOTIFICATION_EMAIL ||
-                "kontakt@energie-teilen.de";
-              const sent = await sendEmail(
-                order.email,
-                `Energie Teilen · Bestätigung ${order.reference} — ${order.offerLabel}`,
-                buildCustomerConfirmationHtml(order, replyTo),
-              );
+          let alreadySent = false;
+          const shouldConfirm = order.status === "paid" && Boolean(order.email);
+          if (shouldConfirm && kv) {
+            const fresh = await withDeadlineOr(
+              kv.set(`order:confirmed:${session.id}`, "1", { nx: true, ex: 60 * 60 * 24 * 30 }),
+              STEP_TIMEOUT_MS,
+              "confirm-guard",
+              null,
+            );
+            alreadySent = fresh === null;
+          }
+
+          const replyTo =
+            process.env.ET_CUSTOMER_REPLY_TO ||
+            process.env.LEAD_NOTIFICATION_EMAIL ||
+            "kontakt@energie-teilen.de";
+
+          const [, customerSent] = await Promise.all([
+            // Operator notification is nice-to-have: a slow inbox must never
+            // cost a customer their confirmation.
+            withDeadlineOr(
+              sendNotificationEmail(
+                `[Energie Teilen] 💰 Bezahlt: ${order.reference} · ${md.offerLabel || md.offerCode}`,
+                html,
+              ),
+              STEP_TIMEOUT_MS,
+              "operator-mail",
+              undefined,
+            ),
+            shouldConfirm && !alreadySent
+              ? withDeadlineOr(
+                  sendEmail(
+                    order.email as string,
+                    `Energie Teilen · Bestätigung ${order.reference} — ${order.offerLabel}`,
+                    buildCustomerConfirmationHtml(order, replyTo),
+                  ),
+                  STEP_TIMEOUT_MS,
+                  "customer-mail",
+                  false,
+                )
+              : Promise.resolve(alreadySent),
+          ]);
+
+          if (shouldConfirm) {
+            {
+              const sent = customerSent;
               if (!sent) {
                 // The customer paid and we could not confirm. That is an
                 // operational incident, not a log line to lose.
@@ -489,12 +545,15 @@ export async function buildApp(): Promise<Express> {
                   `[Energie Teilen] ⚠️ Bestätigung NICHT zugestellt: ${order.reference}`,
                   `<p>Zahlung eingegangen, aber die Kundenbestätigung konnte nicht versendet werden.</p>
                    <p><strong>Referenz:</strong> ${escapeHtml(order.reference)}</p>
-                   <p><strong>E-Mail:</strong> ${escapeHtml(order.email)}</p>
+                   <p><strong>E-Mail:</strong> ${escapeHtml(order.email ?? "—")}</p>
                    <p>Bitte manuell bestätigen.</p>`,
                 );
-              } else {
-                // Confirmation delivered — the ball is now in the customer's
+              } else if (!alreadySent) {
+                // Confirmation delivered: the ball is now in the customer's
                 // court, and the ledger says so without anyone updating it.
+                // If we never get here the order stays at "paid", whose derived
+                // next action already reads "Bestaetigung versenden". A timeout
+                // becomes visible work rather than a silent gap.
                 const moved = advanceStage(current, "awaiting_data", "stripe:webhook", {
                   note: "Bestätigung und Datenanforderung versendet",
                 });
@@ -502,12 +561,35 @@ export async function buildApp(): Promise<Express> {
               }
             }
           }
+
+          if (deadline.expired()) {
+            console.warn(
+              `[stripe] fulfillment for ${order.reference} used the full budget (${deadline.elapsed()}ms)`,
+            );
+          }
         }
 
+        await completeClaim();
         return res.status(200).send("ok");
       } catch (err) {
-        console.error("[stripe] webhook verification failed", err);
-        return res.status(400).send("invalid signature");
+        // Signature failures are the caller's problem: 400, and no claim was
+        // taken because we never got past constructEvent.
+        if (isSignatureVerificationError(err)) {
+          console.error("[stripe] webhook signature verification failed", err);
+          return res.status(400).send("invalid signature");
+        }
+
+        // Anything else means the work did NOT complete. Release the claim so
+        // Stripe's retry runs it again, and return 500 so Stripe knows to retry
+        // rather than recording a success we did not achieve.
+        console.error("[stripe] webhook processing failed", err);
+        try {
+          const kvForRelease = await getKv();
+          if (kvForRelease) await kvForRelease.del(`stripe:evt:${eventId ?? "unknown"}`);
+        } catch (releaseErr) {
+          console.error("[stripe] claim release failed", releaseErr);
+        }
+        return res.status(500).send("processing failed");
       }
     },
   );
