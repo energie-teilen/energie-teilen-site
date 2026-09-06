@@ -16,7 +16,16 @@ chk "GET /apple-touch"    "$(code "$B/apple-touch-icon.png")" 200
 chk "GET /sitemap.xml"    "$(code "$B/sitemap.xml")"       200
 chk "GET /api/health"     "$(code "$B/api/health")"        200
 chk "GET /api/nope (404)" "$(code "$B/api/nope")"          404
+# Fulfillment leg: the order lookup must reject malformed references before it
+# ever talks to Stripe. 400 here is config-independent, so it is a real assertion.
+chk "GET /api/pilot-order/<bad> (400)" "$(code "$B/api/pilot-order/not-a-session")" 400
+chk "GET /api/pilot-order/ (404)"      "$(code "$B/api/pilot-order/")"              404
 echo "  health: $(curl -s "$B/api/health")"
+# Confirmation transport must be configured, or paying customers hear nothing.
+case "$(curl -s "$B/api/health")" in
+  *'"customerConfirmation":true'*) echo "  PASS customer confirmation configured"; pass=$((pass+1));;
+  *) echo "  WARN customer confirmation NOT configured (set RESEND_API_KEY + ET_CUSTOMER_REPLY_TO)";;
+esac
 LEAD=$(curl -s -X POST "$B/api/lead" -H 'content-type: application/json' -d '{"email":"smoke@example.com","source":"newsletter","consent":true,"website":""}')
 echo "  POST /api/lead → $LEAD"
 case "$LEAD" in *'"ok":true'*) echo "  PASS lead"; pass=$((pass+1));; *) echo "  FAIL lead"; fail=$((fail+1));; esac

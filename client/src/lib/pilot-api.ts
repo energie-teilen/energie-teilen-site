@@ -23,6 +23,7 @@ import {
   CreatePilotCheckoutResultSchema,
   LeadCaptureInputSchema,
   LeadCaptureResultSchema,
+  PilotOrderSchema,
   type ApiError,
   type CreatePilotCheckoutInput,
   type CreatePilotCheckoutResult,
@@ -32,6 +33,8 @@ import {
   type MieterstromInputs,
   type MieterstromKpis,
   type PilotOfferCode,
+  type PilotOrder,
+  type PilotOrderStatus,
   type ProjectType,
 } from "../../../shared/schema";
 
@@ -47,6 +50,8 @@ export type {
   MieterstromInputs,
   MieterstromKpis,
   PilotOfferCode,
+  PilotOrder,
+  PilotOrderStatus,
   ProjectType,
 };
 
@@ -168,6 +173,51 @@ export async function createPilotCheckout(
     });
   }
   return parsedOutput.data;
+}
+
+// ============================================================================
+// PUBLIC API — order confirmation (post-payment)
+// ============================================================================
+
+/**
+ * Resolve the Stripe session id that Stripe appends to success_url into a
+ * confirmation the customer can actually read.
+ *
+ * Called by <PilotConfirmation/> when the browser lands on
+ * /?paid=1&session_id=cs_... — the redirect target that, before this, was
+ * silently ignored.
+ *
+ * Throws PilotApiError on 4xx/5xx so the caller can distinguish "unknown
+ * reference" from "we are temporarily unable to check".
+ */
+export async function getPilotOrder(
+  sessionId: string,
+  options?: { signal?: AbortSignal },
+): Promise<PilotOrder> {
+  if (!/^cs_[A-Za-z0-9_]{10,255}$/.test(sessionId)) {
+    throw new PilotApiError("Ungültige Bestellreferenz.", {
+      status: 400,
+      code: "validation_error",
+    });
+  }
+
+  const response = await fetch(`/api/pilot-order/${encodeURIComponent(sessionId)}`, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+    signal: options?.signal,
+  });
+
+  const payload = await parseJsonSafely(response);
+  if (!response.ok) throwTypedError(response, payload);
+
+  const parsed = PilotOrderSchema.safeParse(payload);
+  if (!parsed.success) {
+    throw new PilotApiError("Bestellstatus konnte nicht gelesen werden.", {
+      status: 500,
+      code: "invalid_response",
+    });
+  }
+  return parsed.data;
 }
 
 // ============================================================================
