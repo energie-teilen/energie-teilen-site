@@ -5,6 +5,8 @@
  *   POST /api/pilot-checkout    → creates Stripe Checkout session
  *   POST /api/lead              → captures Rechner / free-tool leads
  *   GET  /api/pilot-order/:id   → post-payment order confirmation (safe projection)
+ *   GET  /api/admin/orders      → order ledger worklist (Bearer ADMIN_API_TOKEN)
+ *   POST /api/admin/orders/:ref/stage → advance a ledger stage (Bearer)
  *   POST /api/stripe/webhook    → verified Stripe webhook (raw body, idempotent)
  *                                 sends operator notification AND customer confirmation
  *   GET  /api/health            → config presence check (no secrets exposed)
@@ -31,7 +33,7 @@ import type {
 import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID, timingSafeEqual } from "crypto";
 import {
   CreatePilotCheckoutInputSchema,
   LeadCaptureInputSchema,
@@ -43,6 +45,24 @@ import {
   type PilotOrder,
 } from "../shared/schema.js";
 import { toPilotOrder } from "../shared/pilot-order.js";
+import {
+  advanceStage,
+  nextAction,
+  offerCodeOrNull,
+  sortForWorklist,
+  summarise,
+  LedgerStageSchema,
+  STAGE_LABEL_DE,
+  type LedgerStage,
+  type OrderLedgerRecord,
+} from "../shared/ledger.js";
+import { getKv } from "./kv.js";
+import {
+  getOrder,
+  ledgerAvailable,
+  listOrders,
+  putOrder,
+} from "./ledger-store.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -84,30 +104,8 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
-// ----------------------------------------------------------------------------
-// Optional durable KV (Upstash Redis). Lazily imported; degrades gracefully.
-// ----------------------------------------------------------------------------
-let kvPromise: Promise<any | null> | null = null;
-async function getKv(): Promise<any | null> {
-  if (!kvPromise) {
-    kvPromise = (async () => {
-      const url = process.env.UPSTASH_REDIS_REST_URL;
-      const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-      if (!url || !token) return null;
-      try {
-        const mod = await import("@upstash/redis");
-        return new mod.Redis({ url, token });
-      } catch (err) {
-        console.warn(
-          "[kv] UPSTASH env set but @upstash/redis not installed. Run: pnpm add @upstash/redis",
-          err,
-        );
-        return null;
-      }
-    })();
-  }
-  return kvPromise;
-}
+// Durable KV lives in server/kv.ts so the ledger can use it without importing
+// the Express app.
 
 /**
  * Rate limiter. Distributed fixed-window via Upstash when available
@@ -287,6 +285,44 @@ async function persistRecord(kind: string, id: string, data: unknown): Promise<v
   }
 }
 
+// ----------------------------------------------------------------------------
+// ADMIN AUTH
+// ----------------------------------------------------------------------------
+
+/**
+ * Constant-time bearer check against ADMIN_API_TOKEN.
+ *
+ * A plain `===` on a secret leaks its prefix through timing. Cheap to do
+ * right, so it is done right. Absent or short token = admin surface disabled
+ * entirely rather than open.
+ */
+function isAuthorisedAdmin(req: Request): boolean {
+  const expected = process.env.ADMIN_API_TOKEN;
+  if (!expected || expected.length < 16) return false;
+
+  const header = req.headers.authorization;
+  const presented =
+    typeof header === "string" && header.startsWith("Bearer ")
+      ? header.slice(7)
+      : "";
+  if (presented.length === 0) return false;
+
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) {
+    // Still burn a comparison so length is not a fast-path oracle.
+    timingSafeEqual(b, b);
+    return false;
+  }
+  return timingSafeEqual(a, b);
+}
+
+/** Short, non-reversible tag for the audit trail — never the token itself. */
+function adminActorTag(): string {
+  const token = process.env.ADMIN_API_TOKEN || "";
+  return `admin:${createHash("sha256").update(token).digest("hex").slice(0, 8)}`;
+}
+
 // ============================================================================
 // APP BUILDER
 // ============================================================================
@@ -351,20 +387,52 @@ export async function buildApp(): Promise<Express> {
             responseWindow: process.env.ET_PILOT_RESPONSE_WINDOW ?? null,
           });
 
-          await persistRecord("order", session.id, {
+          // ── LEDGER: the order becomes an enumerable record, not just an email.
+          const nowIso = new Date().toISOString();
+          const existing = await getOrder(order.reference);
+          const ledgerRecord: OrderLedgerRecord = existing ?? {
+            kind: "order",
             reference: order.reference,
-            status: order.status,
-            amount_total: session.amount_total,
-            currency: session.currency,
-            email: order.email,
-            offerCode: md.offerCode,
+            sessionId: session.id,
+            stage: "intake",
+            offerCode: offerCodeOrNull(md.offerCode),
             offerLabel: order.offerLabel,
-            metadata: md,
-          });
+            amountTotalCents: order.amountTotalCents,
+            currency: order.currency,
+            email: order.email,
+            name: md.name || null,
+            organization: order.organization,
+            location: order.location,
+            projectType: order.projectType,
+            owner: null,
+            source: "stripe:checkout",
+            eligibilityVerdict: md.eligibilityVerdict || null,
+            createdAt: order.createdAt ?? nowIso,
+            updatedAt: nowIso,
+            durable: false,
+            history: [{ at: nowIso, stage: "intake", by: "stripe:webhook" }],
+          };
+
+          let current = ledgerRecord;
+          if (order.status === "paid" && current.stage === "intake") {
+            const moved = advanceStage(current, "paid", "stripe:webhook", { now: new Date() });
+            if (moved.ok) current = moved.record;
+          }
+          const written = await putOrder(current);
+          current = written.record;
 
           // ── Operator notification (unchanged content, now reference-stamped)
           const html = `
             <h2>✅ Neue bezahlte Pilotaufnahme</h2>
+            ${
+              written.durable
+                ? ""
+                : `<p style="background:#fdf7ec;border:1px solid #c79236;padding:10px">
+                     <strong>⚠️ Nicht dauerhaft gespeichert.</strong> Dieser Auftrag existiert nur
+                     in Stripe und in dieser E-Mail. Setzen Sie UPSTASH_REDIS_REST_URL und
+                     UPSTASH_REDIS_REST_TOKEN, damit Aufträge im Ledger auffindbar bleiben.
+                   </p>`
+            }
             <p><strong>Referenz:</strong> ${escapeHtml(order.reference)}</p>
             <p><strong>Status:</strong> ${escapeHtml(order.status)}</p>
             <p><strong>Paket:</strong> ${escapeHtml(md.offerLabel || md.offerCode || "—")}</p>
@@ -424,6 +492,13 @@ export async function buildApp(): Promise<Express> {
                    <p><strong>E-Mail:</strong> ${escapeHtml(order.email)}</p>
                    <p>Bitte manuell bestätigen.</p>`,
                 );
+              } else {
+                // Confirmation delivered — the ball is now in the customer's
+                // court, and the ledger says so without anyone updating it.
+                const moved = advanceStage(current, "awaiting_data", "stripe:webhook", {
+                  note: "Bestätigung und Datenanforderung versendet",
+                });
+                if (moved.ok) await putOrder(moved.record);
               }
             }
           }
@@ -489,6 +564,7 @@ export async function buildApp(): Promise<Express> {
           privacyPolicyAccepted: String(input.legalAcceptances.privacyPolicyAccepted),
           pilotTermsAccepted: String(input.legalAcceptances.pilotTermsAccepted),
           marketingConsent: String(input.legalAcceptances.marketingConsent ?? false),
+          eligibilityVerdict: input.eligibilityVerdict ?? "",
         },
       });
 
@@ -597,6 +673,127 @@ export async function buildApp(): Promise<Express> {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // ADMIN — the order ledger
+  //
+  // Your inbox was the database. These two endpoints make paid work
+  // enumerable: what is open, what is overdue, what it is worth, and what to
+  // do next. Deliberately JSON + curl rather than a console — the brief says
+  // minimal CRM, and a UI is not the bottleneck.
+  //
+  // Disabled entirely unless ADMIN_API_TOKEN is set to >= 16 chars.
+  // ---------------------------------------------------------------------------
+  const adminLimiter = createRateLimiter({ windowMs: 60_000, max: 60, bucket: "admin" });
+
+  const requireAdmin: RequestHandler = (req, res, next) => {
+    if (!isAuthorisedAdmin(req)) {
+      // Same response whether the token is wrong or unset: no probing.
+      apiError(res, 401, "not_found", "Nicht autorisiert.");
+      return;
+    }
+    next();
+  };
+
+  app.get("/api/admin/orders", adminLimiter, requireAdmin, async (req: Request, res: Response) => {
+    if (!ledgerAvailable()) {
+      return apiError(
+        res,
+        503,
+        "config_missing",
+        "Kein dauerhafter Speicher konfiguriert — Aufträge können nicht aufgelistet werden. UPSTASH_REDIS_REST_URL und UPSTASH_REDIS_REST_TOKEN setzen.",
+      );
+    }
+
+    const limit = Number.parseInt(String(req.query.limit ?? "100"), 10);
+    const stageFilter = LedgerStageSchema.safeParse(req.query.stage);
+    const now = new Date();
+
+    let records = await listOrders(Number.isFinite(limit) ? limit : 100);
+    if (stageFilter.success) records = records.filter((r) => r.stage === stageFilter.data);
+
+    const worklist = sortForWorklist(records, now).map((r) => {
+      const na = nextAction(r, now);
+      return {
+        reference: r.reference,
+        stage: r.stage,
+        stageLabel: STAGE_LABEL_DE[r.stage],
+        offerLabel: r.offerLabel,
+        valueCents: r.amountTotalCents,
+        currency: r.currency,
+        email: r.email,
+        organization: r.organization,
+        location: r.location,
+        owner: r.owner,
+        source: r.source,
+        eligibilityVerdict: r.eligibilityVerdict,
+        nextAction: na.action,
+        overdue: na.overdue,
+        ageDays: na.ageDays,
+        durable: r.durable,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+      };
+    });
+
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json({
+      ok: true,
+      summary: summarise(records, now),
+      orders: worklist,
+    });
+  });
+
+  app.post(
+    "/api/admin/orders/:reference/stage",
+    adminLimiter,
+    requireAdmin,
+    async (req: Request, res: Response) => {
+      const reference = String(req.params.reference || "");
+      if (!/^ET-[0-9A-Z]{8}$/.test(reference)) {
+        return apiError(res, 400, "validation_error", "Ungültige Referenz.");
+      }
+
+      const parsedStage = LedgerStageSchema.safeParse(req.body?.stage);
+      if (!parsedStage.success) {
+        return apiError(res, 400, "validation_error", "Unbekannte Stufe.", parsedStage.error.issues);
+      }
+
+      const record = await getOrder(reference);
+      if (!record) {
+        return apiError(res, 404, "not_found", "Auftrag nicht gefunden.");
+      }
+
+      const note = typeof req.body?.note === "string" ? req.body.note.slice(0, 500) : undefined;
+      const moved = advanceStage(record, parsedStage.data as LedgerStage, adminActorTag(), { note });
+      if (!moved.ok) {
+        // A rejected transition is information, not a failure: say what IS allowed.
+        return apiError(
+          res,
+          409,
+          "validation_error",
+          `Übergang von "${record.stage}" nach "${parsedStage.data}" ist nicht zulässig.`,
+          { allowed: moved.allowed },
+        );
+      }
+
+      const owner = typeof req.body?.owner === "string" ? req.body.owner.slice(0, 120) : undefined;
+      const finalRecord = owner === undefined ? moved.record : { ...moved.record, owner };
+      const written = await putOrder(finalRecord);
+      if (!written.durable) {
+        return apiError(res, 503, "config_missing", "Änderung konnte nicht dauerhaft gespeichert werden.");
+      }
+
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(200).json({
+        ok: true,
+        reference,
+        stage: written.record.stage,
+        stageLabel: STAGE_LABEL_DE[written.record.stage],
+        nextAction: nextAction(written.record).action,
+      });
+    },
+  );
+
   // GET /api/health
   app.get("/api/health", async (_req: Request, res: Response) => {
     res.json({
@@ -617,6 +814,11 @@ export async function buildApp(): Promise<Express> {
             (process.env.ET_CUSTOMER_REPLY_TO || process.env.LEAD_NOTIFICATION_EMAIL),
         ),
         responseWindow: process.env.ET_PILOT_RESPONSE_WINDOW || "(unset)",
+        // The launch-blocking one: without this, paid orders are not enumerable.
+        durableOrders: ledgerAvailable(),
+        adminApi: Boolean(
+          process.env.ADMIN_API_TOKEN && process.env.ADMIN_API_TOKEN.length >= 16,
+        ),
         appUrl: process.env.APP_URL || "(unset)",
       },
     });

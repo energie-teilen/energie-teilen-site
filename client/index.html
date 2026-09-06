@@ -350,9 +350,13 @@
         ]
       }
     </script>
-    <!-- Analytics: one coherent provider. Register the domain at plausible.io.
-         External script => compatible with the strict CSP (no inline scripts). -->
-    <script defer data-domain="energie-teilen.de" src="https://plausible.io/js/script.js"></script>
+    <!-- Analytics is loaded from client/src/lib/analytics.ts, not here.
+         The previous static tag hard-coded data-domain="energie-teilen.de"
+         while the site serves from another host, so Plausible discarded every
+         hit, and it defined no window.plausible queue stub, so any custom
+         event fired before the deferred script loaded was lost. Both are fixed
+         in the loader, which resolves the domain from VITE_PLAUSIBLE_DOMAIN
+         and installs the stub first. -->
   </head>
 
   <body>

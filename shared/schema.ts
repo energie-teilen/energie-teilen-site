@@ -91,6 +91,14 @@ export const CreatePilotCheckoutInputSchema = z.object({
     .max(200, "Standortangabe ist zu lang."),
   legalAcceptances: LegalAcceptancesSchema,
   /**
+   * The eligibility verdict the visitor last saw, if they used the calculator.
+   * Carried into Stripe metadata and onto the ledger record so conversion can
+   * be measured per verdict rather than guessed.
+   */
+  eligibilityVerdict: z
+    .enum(["ELIGIBLE", "LIKELY_ELIGIBLE", "REQUIRES_REVIEW", "NOT_ELIGIBLE", "INSUFFICIENT_DATA"])
+    .optional(),
+  /**
    * Honeypot — must be empty. Bots fill it; humans don't.
    * Server rejects any submission with a non-empty value.
    */

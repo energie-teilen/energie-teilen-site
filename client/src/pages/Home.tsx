@@ -1,10 +1,15 @@
 import { type ScenarioBundle } from "@/lib/report-pdf";
 import { SensitivityTornado } from "@/components/SensitivityTornado";
 import { BreakEvenPanel } from "@/components/BreakEvenPanel";
+import { EligibilityPanel } from "@/components/EligibilityPanel";
+import type { QualificationFacts } from "../../../shared/eligibility";
+import { evaluateEligibility } from "../../../shared/eligibility";
+import { track } from "@/lib/analytics";
 import {
   useDeferredValue,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useTransition,
   memo,
@@ -461,8 +466,30 @@ function SliderField({
   );
 }
 
+const FACTS_STORAGE_KEY = "et:rechner:facts:v1";
+
 function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void }) {
   const [inputs, setInputs] = useState<MieterstromInputs>(DEFAULTS);
+  // Qualification answers live here, not in the panel, so the downloaded PDF
+  // carries exactly the same verdict the visitor just read on screen.
+  const [facts, setFacts] = useState<QualificationFacts>({});
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(FACTS_STORAGE_KEY);
+      if (raw) setFacts(JSON.parse(raw) as QualificationFacts);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(FACTS_STORAGE_KEY, JSON.stringify(facts));
+    } catch {
+      // ignore
+    }
+  }, [facts]);
   const [, startTransition] = useTransition();
 
   // Hydrate from localStorage on first mount (returning visitor sees last scenario)
@@ -477,6 +504,15 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
       // ignore
     }
   }, []);
+
+  // Fire once, on the first genuine interaction — a page load is not usage.
+  const usageTracked = useRef(false);
+  useEffect(() => {
+    if (usageTracked.current) return;
+    if (JSON.stringify(inputs) === JSON.stringify(DEFAULTS)) return;
+    usageTracked.current = true;
+    track("calculator_used");
+  }, [inputs]);
 
   // Persist inputs (cheap; runs on every committed change)
   useEffect(() => {
@@ -605,9 +641,23 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
           <BreakEvenPanel inputs={inputs} />
         </div>
 
+        {/*
+          The qualification gate. Sits between the numbers and the lead capture
+          so nobody reaches the PDF without seeing whether the constellation
+          clears the bar and what the actual next step is.
+        */}
+        <EligibilityPanel
+          inputs={inputs}
+          result={baseScenario}
+          facts={facts}
+          onFactsChange={setFacts}
+          onProceedToPilot={onProceedToPilot}
+        />
+
         <LeadCaptureBand
           inputs={inputs}
           result={baseScenario}
+          facts={facts}
           scenarios={{ konservativ: conservativeScenario, realistisch: baseScenario, optimistisch: optimisticScenario }}
           onProceedToPilot={onProceedToPilot}
         />
@@ -619,11 +669,13 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
 function LeadCaptureBand({
   inputs,
   result,
+  facts,
   scenarios,
   onProceedToPilot,
 }: {
   inputs: MieterstromInputs;
   result: MieterstromResult;
+  facts: QualificationFacts;
   scenarios: ScenarioBundle;
   onProceedToPilot: () => void;
 }) {
@@ -650,9 +702,16 @@ function LeadCaptureBand({
         payload: { inputs, kpis: result.kpis },
       });
       setDone(true);
+      // Tag the lead with the verdict it converted from — that is the whole
+      // point of instrumenting the gate.
+      track("lead_captured", {
+        source: "rechner-mieterstrom-rendite",
+        verdict: evaluateEligibility({ economics: inputs, kpis: result.kpis, facts }).verdict,
+        persisted: res.persisted,
+      });
       try {
         const { downloadReportPdf } = await import("@/lib/report-pdf");
-        downloadReportPdf(inputs, scenarios);
+        downloadReportPdf(inputs, scenarios, { facts });
       } catch (err) { console.error("PDF generation failed", err); }
       if (res.persisted === "server") {
         toast.success(

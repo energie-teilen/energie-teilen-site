@@ -34,6 +34,8 @@ import {
   PilotApiError,
   type PilotOfferCode,
 } from "@/lib/pilot-api";
+import { track } from "@/lib/analytics";
+import { lastEligibilityVerdict } from "@/lib/rechner-context";
 import {
   CreatePilotCheckoutInputSchema,
   PROJECT_TYPE_LABELS,
@@ -114,6 +116,15 @@ export function PilotCheckoutForm({ selectedOfferCode }: PilotCheckoutFormProps)
   }, [selectedOfferCode, setValue]);
 
   async function onSubmit(values: CreatePilotCheckoutInput) {
+    // Tag the order with the verdict the visitor converted from. Without this
+    // join you can count verdicts and count payments but never connect them.
+    const verdict = lastEligibilityVerdict();
+    if (verdict) values = { ...values, eligibilityVerdict: verdict };
+    track("checkout_started", {
+      offer: values.offerCode,
+      project: values.projectType,
+      verdict: verdict ?? "UNKNOWN",
+    });
     setSubmitError("");
     try {
       const result = await createPilotCheckout(values);

@@ -2,6 +2,14 @@ import { describe, it, expect } from "vitest";
 import { buildReportDoc, type ScenarioBundle } from "./report-pdf";
 import { calculateMieterstrom, DEFAULTS } from "./mieterstrom";
 import { ASSUMPTION_SET, MODEL_VERSION } from "../../../shared/assumptions";
+import type { QualificationFacts } from "../../../shared/eligibility";
+
+const QUALIFIED: QualificationFacts = {
+  ownerConstellation: "single_owner",
+  buildingScope: "single_building",
+  generationStatus: "planned",
+  metering: "ready",
+};
 
 const base = calculateMieterstrom(DEFAULTS);
 const scenarios: ScenarioBundle = { konservativ: base, realistisch: base, optimistisch: base };
@@ -13,8 +21,12 @@ const FIXED_NOW = new Date("2026-09-06T10:00:00Z");
  * directly. These assertions therefore test the DOCUMENT THE CUSTOMER
  * RECEIVES, not just the functions that feed it.
  */
-function renderText(inputs = DEFAULTS, now = FIXED_NOW): string {
-  const uri = buildReportDoc(inputs, scenarios, { now }).output("datauristring");
+function renderText(
+  inputs = DEFAULTS,
+  now = FIXED_NOW,
+  facts?: QualificationFacts,
+): string {
+  const uri = buildReportDoc(inputs, scenarios, { now, facts }).output("datauristring");
   return Buffer.from(uri.split(",")[1], "base64").toString("latin1");
 }
 
@@ -82,6 +94,41 @@ describe("buildReportDoc", () => {
     const raw = renderText();
     expect(raw).toContain("CO2-Einsparung");
     expect(raw).not.toContain("CO ,");
+  });
+
+  // P1 — the report must end in a decision, not a brochure.
+  it("carries the eligibility verdict and the effort band", () => {
+    const raw = renderText();
+    // jsPDF writes WinAnsi bytes; latin1-decoding them gives back the umlauts.
+    expect(raw).toContain("EINORDNUNG: ANGABEN UNVOLLST\u00c4NDIG");
+    expect(raw).toContain("AUFWAND: MITTEL");
+  });
+
+  it("names a specific next paid step and what it needs", () => {
+    const raw = renderText();
+    expect(raw).toContain("Pilot Eligibility Check");
+    expect(raw).toContain("Daf\u00fcr ben\u00f6tigen wir von Ihnen");
+    expect(raw).toContain("Offene Angaben");
+  });
+
+  it("routes a fully qualified project to structuring instead", () => {
+    const raw = renderText(DEFAULTS, FIXED_NOW, QUALIFIED);
+    expect(raw).toContain("Pilot Structuring Package");
+    expect(raw).not.toContain("Offene Angaben");
+  });
+
+  // Selling into a known blocker would be selling a failure.
+  it("offers no paid step when the constellation is disqualified", () => {
+    const raw = renderText({ ...DEFAULTS, anzahlWohneinheiten: 1 }, FIXED_NOW, QUALIFIED);
+    expect(raw).not.toContain("Pilot Eligibility Check");
+    expect(raw).not.toContain("Pilot Structuring Package");
+    expect(raw).toContain("keinen bezahlten Schritt");
+  });
+
+  it("never falls back to a generic contact prompt", () => {
+    for (const raw of [renderText(), renderText(DEFAULTS, FIXED_NOW, QUALIFIED)]) {
+      expect(raw).not.toMatch(/Kontaktieren Sie uns|Nehmen Sie Kontakt/i);
+    }
   });
 
   // Layout regression guard: adding the model row once pushed the cashflow

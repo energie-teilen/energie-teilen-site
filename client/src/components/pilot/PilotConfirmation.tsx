@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock, Copy, Loader2, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getPilotOrder, PilotApiError, type PilotOrder } from "@/lib/pilot-api";
+import { track } from "@/lib/analytics";
 
 /**
  * PilotConfirmation
@@ -104,6 +105,7 @@ export function PilotConfirmation() {
 
     if (canceled) {
       cleanUrl();
+      track("checkout_canceled");
       setPhase({ kind: "canceled" });
       return;
     }
@@ -115,6 +117,12 @@ export function PilotConfirmation() {
     getPilotOrder(sessionId, { signal: controller.signal })
       .then((order) => {
         setPhase({ kind: "ready", order });
+        // The terminal funnel event, fired from the confirmed server state
+        // rather than from the redirect — a redirect is not a payment.
+        track("checkout_succeeded", {
+          offer: order.offerCode ?? "unknown",
+          status: order.status,
+        });
         cleanUrl();
       })
       .catch((err: unknown) => {

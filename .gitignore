@@ -12,3 +12,4 @@ client/public/__manus__
 .fix-backup-*/
 .vercel
 *.patch
+.env*

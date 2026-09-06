@@ -16,6 +16,11 @@ import {
   calculatorCoverageShort,
   calculatorCoverageStatement,
 } from "../../../shared/legal-models";
+import {
+  evaluateEligibility,
+  intakeChecklistFor,
+  type QualificationFacts,
+} from "../../../shared/eligibility";
 
 export type ScenarioBundle = {
   konservativ: MieterstromResult; realistisch: MieterstromResult; optimistisch: MieterstromResult;
@@ -116,7 +121,7 @@ function drawChart(doc: jsPDF, s: ScenarioBundle, x: number, y: number, w: numbe
 export function buildReportDoc(
   inputs: MieterstromInputs,
   scenarios: ScenarioBundle,
-  options?: { now?: Date },
+  options?: { now?: Date; facts?: QualificationFacts },
 ): jsPDF {
   // Every output is versioned: model, assumption set, date, jurisdiction,
   // currency and the scenario the narrative refers to. `now` is injectable so
@@ -126,6 +131,14 @@ export function buildReportDoc(
 
   // Provenance is resolved per VALUE: anything the customer edited is their
   // statement, anything untouched is our (mostly unsourced) default.
+  // The same verdict the visitor just read on screen, recomputed from the same
+  // inputs and the same answers — the PDF must never disagree with the page.
+  const eligibility = evaluateEligibility({
+    economics: inputs,
+    kpis: scenarios.realistisch.kpis,
+    facts: options?.facts,
+  });
+
   const resolved = resolveAssumptions(
     inputs as unknown as Record<MieterstromAssumptionKey, number>,
     DEFAULTS as unknown as Record<MieterstromAssumptionKey, number>,
@@ -193,24 +206,67 @@ export function buildReportDoc(
   doc.setFont("helvetica", "bold").setFontSize(13).setTextColor(BRAND.ink).text("Kumulierter Cashflow über die Laufzeit", margin, y); y += 12;
   drawChart(doc, scenarios, margin + 40, y, pageW - margin * 2 - 40, chartH); y += chartH + 40;
 
-  // ── Closing CTA: connects the report to the paid pilot ──
-  if (y + 96 > pageH - 60) { doc.addPage(); y = 104; }
-  doc.setFillColor(BRAND.green).roundedRect(margin, y, pageW - margin * 2, 76, 8, 8, "F");
+  // ── Closing block: the qualification verdict and the concrete next step ──
+  // Never "Kontaktieren Sie uns". Either a named paid step with a reason, or
+  // an honest stop.
+  const step = eligibility.nextPaidStep;
+  const ctaBodyLines = doc.splitTextToSize(
+    step
+      ? step.rationale
+      : "In dieser Form empfehlen wir keinen bezahlten Schritt. Passen Sie die Konstellation an — etwa Anlagengröße, Anzahl der Einheiten oder den Status der Erzeugungsanlage.",
+    pageW - margin * 2 - 44,
+  ) as string[];
+  const missingLines =
+    eligibility.missingData.length > 0
+      ? (doc.splitTextToSize(
+          `Offene Angaben: ${eligibility.missingData.join(" · ")}`,
+          pageW - margin * 2 - 44,
+        ) as string[])
+      : [];
+  const ctaH = 52 + ctaBodyLines.length * 12 + missingLines.length * 11 + (step ? 30 : 8);
+
+  if (y + ctaH + 20 > pageH - 60) { doc.addPage(); y = 104; }
+  doc.setFillColor(BRAND.green).roundedRect(margin, y, pageW - margin * 2, ctaH, 8, 8, "F");
+  doc.setTextColor("#a9c4ba").setFont("helvetica", "normal").setFontSize(7.5);
+  doc.text(`EINORDNUNG: ${eligibility.verdictLabel.toUpperCase()}  ·  AUFWAND: ${eligibility.estimatedEffort.toUpperCase()}`, margin + 16, y + 20);
   doc.setTextColor("#ffffff").setFont("helvetica", "bold").setFontSize(12);
-  doc.text("Nächster Schritt: bezahlte Pilotaufnahme", margin + 16, y + 26);
+  doc.text(step ? `Nächster Schritt: ${step.label}` : "Nächster Schritt", margin + 16, y + 38);
   doc.setFont("helvetica", "normal").setFontSize(9).setTextColor("#cfe0d8");
-  doc.text("Überführen Sie diese Konstellation ohne Bruch in eine strukturierte, serverseitig geführte Pilotbearbeitung.", margin + 16, y + 44);
-  doc.setFillColor(BRAND.gold).roundedRect(margin + 16, y + 52, 130, 16, 4, 4, "F");
-  doc.setTextColor(BRAND.greenDk).setFont("helvetica", "bold").setFontSize(8.5);
-  doc.textWithLink("Pilot starten  >", margin + 26, y + 63, { url: CONTACT.pilotUrl });
-  doc.setFillColor("#ffffff").roundedRect(margin + 156, y + 52, 150, 16, 4, 4, "F");
-  doc.setTextColor(BRAND.green);
-  doc.textWithLink("Rechner erneut oeffnen  >", margin + 166, y + 63, { url: CONTACT.rechnerUrl });
-  y += 76 + 24;
+  let cy = y + 54;
+  ctaBodyLines.forEach((ln) => { doc.text(ln, margin + 16, cy); cy += 12; });
+  if (missingLines.length > 0) {
+    doc.setFontSize(8).setTextColor("#a9c4ba");
+    missingLines.forEach((ln) => { doc.text(ln, margin + 16, cy); cy += 11; });
+  }
+  if (step) {
+    doc.setFillColor(BRAND.gold).roundedRect(margin + 16, cy + 4, 150, 16, 4, 4, "F");
+    doc.setTextColor(BRAND.greenDk).setFont("helvetica", "bold").setFontSize(8.5);
+    doc.textWithLink("Pilotaufnahme starten  >", margin + 26, cy + 15, { url: CONTACT.pilotUrl });
+    doc.setFillColor("#ffffff").roundedRect(margin + 176, cy + 4, 150, 16, 4, 4, "F");
+    doc.setTextColor(BRAND.green);
+    doc.textWithLink("Rechner erneut oeffnen  >", margin + 186, cy + 15, { url: CONTACT.rechnerUrl });
+  }
+  y += ctaH + 24;
+
+  // ── What the next step needs from you ──
+  const checklist = intakeChecklistFor(step);
+  if (checklist.length > 0) {
+    if (y + 40 + checklist.length * 12 > pageH - 60) { doc.addPage(); y = 104; }
+    doc.setFont("helvetica", "bold").setFontSize(11).setTextColor(BRAND.ink);
+    doc.text("Dafür benötigen wir von Ihnen", margin, y); y += 15;
+    doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(BRAND.muted);
+    checklist.forEach((item) => {
+      const lines = doc.splitTextToSize(`•  ${item}`, pageW - margin * 2) as string[];
+      lines.forEach((ln) => { doc.text(ln, margin, y); y += 12; });
+    });
+    y += 10;
+  }
 
   // ── Herkunft der Annahmen ───────────────────────────────────────────────
   // The section that stops this report from selling placeholders as facts.
-  doc.addPage(); y = 104;
+  // Start here only if there is real room; autoTable flows the rest itself.
+  // An unconditional page break left half of page 2 empty.
+  if (y + 170 > pageH - 60) { doc.addPage(); y = 104; }
   doc.setFont("helvetica", "bold").setFontSize(13).setTextColor(BRAND.ink).text("Herkunft der Annahmen", margin, y); y += 14;
   doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(BRAND.muted);
   doc.splitTextToSize(
@@ -277,6 +333,12 @@ export function buildReportDoc(
   return doc;
 }
 
-export function downloadReportPdf(inputs: MieterstromInputs, scenarios: ScenarioBundle, filename = "energie-teilen-wirtschaftlichkeitsbericht.pdf"): void {
-  buildReportDoc(inputs, scenarios).save(filename);
+export function downloadReportPdf(
+  inputs: MieterstromInputs,
+  scenarios: ScenarioBundle,
+  options?: { facts?: QualificationFacts; filename?: string; now?: Date },
+): void {
+  buildReportDoc(inputs, scenarios, { now: options?.now, facts: options?.facts }).save(
+    options?.filename ?? "energie-teilen-wirtschaftlichkeitsbericht.pdf",
+  );
 }
