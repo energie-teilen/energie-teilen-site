@@ -1,10 +1,15 @@
 import { type ScenarioBundle } from "@/lib/report-pdf";
 import { SensitivityTornado } from "@/components/SensitivityTornado";
 import { BreakEvenPanel } from "@/components/BreakEvenPanel";
+import { EligibilityPanel } from "@/components/EligibilityPanel";
+import type { QualificationFacts } from "../../../shared/eligibility";
+import { evaluateEligibility } from "../../../shared/eligibility";
+import { track } from "@/lib/analytics";
 import {
   useDeferredValue,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useTransition,
   memo,
@@ -53,6 +58,8 @@ import { SectionRotator } from "@/components/SectionRotator";
 import { ADRESSATEN_IMAGES } from "@/lib/adressaten-images";
 import { CapacityBanner } from "@/components/pilot/CapacityBanner";
 import { PilotCheckoutForm } from "@/components/pilot/PilotCheckoutForm";
+import { PilotConfirmation } from "@/components/pilot/PilotConfirmation";
+import { calculatorCoverageStatement } from "../../../shared/legal-models";
 import { PilotOfferCards } from "@/components/pilot/PilotOfferCards";
 import {
   getPilotOfferContent,
@@ -459,8 +466,30 @@ function SliderField({
   );
 }
 
+const FACTS_STORAGE_KEY = "et:rechner:facts:v1";
+
 function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void }) {
   const [inputs, setInputs] = useState<MieterstromInputs>(DEFAULTS);
+  // Qualification answers live here, not in the panel, so the downloaded PDF
+  // carries exactly the same verdict the visitor just read on screen.
+  const [facts, setFacts] = useState<QualificationFacts>({});
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(FACTS_STORAGE_KEY);
+      if (raw) setFacts(JSON.parse(raw) as QualificationFacts);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(FACTS_STORAGE_KEY, JSON.stringify(facts));
+    } catch {
+      // ignore
+    }
+  }, [facts]);
   const [, startTransition] = useTransition();
 
   // Hydrate from localStorage on first mount (returning visitor sees last scenario)
@@ -475,6 +504,15 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
       // ignore
     }
   }, []);
+
+  // Fire once, on the first genuine interaction — a page load is not usage.
+  const usageTracked = useRef(false);
+  useEffect(() => {
+    if (usageTracked.current) return;
+    if (JSON.stringify(inputs) === JSON.stringify(DEFAULTS)) return;
+    usageTracked.current = true;
+    track("calculator_used");
+  }, [inputs]);
 
   // Persist inputs (cheap; runs on every committed change)
   useEffect(() => {
@@ -603,9 +641,23 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
           <BreakEvenPanel inputs={inputs} />
         </div>
 
+        {/*
+          The qualification gate. Sits between the numbers and the lead capture
+          so nobody reaches the PDF without seeing whether the constellation
+          clears the bar and what the actual next step is.
+        */}
+        <EligibilityPanel
+          inputs={inputs}
+          result={baseScenario}
+          facts={facts}
+          onFactsChange={setFacts}
+          onProceedToPilot={onProceedToPilot}
+        />
+
         <LeadCaptureBand
           inputs={inputs}
           result={baseScenario}
+          facts={facts}
           scenarios={{ konservativ: conservativeScenario, realistisch: baseScenario, optimistisch: optimisticScenario }}
           onProceedToPilot={onProceedToPilot}
         />
@@ -617,11 +669,13 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
 function LeadCaptureBand({
   inputs,
   result,
+  facts,
   scenarios,
   onProceedToPilot,
 }: {
   inputs: MieterstromInputs;
   result: MieterstromResult;
+  facts: QualificationFacts;
   scenarios: ScenarioBundle;
   onProceedToPilot: () => void;
 }) {
@@ -648,9 +702,16 @@ function LeadCaptureBand({
         payload: { inputs, kpis: result.kpis },
       });
       setDone(true);
+      // Tag the lead with the verdict it converted from — that is the whole
+      // point of instrumenting the gate.
+      track("lead_captured", {
+        source: "rechner-mieterstrom-rendite",
+        verdict: evaluateEligibility({ economics: inputs, kpis: result.kpis, facts }).verdict,
+        persisted: res.persisted,
+      });
       try {
         const { downloadReportPdf } = await import("@/lib/report-pdf");
-        downloadReportPdf(inputs, scenarios);
+        downloadReportPdf(inputs, scenarios, { facts });
       } catch (err) { console.error("PDF generation failed", err); }
       if (res.persisted === "server") {
         toast.success(
@@ -681,12 +742,14 @@ function LeadCaptureBand({
             Bericht freischalten
           </p>
           <h3 className="font-display text-xl font-semibold leading-snug tracking-[-0.02em] text-foreground">
-            20-Jahres-Bericht inkl. Messkonzept-Skizze nach §42b EnWG.
+            20-Jahres-Bericht mit drei Szenarien und dokumentierter Herkunft
+            jeder Annahme.
           </h3>
           <p className="text-sm leading-7 text-muted-foreground">
-            Sie erhalten die drei Szenarien als druckbares PDF, inklusive einer
-            Messkonzept-Skizze für den Messstellenbetreiber. Anschließend können Sie
-            die Konstellation direkt in die bezahlte Pilotaufnahme überführen.
+            Sie erhalten die drei Szenarien als druckbares PDF — inklusive einer
+            Aufstellung, welche Werte Sie selbst gesetzt haben und welche
+            unbelegte Voreinstellungen sind. Anschließend können Sie die
+            Konstellation direkt in die bezahlte Pilotaufnahme überführen.
           </p>
         </div>
 
@@ -735,7 +798,7 @@ function LeadCaptureBand({
                 className="mt-1 accent-primary"
               />
               <span>
-                Ich willige ein, gelegentlich Informationen zu §42b EnWG, Mieterstrom
+                Ich willige ein, gelegentlich Informationen zu Mieterstrom
                 und der bezahlten Pilotaufnahme zu erhalten. Widerruf jederzeit
                 möglich.
               </span>
@@ -924,6 +987,20 @@ export default function Home() {
               title="Konstellation in 30 Sekunden als belastbare Wirtschaftlichkeitsrechnung verstehen"
               text="Drei parallel berechnete Szenarien — konservativ, realistisch und optimistisch — zeigen Ihnen NPV, Amortisationsdauer, IRR und kumulierte Erlöse über 20 Jahre. Die Berechnung läuft vollständig im Browser. Das Ergebnis lässt sich anschließend ohne Bruch in die bezahlte Pilotaufnahme überführen."
             />
+
+            {/*
+              Which of the three models this calculator actually computes.
+              Generated from shared/legal-models.ts so the claim cannot drift
+              from the register, and so no paragraph number is hard-coded here.
+            */}
+            <div className="rounded-[20px] border border-border/70 bg-card/60 px-5 py-4">
+              <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                Betrachtetes Modell
+              </p>
+              <p className="mt-2 text-sm leading-7 text-foreground/90">
+                {calculatorCoverageStatement()}
+              </p>
+            </div>
 
             <MieterstromRechner onProceedToPilot={handleProceedToPilotStart} />
 
@@ -1161,6 +1238,13 @@ export default function Home() {
             />
 
             <div className="grid gap-8">
+              {/*
+                Post-payment confirmation. Renders nothing unless the URL
+                carries Stripe's ?paid=1&session_id=... (or ?canceled=1), so
+                the section is unchanged for every other visitor.
+              */}
+              <PilotConfirmation />
+
               <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr] lg:items-start">
                 <div className="space-y-6">
                   <PilotOfferCards

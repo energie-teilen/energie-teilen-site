@@ -4,7 +4,11 @@
  * Endpoints:
  *   POST /api/pilot-checkout    → creates Stripe Checkout session
  *   POST /api/lead              → captures Rechner / free-tool leads
+ *   GET  /api/pilot-order/:id   → post-payment order confirmation (safe projection)
+ *   GET  /api/admin/orders      → order ledger worklist (Bearer ADMIN_API_TOKEN)
+ *   POST /api/admin/orders/:ref/stage → advance a ledger stage (Bearer)
  *   POST /api/stripe/webhook    → verified Stripe webhook (raw body, idempotent)
+ *                                 sends operator notification AND customer confirmation
  *   GET  /api/health            → config presence check (no secrets exposed)
  *   GET  /*                     → serves the SPA (Vite build)
  *
@@ -29,7 +33,7 @@ import type {
 import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID, timingSafeEqual } from "crypto";
 import {
   CreatePilotCheckoutInputSchema,
   LeadCaptureInputSchema,
@@ -38,7 +42,27 @@ import {
   type ApiErrorCode,
   type CreatePilotCheckoutResult,
   type LeadCaptureResult,
+  type PilotOrder,
 } from "../shared/schema.js";
+import { toPilotOrder } from "../shared/pilot-order.js";
+import {
+  advanceStage,
+  nextAction,
+  offerCodeOrNull,
+  sortForWorklist,
+  summarise,
+  LedgerStageSchema,
+  STAGE_LABEL_DE,
+  type LedgerStage,
+  type OrderLedgerRecord,
+} from "../shared/ledger.js";
+import { getKv } from "./kv.js";
+import {
+  getOrder,
+  ledgerAvailable,
+  listOrders,
+  putOrder,
+} from "./ledger-store.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -80,30 +104,8 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
-// ----------------------------------------------------------------------------
-// Optional durable KV (Upstash Redis). Lazily imported; degrades gracefully.
-// ----------------------------------------------------------------------------
-let kvPromise: Promise<any | null> | null = null;
-async function getKv(): Promise<any | null> {
-  if (!kvPromise) {
-    kvPromise = (async () => {
-      const url = process.env.UPSTASH_REDIS_REST_URL;
-      const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-      if (!url || !token) return null;
-      try {
-        const mod = await import("@upstash/redis");
-        return new mod.Redis({ url, token });
-      } catch (err) {
-        console.warn(
-          "[kv] UPSTASH env set but @upstash/redis not installed. Run: pnpm add @upstash/redis",
-          err,
-        );
-        return null;
-      }
-    })();
-  }
-  return kvPromise;
-}
+// Durable KV lives in server/kv.ts so the ledger can use it without importing
+// the Express app.
 
 /**
  * Rate limiter. Distributed fixed-window via Upstash when available
@@ -167,23 +169,108 @@ async function getStripe() {
   }
 }
 
-/** Lazy Resend init; no-ops if unconfigured. */
-async function sendNotificationEmail(subject: string, html: string): Promise<void> {
+/**
+ * Lazy Resend init; no-ops if unconfigured.
+ *
+ * Generalised so the same transport serves BOTH directions: the operator
+ * notification (inbound lead / payment) and the customer confirmation
+ * (outbound fulfillment). Previously it could only ever mail the operator,
+ * which is why a paying customer received nothing from Energie Teilen.
+ */
+async function sendEmail(to: string, subject: string, html: string): Promise<boolean> {
   const apiKey = process.env.RESEND_API_KEY;
-  const to = process.env.LEAD_NOTIFICATION_EMAIL;
   const from =
     process.env.RESEND_FROM_EMAIL || "Energie Teilen <noreply@energie-teilen.de>";
   if (!apiKey || !to) {
-    console.info("[resend] not configured — skipping notification:", subject);
-    return;
+    console.info("[resend] not configured — skipping mail:", subject);
+    return false;
   }
   try {
     const ResendModule = await import("resend");
     const resend = new ResendModule.Resend(apiKey);
     await resend.emails.send({ from, to, subject, html });
+    return true;
   } catch (err) {
     console.error("[resend] send failed", err);
+    return false;
   }
+}
+
+/** Operator-facing notification. Unchanged behaviour, now a wrapper. */
+async function sendNotificationEmail(subject: string, html: string): Promise<void> {
+  const to = process.env.LEAD_NOTIFICATION_EMAIL;
+  if (!to) {
+    console.info("[resend] LEAD_NOTIFICATION_EMAIL unset — skipping:", subject);
+    return;
+  }
+  await sendEmail(to, subject, html);
+}
+
+// ----------------------------------------------------------------------------
+// Customer-facing confirmation
+// ----------------------------------------------------------------------------
+
+const eurFmt = (cents: number | null, currency: string): string =>
+  cents === null ? "—" : `${(cents / 100).toFixed(2).replace(".", ",")} ${currency}`;
+
+/**
+ * The email a paying customer receives. States what was bought, the order
+ * reference, what will be produced, and exactly which project data must be
+ * sent back for work to start.
+ *
+ * It contains no turnaround promise: the AGB declares none, so the product
+ * must not imply one. ET_PILOT_RESPONSE_WINDOW, if the operator sets it, is
+ * echoed verbatim and is the only place such a statement can originate.
+ */
+function buildCustomerConfirmationHtml(order: PilotOrder, replyTo: string): string {
+  const checklist = order.requiredData
+    .map((item) => `<li style="margin:0 0 6px 0">${escapeHtml(item)}</li>`)
+    .join("");
+
+  const windowLine = order.responseWindow
+    ? `<p style="margin:0 0 16px 0"><strong>Bearbeitung:</strong> ${escapeHtml(order.responseWindow)}</p>`
+    : "";
+
+  return `
+  <div style="font-family:Helvetica,Arial,sans-serif;color:#1a1a1a;line-height:1.6;max-width:640px">
+    <div style="background:#1d493a;color:#fff;padding:20px 24px;border-radius:8px 8px 0 0">
+      <div style="font-size:17px;font-weight:bold">Energie Teilen</div>
+      <div style="font-size:12px;color:#cfe0d8;margin-top:4px">Bestätigung Ihrer Pilotaufnahme</div>
+    </div>
+    <div style="border:1px solid #e2e2dc;border-top:none;padding:24px;border-radius:0 0 8px 8px">
+      <p style="margin:0 0 16px 0">Guten Tag${order.email ? "" : ""},</p>
+      <p style="margin:0 0 16px 0">
+        vielen Dank. Ihre Zahlung ist eingegangen und Ihre Pilotaufnahme ist unter der
+        folgenden Referenz angelegt.
+      </p>
+
+      <table style="width:100%;border-collapse:collapse;margin:0 0 20px 0;font-size:14px">
+        <tr><td style="padding:6px 0;color:#6b6b6b">Referenz</td><td style="padding:6px 0"><strong>${escapeHtml(order.reference)}</strong></td></tr>
+        <tr><td style="padding:6px 0;color:#6b6b6b">Paket</td><td style="padding:6px 0">${escapeHtml(order.offerLabel)}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b6b6b">Betrag</td><td style="padding:6px 0">${escapeHtml(eurFmt(order.amountTotalCents, order.currency))}</td></tr>
+        ${order.location ? `<tr><td style="padding:6px 0;color:#6b6b6b">Standort</td><td style="padding:6px 0">${escapeHtml(order.location)}</td></tr>` : ""}
+      </table>
+
+      ${order.deliverable ? `<p style="margin:0 0 8px 0"><strong>Sie erhalten:</strong></p><p style="margin:0 0 20px 0">${escapeHtml(order.deliverable)}</p>` : ""}
+      ${windowLine}
+
+      <p style="margin:0 0 8px 0"><strong>Damit wir beginnen können, senden Sie uns bitte:</strong></p>
+      <ul style="margin:0 0 20px 0;padding-left:20px">${checklist}</ul>
+
+      <p style="margin:0 0 16px 0">
+        Antworten Sie einfach auf diese E-Mail oder schreiben Sie an
+        <a href="mailto:${escapeHtml(replyTo)}" style="color:#1d493a">${escapeHtml(replyTo)}</a>
+        und nennen Sie dabei die Referenz ${escapeHtml(order.reference)}.
+        Unterlagen können Sie direkt anhängen.
+      </p>
+
+      <p style="margin:0;font-size:12px;color:#6b6b6b;border-top:1px solid #e2e2dc;padding-top:14px">
+        Energie Teilen · Diese Bestätigung dokumentiert den Zahlungseingang.
+        Der Leistungsumfang ergibt sich aus § 2 der AGB. Keine Rechts-, Steuer-
+        oder Anlageberatung.
+      </p>
+    </div>
+  </div>`;
 }
 
 /** Best-effort durable record. No-ops without KV. Never throws into the request. */
@@ -196,6 +283,44 @@ async function persistRecord(kind: string, id: string, data: unknown): Promise<v
   } catch (err) {
     console.warn(`[persist] failed for ${kind}:${id}`, err);
   }
+}
+
+// ----------------------------------------------------------------------------
+// ADMIN AUTH
+// ----------------------------------------------------------------------------
+
+/**
+ * Constant-time bearer check against ADMIN_API_TOKEN.
+ *
+ * A plain `===` on a secret leaks its prefix through timing. Cheap to do
+ * right, so it is done right. Absent or short token = admin surface disabled
+ * entirely rather than open.
+ */
+function isAuthorisedAdmin(req: Request): boolean {
+  const expected = process.env.ADMIN_API_TOKEN;
+  if (!expected || expected.length < 16) return false;
+
+  const header = req.headers.authorization;
+  const presented =
+    typeof header === "string" && header.startsWith("Bearer ")
+      ? header.slice(7)
+      : "";
+  if (presented.length === 0) return false;
+
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) {
+    // Still burn a comparison so length is not a fast-path oracle.
+    timingSafeEqual(b, b);
+    return false;
+  }
+  return timingSafeEqual(a, b);
+}
+
+/** Short, non-reversible tag for the audit trail — never the token itself. */
+function adminActorTag(): string {
+  const token = process.env.ADMIN_API_TOKEN || "";
+  return `admin:${createHash("sha256").update(token).digest("hex").slice(0, 8)}`;
 }
 
 // ============================================================================
@@ -240,27 +365,76 @@ export async function buildApp(): Promise<Express> {
           }
         }
 
-        if (event.type === "checkout.session.completed") {
+        if (
+          event.type === "checkout.session.completed" ||
+          event.type === "checkout.session.async_payment_succeeded"
+        ) {
+          // `as` narrows to the subset we read. toPilotOrder() is structural,
+          // so the shared mapper never imports the Stripe SDK.
           const session = event.data.object as {
             id: string;
+            status?: string | null;
+            payment_status?: string | null;
             amount_total: number | null;
             currency: string | null;
             customer_email: string | null;
+            customer_details?: { email?: string | null } | null;
+            created?: number | null;
             metadata?: Record<string, string>;
           };
           const md = session.metadata ?? {};
-
-          await persistRecord("order", session.id, {
-            amount_total: session.amount_total,
-            currency: session.currency,
-            email: md.email || session.customer_email,
-            offerCode: md.offerCode,
-            offerLabel: md.offerLabel,
-            metadata: md,
+          const order = toPilotOrder(session, {
+            responseWindow: process.env.ET_PILOT_RESPONSE_WINDOW ?? null,
           });
 
+          // ── LEDGER: the order becomes an enumerable record, not just an email.
+          const nowIso = new Date().toISOString();
+          const existing = await getOrder(order.reference);
+          const ledgerRecord: OrderLedgerRecord = existing ?? {
+            kind: "order",
+            reference: order.reference,
+            sessionId: session.id,
+            stage: "intake",
+            offerCode: offerCodeOrNull(md.offerCode),
+            offerLabel: order.offerLabel,
+            amountTotalCents: order.amountTotalCents,
+            currency: order.currency,
+            email: order.email,
+            name: md.name || null,
+            organization: order.organization,
+            location: order.location,
+            projectType: order.projectType,
+            owner: null,
+            source: "stripe:checkout",
+            eligibilityVerdict: md.eligibilityVerdict || null,
+            createdAt: order.createdAt ?? nowIso,
+            updatedAt: nowIso,
+            durable: false,
+            history: [{ at: nowIso, stage: "intake", by: "stripe:webhook" }],
+          };
+
+          let current = ledgerRecord;
+          if (order.status === "paid" && current.stage === "intake") {
+            const moved = advanceStage(current, "paid", "stripe:webhook", { now: new Date() });
+            if (moved.ok) current = moved.record;
+          }
+          const written = await putOrder(current);
+          current = written.record;
+
+          // ── Operator notification (unchanged content, now reference-stamped)
           const html = `
             <h2>✅ Neue bezahlte Pilotaufnahme</h2>
+            ${
+              written.durable
+                ? ""
+                : `<p style="background:#fdf7ec;border:1px solid #c79236;padding:10px">
+                     <strong>⚠️ Nicht dauerhaft gespeichert.</strong> Dieser Auftrag existiert nur
+                     in Stripe und in dieser E-Mail. Setzen Sie UPSTASH_REDIS_REST_URL und
+                     UPSTASH_REDIS_REST_TOKEN, damit Aufträge im Ledger auffindbar bleiben.
+                   </p>`
+            }
+            <p><strong>Referenz:</strong> ${escapeHtml(order.reference)}</p>
+            <p><strong>Status:</strong> ${escapeHtml(order.status)}</p>
             <p><strong>Paket:</strong> ${escapeHtml(md.offerLabel || md.offerCode || "—")}</p>
             <p><strong>Betrag:</strong> ${
               session.amount_total
@@ -269,7 +443,7 @@ export async function buildApp(): Promise<Express> {
             }</p>
             <hr/>
             <p><strong>Ansprechpartner:</strong> ${escapeHtml(md.name || "—")}</p>
-            <p><strong>E-Mail:</strong> ${escapeHtml(md.email || session.customer_email || "—")}</p>
+            <p><strong>E-Mail:</strong> ${escapeHtml(order.email || "—")}</p>
             <p><strong>Organisation:</strong> ${escapeHtml(md.organization || "—")}</p>
             <p><strong>Telefon:</strong> ${escapeHtml(md.phone || "—")}</p>
             <p><strong>Standort:</strong> ${escapeHtml(md.location || "—")}</p>
@@ -278,9 +452,56 @@ export async function buildApp(): Promise<Express> {
             <p><small>Stripe Session ID: ${escapeHtml(session.id)}</small></p>
           `;
           await sendNotificationEmail(
-            `[Energie Teilen] 💰 Bezahlt: ${md.offerLabel || md.offerCode}`,
+            `[Energie Teilen] 💰 Bezahlt: ${order.reference} · ${md.offerLabel || md.offerCode}`,
             html,
           );
+
+          // ── FULFILLMENT: confirm to the CUSTOMER.
+          // Guarded per session (not per event) so `completed` followed by
+          // `async_payment_succeeded` on a SEPA debit cannot mail twice.
+          if (order.status === "paid" && order.email) {
+            let alreadySent = false;
+            const kvForMail = await getKv();
+            if (kvForMail) {
+              const fresh = await kvForMail.set(`order:confirmed:${session.id}`, "1", {
+                nx: true,
+                ex: 60 * 60 * 24 * 30,
+              });
+              alreadySent = fresh === null;
+            }
+            if (!alreadySent) {
+              const replyTo =
+                process.env.ET_CUSTOMER_REPLY_TO ||
+                process.env.LEAD_NOTIFICATION_EMAIL ||
+                "kontakt@energie-teilen.de";
+              const sent = await sendEmail(
+                order.email,
+                `Energie Teilen · Bestätigung ${order.reference} — ${order.offerLabel}`,
+                buildCustomerConfirmationHtml(order, replyTo),
+              );
+              if (!sent) {
+                // The customer paid and we could not confirm. That is an
+                // operational incident, not a log line to lose.
+                console.error(
+                  `[fulfillment] confirmation NOT delivered for ${order.reference} (${order.email})`,
+                );
+                await sendNotificationEmail(
+                  `[Energie Teilen] ⚠️ Bestätigung NICHT zugestellt: ${order.reference}`,
+                  `<p>Zahlung eingegangen, aber die Kundenbestätigung konnte nicht versendet werden.</p>
+                   <p><strong>Referenz:</strong> ${escapeHtml(order.reference)}</p>
+                   <p><strong>E-Mail:</strong> ${escapeHtml(order.email)}</p>
+                   <p>Bitte manuell bestätigen.</p>`,
+                );
+              } else {
+                // Confirmation delivered — the ball is now in the customer's
+                // court, and the ledger says so without anyone updating it.
+                const moved = advanceStage(current, "awaiting_data", "stripe:webhook", {
+                  note: "Bestätigung und Datenanforderung versendet",
+                });
+                if (moved.ok) await putOrder(moved.record);
+              }
+            }
+          }
         }
 
         return res.status(200).send("ok");
@@ -343,6 +564,7 @@ export async function buildApp(): Promise<Express> {
           privacyPolicyAccepted: String(input.legalAcceptances.privacyPolicyAccepted),
           pilotTermsAccepted: String(input.legalAcceptances.pilotTermsAccepted),
           marketingConsent: String(input.legalAcceptances.marketingConsent ?? false),
+          eligibilityVerdict: input.eligibilityVerdict ?? "",
         },
       });
 
@@ -408,6 +630,170 @@ export async function buildApp(): Promise<Express> {
     return res.status(200).json(result);
   });
 
+  // GET /api/pilot-order/:sessionId
+  // ---------------------------------------------------------------------------
+  // Closes the funnel. Stripe's success_url returns the buyer to
+  // /?paid=1&session_id=cs_..., and until now nothing could resolve that id
+  // into a confirmation. Returns only the safe projection from
+  // shared/pilot-order.ts — never the raw Stripe session.
+  //
+  // The session id is an unguessable Stripe secret-ish token, so possession of
+  // it is the authorisation. It is still rate-limited, format-checked and
+  // never enumerable.
+  // ---------------------------------------------------------------------------
+  const orderLookupLimiter = createRateLimiter({ windowMs: 60_000, max: 30, bucket: "order" });
+
+  app.get("/api/pilot-order/:sessionId", orderLookupLimiter, async (req: Request, res: Response) => {
+    const sessionId = String(req.params.sessionId || "");
+
+    // Stripe Checkout Session ids: cs_test_... / cs_live_...
+    if (!/^cs_[A-Za-z0-9_]{10,255}$/.test(sessionId)) {
+      return apiError(res, 400, "validation_error", "Ungültige Bestellreferenz.");
+    }
+
+    const stripe = await getStripe();
+    if (!stripe) {
+      return apiError(res, 503, "config_missing", "Bestellstatus ist aktuell nicht abrufbar.");
+    }
+
+    try {
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+      const order: PilotOrder = toPilotOrder(session, {
+        responseWindow: process.env.ET_PILOT_RESPONSE_WINDOW ?? null,
+      });
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(200).json(order);
+    } catch (err) {
+      const code = (err as { statusCode?: number })?.statusCode;
+      if (code === 404) {
+        return apiError(res, 404, "not_found", "Zu dieser Referenz wurde keine Bestellung gefunden.");
+      }
+      console.error("[stripe] order lookup failed", err);
+      return apiError(res, 500, "stripe_error", "Bestellstatus konnte nicht geladen werden.");
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // ADMIN — the order ledger
+  //
+  // Your inbox was the database. These two endpoints make paid work
+  // enumerable: what is open, what is overdue, what it is worth, and what to
+  // do next. Deliberately JSON + curl rather than a console — the brief says
+  // minimal CRM, and a UI is not the bottleneck.
+  //
+  // Disabled entirely unless ADMIN_API_TOKEN is set to >= 16 chars.
+  // ---------------------------------------------------------------------------
+  const adminLimiter = createRateLimiter({ windowMs: 60_000, max: 60, bucket: "admin" });
+
+  const requireAdmin: RequestHandler = (req, res, next) => {
+    if (!isAuthorisedAdmin(req)) {
+      // Same response whether the token is wrong or unset: no probing.
+      apiError(res, 401, "not_found", "Nicht autorisiert.");
+      return;
+    }
+    next();
+  };
+
+  app.get("/api/admin/orders", adminLimiter, requireAdmin, async (req: Request, res: Response) => {
+    if (!ledgerAvailable()) {
+      return apiError(
+        res,
+        503,
+        "config_missing",
+        "Kein dauerhafter Speicher konfiguriert — Aufträge können nicht aufgelistet werden. UPSTASH_REDIS_REST_URL und UPSTASH_REDIS_REST_TOKEN setzen.",
+      );
+    }
+
+    const limit = Number.parseInt(String(req.query.limit ?? "100"), 10);
+    const stageFilter = LedgerStageSchema.safeParse(req.query.stage);
+    const now = new Date();
+
+    let records = await listOrders(Number.isFinite(limit) ? limit : 100);
+    if (stageFilter.success) records = records.filter((r) => r.stage === stageFilter.data);
+
+    const worklist = sortForWorklist(records, now).map((r) => {
+      const na = nextAction(r, now);
+      return {
+        reference: r.reference,
+        stage: r.stage,
+        stageLabel: STAGE_LABEL_DE[r.stage],
+        offerLabel: r.offerLabel,
+        valueCents: r.amountTotalCents,
+        currency: r.currency,
+        email: r.email,
+        organization: r.organization,
+        location: r.location,
+        owner: r.owner,
+        source: r.source,
+        eligibilityVerdict: r.eligibilityVerdict,
+        nextAction: na.action,
+        overdue: na.overdue,
+        ageDays: na.ageDays,
+        durable: r.durable,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+      };
+    });
+
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json({
+      ok: true,
+      summary: summarise(records, now),
+      orders: worklist,
+    });
+  });
+
+  app.post(
+    "/api/admin/orders/:reference/stage",
+    adminLimiter,
+    requireAdmin,
+    async (req: Request, res: Response) => {
+      const reference = String(req.params.reference || "");
+      if (!/^ET-[0-9A-Z]{8}$/.test(reference)) {
+        return apiError(res, 400, "validation_error", "Ungültige Referenz.");
+      }
+
+      const parsedStage = LedgerStageSchema.safeParse(req.body?.stage);
+      if (!parsedStage.success) {
+        return apiError(res, 400, "validation_error", "Unbekannte Stufe.", parsedStage.error.issues);
+      }
+
+      const record = await getOrder(reference);
+      if (!record) {
+        return apiError(res, 404, "not_found", "Auftrag nicht gefunden.");
+      }
+
+      const note = typeof req.body?.note === "string" ? req.body.note.slice(0, 500) : undefined;
+      const moved = advanceStage(record, parsedStage.data as LedgerStage, adminActorTag(), { note });
+      if (!moved.ok) {
+        // A rejected transition is information, not a failure: say what IS allowed.
+        return apiError(
+          res,
+          409,
+          "validation_error",
+          `Übergang von "${record.stage}" nach "${parsedStage.data}" ist nicht zulässig.`,
+          { allowed: moved.allowed },
+        );
+      }
+
+      const owner = typeof req.body?.owner === "string" ? req.body.owner.slice(0, 120) : undefined;
+      const finalRecord = owner === undefined ? moved.record : { ...moved.record, owner };
+      const written = await putOrder(finalRecord);
+      if (!written.durable) {
+        return apiError(res, 503, "config_missing", "Änderung konnte nicht dauerhaft gespeichert werden.");
+      }
+
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(200).json({
+        ok: true,
+        reference,
+        stage: written.record.stage,
+        stageLabel: STAGE_LABEL_DE[written.record.stage],
+        nextAction: nextAction(written.record).action,
+      });
+    },
+  );
+
   // GET /api/health
   app.get("/api/health", async (_req: Request, res: Response) => {
     res.json({
@@ -423,6 +809,16 @@ export async function buildApp(): Promise<Express> {
           et_structuring: Boolean(process.env.STRIPE_PRICE_ET_STRUCTURING),
           et_mandate: Boolean(process.env.STRIPE_PRICE_ET_MANDATE),
         },
+        customerConfirmation: Boolean(
+          process.env.RESEND_API_KEY &&
+            (process.env.ET_CUSTOMER_REPLY_TO || process.env.LEAD_NOTIFICATION_EMAIL),
+        ),
+        responseWindow: process.env.ET_PILOT_RESPONSE_WINDOW || "(unset)",
+        // The launch-blocking one: without this, paid orders are not enumerable.
+        durableOrders: ledgerAvailable(),
+        adminApi: Boolean(
+          process.env.ADMIN_API_TOKEN && process.env.ADMIN_API_TOKEN.length >= 16,
+        ),
         appUrl: process.env.APP_URL || "(unset)",
       },
     });

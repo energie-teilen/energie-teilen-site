@@ -26,7 +26,7 @@ const navigationLinks = [
 
 const tools = [
   { label: "Mieterstrom-Rendite-Rechner", href: "#rechner" },
-  { label: "Allokation §42b EnWG", href: "#rechner", note: "in Vorbereitung" },
+  { label: "Allokationsrechner Energy Sharing", href: "#rechner", note: "in Vorbereitung" },
   { label: "Compliance-Kalender", href: "#rechner", note: "in Vorbereitung" },
 ];
 

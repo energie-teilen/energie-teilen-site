@@ -10,8 +10,12 @@
     "build": "vite build && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
     "start": "NODE_ENV=production node dist/index.js",
     "preview": "vite preview --host",
-    "check": "tsc --noEmit",
-    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p api/tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p api/tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify": "pnpm check && pnpm test && pnpm build",
+    "dev:kv": "node scripts/dev-kv.mjs",
     "format": "prettier --write ."
   },
   "dependencies": {

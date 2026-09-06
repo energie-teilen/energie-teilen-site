@@ -91,6 +91,14 @@ export const CreatePilotCheckoutInputSchema = z.object({
     .max(200, "Standortangabe ist zu lang."),
   legalAcceptances: LegalAcceptancesSchema,
   /**
+   * The eligibility verdict the visitor last saw, if they used the calculator.
+   * Carried into Stripe metadata and onto the ledger record so conversion can
+   * be measured per verdict rather than guessed.
+   */
+  eligibilityVerdict: z
+    .enum(["ELIGIBLE", "LIKELY_ELIGIBLE", "REQUIRES_REVIEW", "NOT_ELIGIBLE", "INSUFFICIENT_DATA"])
+    .optional(),
+  /**
    * Honeypot — must be empty. Bots fill it; humans don't.
    * Server rejects any submission with a non-empty value.
    */
@@ -251,3 +259,52 @@ export const PILOT_OFFER_SERVER_CONFIG: Record<PilotOfferCode, PilotOfferServerC
     currency: "eur",
   },
 };
+
+// ============================================================================
+// PILOT ORDER — the fulfillment side of the funnel
+// ----------------------------------------------------------------------------
+// Returned by GET /api/pilot-order/:sessionId. This is the ONLY thing the
+// browser learns about a completed payment: no payment intent, no line items,
+// no customer object. The mapper that produces it lives in shared/pilot-order.ts
+// and is unit-tested.
+// ============================================================================
+
+export const PilotOrderStatusSchema = z.enum([
+  /** Funds captured. Work can start. */
+  "paid",
+  /** Session complete but payment not yet settled (SEPA direct debit). */
+  "processing",
+  /** Session exists, not paid. */
+  "unpaid",
+  /** Checkout session expired without payment. */
+  "expired",
+]);
+export type PilotOrderStatus = z.infer<typeof PilotOrderStatusSchema>;
+
+export const PilotOrderSchema = z.object({
+  ok: z.literal(true),
+  sessionId: z.string().min(1),
+  /** Short human reference, e.g. ET-4F9C21A0. Deterministic from sessionId. */
+  reference: z.string().min(1),
+  status: PilotOrderStatusSchema,
+  offerCode: PilotOfferCodeSchema.nullable(),
+  offerLabel: z.string(),
+  amountTotalCents: z.number().int().nonnegative().nullable(),
+  currency: z.string(),
+  email: z.string().nullable(),
+  organization: z.string().nullable(),
+  location: z.string().nullable(),
+  projectType: ProjectTypeSchema.nullable(),
+  createdAt: z.string().nullable(),
+  /** What this tier delivers. From PILOT_OFFER_FULFILLMENT. */
+  deliverable: z.string(),
+  /** Project data the customer must supply before work starts. */
+  requiredData: z.array(z.string()),
+  /**
+   * Operator-declared response window, echoed verbatim from
+   * ET_PILOT_RESPONSE_WINDOW. Null unless explicitly configured — the AGB
+   * states no turnaround, so the product must not imply one.
+   */
+  responseWindow: z.string().nullable(),
+});
+export type PilotOrder = z.infer<typeof PilotOrderSchema>;

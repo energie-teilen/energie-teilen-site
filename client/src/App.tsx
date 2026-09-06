@@ -3,6 +3,7 @@ import { Route, Switch, useLocation } from "wouter";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import ErrorBoundary from "./components/ErrorBoundary";
+import { initAnalytics } from "@/lib/analytics";
 import { ThemeProvider } from "./contexts/ThemeContext";
 
 /**
@@ -42,6 +43,10 @@ function useScrollManagement() {
 
 function useAnalyticsPageView() {
   const [location] = useLocation();
+  // Install the queue stub and load the script before anything can fire.
+  useEffect(() => {
+    initAnalytics();
+  }, []);
   useEffect(() => {
     const fn = (window as unknown as { plausible?: (e: string) => void }).plausible;
     if (typeof fn === "function") fn("pageview");
