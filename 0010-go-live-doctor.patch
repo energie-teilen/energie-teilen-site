@@ -1,0 +1,975 @@
+From 377f0c81ec5db519f2e3d6959464558c99df52c8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 7 Sep 2026 17:18:08 +0000
+Subject: [PATCH] feat(doctor): turn the remaining revenue blocker into a
+ checklist
+
+Nine patches of funnel work are deployed and the site has taken zero euros,
+because /api/pilot-checkout returns 503 to every visitor until Stripe is
+configured. That is not a code problem, so no amount of code fixes it.
+
+`pnpm doctor` reads /api/health (which reports configuration presence, never a
+secret) and prints what is missing, WHAT IT COSTS while it stays missing, and
+the exact fix. Ordered by revenue impact rather than by position in the stack:
+four hard blockers where money cannot move, then the degraded set where payment
+would work and fulfilment would not.
+
+Exits 1 only on revenue blockers, so it is usable in CI without turning a
+fulfilment gap into a red build. Exits 2 when the site cannot be reached.
+
+    pnpm doctor                       # production
+    pnpm doctor http://localhost:3000
+
+Verified both ways against a running build: all four blockers reported with
+their cost and fix when unset, and a clean "nothing between you and revenue but
+customers" plus the Stripe test-mode verification sequence when set.
+
+Evidence: pnpm check clean, 194/194 vitest, doctor exercised in both states.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CZaJuZgaAVS1HZZc7QZDsD
+---
+ marktlage.html     | 731 +++++++++++++++++++++++++++++++++++++++++++++
+ package.json       |   1 +
+ scripts/doctor.mjs | 179 +++++++++++
+ 3 files changed, 911 insertions(+)
+ create mode 100644 marktlage.html
+ create mode 100644 scripts/doctor.mjs
+
+diff --git a/marktlage.html b/marktlage.html
+new file mode 100644
+index 0000000..4bc2115
+--- /dev/null
++++ b/marktlage.html
+@@ -0,0 +1,731 @@
++<title>Energy Sharing Reality Check</title>
++<link rel="preconnect" href="https://fonts.googleapis.com">
++<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
++<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&display=swap">
++
++<style>
++  /* ============================================================
++     Energie Teilen — Marktlage September 2026
++     Type: IBM Plex — drawn for technical documentation, which is
++     what this is. Sans for structure, Serif for argument, Mono
++     for every figure that carries a unit.
++     ============================================================ */
++
++  :root {
++    /* Neutrals biased green, so they read as chosen next to the brand. */
++    --ground:      #f7f8f6;
++    --surface:     #fdfdfc;
++    --surface-2:   #eef1ee;
++    --line:        #dde3df;
++    --line-strong: #c3cdc7;
++    --ink:         #12211c;
++    --ink-2:       #38473f;
++    --muted:       #667670;
++
++    --brand:       #1d493a;
++    --mark:        #1d7a55;   /* validated: light surface, all checks pass */
++    --mark-track:  #dfe8e2;
++    --amber:       #b5751a;
++    --critical:    #9c3b2e;
++    --amber-bg:    #fbf3e5;
++    --critical-bg: #f9ecea;
++    --good-bg:     #e8f2ec;
++
++    --spine:       #d7dedb;
++
++    --sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
++    --serif: "IBM Plex Serif", Georgia, "Times New Roman", serif;
++    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
++  }
++
++  @media (prefers-color-scheme: dark) {
++    :root:not([data-theme="light"]) {
++      --ground:      #0f1512;
++      --surface:     #161d1a;
++      --surface-2:   #1c2521;
++      --line:        #27322d;
++      --line-strong: #3a4842;
++      --ink:         #e4ebe7;
++      --ink-2:       #b9c6c0;
++      --muted:       #8b9a93;
++
++      --brand:       #6fb897;
++      --mark:        #3fa87a;  /* validated: dark surface, all checks pass */
++      --mark-track:  #24312b;
++      --amber:       #d9a451;
++      --critical:    #e08573;
++      --amber-bg:    #241d10;
++      --critical-bg: #26160f;
++      --good-bg:     #13241c;
++
++      --spine:       #27322d;
++    }
++  }
++
++  :root[data-theme="dark"] {
++    --ground:      #0f1512;
++    --surface:     #161d1a;
++    --surface-2:   #1c2521;
++    --line:        #27322d;
++    --line-strong: #3a4842;
++    --ink:         #e4ebe7;
++    --ink-2:       #b9c6c0;
++    --muted:       #8b9a93;
++    --brand:       #6fb897;
++    --mark:        #3fa87a;
++    --mark-track:  #24312b;
++    --amber:       #d9a451;
++    --critical:    #e08573;
++    --amber-bg:    #241d10;
++    --critical-bg: #26160f;
++    --good-bg:     #13241c;
++    --spine:       #27322d;
++  }
++
++  * { box-sizing: border-box; }
++
++  body {
++    background: var(--ground);
++    color: var(--ink);
++    font-family: var(--serif);
++    font-size: 17px;
++    line-height: 1.62;
++    -webkit-font-smoothing: antialiased;
++  }
++
++  .wrap {
++    max-width: 860px;
++    margin: 0 auto;
++    padding: 56px 28px 96px;
++  }
++
++  /* ---------- masthead ---------- */
++  .masthead {
++    border-bottom: 2px solid var(--ink);
++    padding-bottom: 20px;
++    display: flex;
++    flex-wrap: wrap;
++    gap: 16px 32px;
++    align-items: flex-end;
++    justify-content: space-between;
++  }
++  .masthead h1 {
++    font-family: var(--sans);
++    font-weight: 600;
++    font-size: clamp(1.9rem, 4.4vw, 2.7rem);
++    line-height: 1.08;
++    letter-spacing: -0.022em;
++    margin: 0;
++    text-wrap: balance;
++    max-width: 16ch;
++  }
++  .stamp {
++    font-family: var(--mono);
++    font-size: 0.72rem;
++    line-height: 1.7;
++    color: var(--muted);
++    text-align: right;
++    white-space: nowrap;
++  }
++  .stamp b { color: var(--ink-2); font-weight: 500; }
++
++  .eyebrow {
++    font-family: var(--sans);
++    font-size: 0.7rem;
++    font-weight: 600;
++    letter-spacing: 0.15em;
++    text-transform: uppercase;
++    color: var(--mark);
++    margin: 0 0 10px;
++  }
++
++  /* ---------- thesis ---------- */
++  .thesis {
++    margin: 40px 0 8px;
++    padding-left: 22px;
++    border-left: 3px solid var(--mark);
++    font-family: var(--serif);
++    font-size: clamp(1.16rem, 2.3vw, 1.42rem);
++    line-height: 1.45;
++    color: var(--ink);
++    text-wrap: pretty;
++  }
++  .thesis strong { font-weight: 500; background: var(--good-bg); padding: 0 3px; }
++
++  /* ---------- sections ---------- */
++  section { margin-top: 60px; }
++  h2 {
++    font-family: var(--sans);
++    font-weight: 600;
++    font-size: 1.32rem;
++    letter-spacing: -0.012em;
++    margin: 0 0 6px;
++    text-wrap: balance;
++  }
++  .lede {
++    font-family: var(--sans);
++    font-size: 0.88rem;
++    color: var(--muted);
++    margin: 0 0 26px;
++    max-width: 62ch;
++  }
++  p { max-width: 66ch; margin: 0 0 18px; }
++  a { color: var(--mark); text-underline-offset: 3px; }
++  a:focus-visible, summary:focus-visible {
++    outline: 2px solid var(--mark);
++    outline-offset: 3px;
++    border-radius: 3px;
++  }
++
++  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
++
++  /* ---------- barrier list: severity carried by a stripe, not a card ---------- */
++  .barriers { display: flex; flex-direction: column; gap: 0; margin: 0; padding: 0; list-style: none; }
++  .barriers li {
++    display: grid;
++    grid-template-columns: 92px 1fr;
++    gap: 20px;
++    align-items: baseline;
++    padding: 16px 0 16px 16px;
++    border-top: 1px solid var(--line);
++    border-left: 3px solid var(--critical);
++  }
++  .barriers li:last-child { border-bottom: 1px solid var(--line); }
++  .barriers .figure {
++    font-family: var(--mono);
++    font-variant-numeric: tabular-nums;
++    font-size: 1.28rem;
++    font-weight: 600;
++    color: var(--critical);
++    letter-spacing: -0.02em;
++  }
++  .barriers .figure small { display: block; font-size: 0.62rem; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-top: 3px; }
++  .barriers .body { font-family: var(--sans); font-size: 0.93rem; line-height: 1.55; }
++  .barriers .body b { font-weight: 600; }
++
++  /* ---------- charts ---------- */
++  figure { margin: 30px 0 8px; }
++  figcaption {
++    font-family: var(--sans);
++    font-size: 0.78rem;
++    color: var(--muted);
++    margin-top: 14px;
++    max-width: 64ch;
++  }
++  .chart-title {
++    font-family: var(--sans);
++    font-size: 0.95rem;
++    font-weight: 600;
++    margin: 0 0 2px;
++  }
++  .chart-sub {
++    font-family: var(--sans);
++    font-size: 0.78rem;
++    color: var(--muted);
++    margin: 0 0 20px;
++  }
++
++  .bars { display: flex; flex-direction: column; gap: 14px; }
++  .bar-row { display: grid; grid-template-columns: 130px 1fr; gap: 16px; align-items: center; }
++  .bar-label { font-family: var(--sans); font-size: 0.86rem; font-weight: 500; }
++  .bar-label span { display: block; font-size: 0.7rem; color: var(--muted); font-weight: 400; }
++  .bar-track { display: flex; align-items: center; gap: 10px; min-width: 0; }
++  .bar-fill {
++    height: 22px;
++    background: var(--mark);
++    border-radius: 0 4px 4px 0;   /* rounded data-end, anchored to baseline */
++    min-width: 2px;
++  }
++  .bar-fill.zero { background: var(--critical); width: 3px; border-radius: 2px; }
++  .bar-value {
++    font-family: var(--mono);
++    font-variant-numeric: tabular-nums;
++    font-size: 0.85rem;
++    font-weight: 600;
++    white-space: nowrap;
++    color: var(--ink-2);
++  }
++  .bar-value.zero { color: var(--critical); }
++
++  /* proportion bar */
++  .prop {
++    display: flex;
++    height: 34px;
++    border-radius: 4px;
++    overflow: hidden;
++    background: var(--mark-track);
++    border: 1px solid var(--line);
++  }
++  .prop-fill { background: var(--mark); }
++  .prop-legend {
++    display: flex; justify-content: space-between; gap: 12px;
++    font-family: var(--sans); font-size: 0.78rem; margin-top: 10px; color: var(--muted);
++  }
++  .prop-legend b { font-family: var(--mono); font-weight: 600; color: var(--ink-2); }
++
++  /* ---------- timeline: a real sequence, so it is numbered by date ---------- */
++  .timeline { margin: 0; padding: 0; list-style: none; border-left: 2px solid var(--spine); }
++  .timeline li { position: relative; padding: 0 0 26px 26px; }
++  .timeline li::before {
++    content: ""; position: absolute; left: -7px; top: 7px;
++    width: 12px; height: 12px; border-radius: 50%;
++    background: var(--ground); border: 2px solid var(--line-strong);
++  }
++  .timeline li.hot::before { background: var(--critical); border-color: var(--critical); }
++  .timeline li.now::before { background: var(--mark); border-color: var(--mark); }
++  .tl-date {
++    font-family: var(--mono); font-size: 0.76rem; font-weight: 600;
++    letter-spacing: 0.02em; color: var(--muted); display: block; margin-bottom: 3px;
++  }
++  .timeline li.hot .tl-date { color: var(--critical); }
++  .timeline li.now .tl-date { color: var(--mark); }
++  .tl-head { font-family: var(--sans); font-size: 0.95rem; font-weight: 600; display: block; margin-bottom: 4px; }
++  .tl-body { font-family: var(--sans); font-size: 0.87rem; color: var(--ink-2); line-height: 1.55; max-width: 60ch; }
++
++  /* ---------- tables ---------- */
++  .table-scroll { overflow-x: auto; margin: 26px 0 8px; }
++  table { border-collapse: collapse; width: 100%; min-width: 520px; font-family: var(--sans); font-size: 0.88rem; }
++  th, td { text-align: left; padding: 11px 14px 11px 0; border-bottom: 1px solid var(--line); }
++  thead th {
++    font-size: 0.68rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
++    color: var(--muted); border-bottom: 1px solid var(--line-strong); padding-bottom: 8px;
++  }
++  td.n, th.n { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; padding-right: 0; }
++  td.delta { color: var(--critical); font-weight: 600; }
++  tbody tr:last-child td { border-bottom: none; }
++
++  /* ---------- callouts ---------- */
++  .callout {
++    margin: 30px 0;
++    padding: 20px 22px;
++    border-radius: 4px;
++    border-left: 3px solid var(--amber);
++    background: var(--amber-bg);
++    font-family: var(--sans);
++    font-size: 0.92rem;
++    line-height: 1.58;
++  }
++  .callout.hard { border-left-color: var(--critical); background: var(--critical-bg); }
++  .callout h3 {
++    font-size: 0.7rem; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
++    margin: 0 0 8px; color: var(--amber);
++  }
++  .callout.hard h3 { color: var(--critical); }
++  .callout p { max-width: none; margin: 0; }
++  .callout p + p { margin-top: 12px; }
++
++  /* ---------- money model ---------- */
++  .horizons { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
++  @media (min-width: 720px) { .horizons { grid-template-columns: repeat(3, 1fr); } }
++  .horizon { background: var(--surface); padding: 20px; display: flex; flex-direction: column; gap: 10px; }
++  .horizon .when {
++    font-family: var(--mono); font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em;
++    text-transform: uppercase; color: var(--mark);
++  }
++  .horizon h3 { font-family: var(--sans); font-size: 1rem; font-weight: 600; margin: 0; }
++  .horizon p { font-family: var(--sans); font-size: 0.85rem; line-height: 1.55; color: var(--ink-2); margin: 0; max-width: none; }
++  .horizon .buyer {
++    font-family: var(--sans); font-size: 0.72rem; color: var(--muted);
++    border-top: 1px solid var(--line); padding-top: 10px; margin-top: auto;
++  }
++  .horizon .buyer b { color: var(--ink-2); font-weight: 600; }
++
++  /* ---------- sources ---------- */
++  details {
++    margin-top: 26px; border: 1px solid var(--line); border-radius: 4px;
++    background: var(--surface); padding: 0 18px;
++  }
++  summary {
++    cursor: pointer; font-family: var(--sans); font-size: 0.85rem; font-weight: 600;
++    padding: 14px 0; list-style-position: inside;
++  }
++  details[open] summary { border-bottom: 1px solid var(--line); }
++  .sources { font-family: var(--sans); font-size: 0.82rem; line-height: 1.6; padding: 14px 0 18px; margin: 0; }
++  .sources li { margin-bottom: 9px; color: var(--muted); }
++  .sources li:last-child { margin-bottom: 0; }
++
++  footer {
++    margin-top: 72px; padding-top: 22px; border-top: 1px solid var(--line);
++    font-family: var(--mono); font-size: 0.72rem; color: var(--muted); line-height: 1.8;
++  }
++
++  @media (prefers-reduced-motion: reduce) {
++    * { animation: none !important; transition: none !important; }
++  }
++</style>
++
++<div class="wrap">
++
++  <header class="masthead">
++    <div>
++      <p class="eyebrow">Marktlage · Energie Teilen</p>
++      <h1>Energy Sharing Reality Check</h1>
++    </div>
++    <div class="stamp">
++      Stand <b>06.09.2026</b><br>
++      Markt <b>DE</b> · Währung <b>EUR</b><br>
++      Quellenstand <b>September 2026</b>
++    </div>
++  </header>
++
++  <p class="thesis">
++    Energy Sharing nach § 42c ist seit dem 1. Juni 2026 geltendes Recht — und in
++    der Praxis <strong>nicht durchführbar</strong>. Der Markenname zeigt auf einen
++    Markt, der 2028 entsteht. Der Umsatz liegt in dem Markt, den der Rechner heute
++    schon abbildet.
++  </p>
++
++  <section>
++    <h2>Warum Energy Sharing 2026 nicht ausführbar ist</h2>
++    <p class="lede">
++      Das Gesetz verlangt viertelstündliche Bilanzierung der Stromflüsse. Die
++      Infrastruktur dafür existiert nicht.
++    </p>
++
++    <figure>
++      <p class="chart-title">Smart-Meter-Durchdringung gegen die gesetzliche Anforderung</p>
++      <p class="chart-sub">§ 42c setzt Zählerstandsgangmessung oder 15-Minuten-Werte an jedem Zähl- und Erzeugungspunkt voraus.</p>
++      <div class="prop" role="img" aria-label="5,5 Prozent der Zählpunkte verfügen über ein Smart Meter; 94,5 Prozent nicht.">
++        <div class="prop-fill" style="width: 5.5%"></div>
++      </div>
++      <div class="prop-legend">
++        <span><b>5,5 %</b> ausgerollt</span>
++        <span><b>94,5 %</b> fehlen für die geforderte Bilanzierung</span>
++      </div>
++      <figcaption>
++        Ohne viertelstündliche Messung an jedem beteiligten Punkt lässt sich eine
++        Sharing-Gemeinschaft weder abrechnen noch bilanzieren.
++      </figcaption>
++    </figure>
++
++    <ul class="barriers">
++      <li>
++        <span class="figure">860<small>Netzbetreiber</small></span>
++        <span class="body">
++          <b>Keine standardisierten IT-Schnittstellen</b> für Energiegemeinschaften
++          in der Marktkommunikation. Marktteilnehmer veranschlagen zwei bis drei
++          Jahre, bis die Systeme angepasst sind.
++        </span>
++      </li>
++      <li>
++        <span class="figure">~60 %<small>des Strompreises</small></span>
++        <span class="body">
++          <b>Netzentgelte, Steuern und Abgaben</b> machen rund 60 % des
++          Haushaltsstrompreises aus und werden beim Sharing nicht erlassen. Der
++          wirtschaftliche Vorteil verschwindet damit weitgehend.
++        </span>
++      </li>
++      <li>
++        <span class="figure">0<small>Standardprodukte</small></span>
++        <span class="body">
++          <b>Direktvermarkter</b> bieten kaum Produkte an, die zu den Anforderungen
++          des Sharing passen — obwohl die Vermarktung des Überschusses verpflichtend ist.
++        </span>
++      </li>
++    </ul>
++
++    <div class="callout hard">
++      <h3>Der Befund, den kaum jemand ausspricht</h3>
++      <p>
++        Kommunale Stadtwerke sind als öffentlich-rechtliche Körperschaften vom
++        <em>Anlagenbetrieb</em> im Energy Sharing ausgeschlossen. Sie dürfen nicht
++        mitspielen — sie können nur bedienen. Damit bleibt ihnen ausschließlich das
++        Dienstleistungsmodell: Direktvermarktung, Abrechnung, Allokation, IT.
++      </p>
++      <p>
++        Das ist kein Nachteil für Energie Teilen. Das ist die Kundenliste.
++      </p>
++    </div>
++  </section>
++
++  <section>
++    <h2>Deutschland gegen Märkte, die es bereits gelöst haben</h2>
++    <p class="lede">
++      Österreich und Italien haben Energiegemeinschaften früher geöffnet und die
++      Messinfrastruktur vorher gebaut. Der Abstand ist kein Nachfrage-, sondern ein
++      Prozessproblem.
++    </p>
++
++    <figure>
++      <p class="chart-title">Aktive Energiegemeinschaften</p>
++      <p class="chart-sub">Zahl der Gemeinschaften bzw. Konfigurationen im Betrieb, Stand September 2026</p>
++      <div class="bars">
++        <div class="bar-row">
++          <div class="bar-label">Österreich<span>seit 2021 offen</span></div>
++          <div class="bar-track">
++            <div class="bar-fill" style="width: 100%"></div>
++            <span class="bar-value">6.500+</span>
++          </div>
++        </div>
++        <div class="bar-row">
++          <div class="bar-label">Italien<span>18.000+ Mitglieder</span></div>
++          <div class="bar-track">
++            <div class="bar-fill" style="width: 27.7%"></div>
++            <span class="bar-value">1.800+</span>
++          </div>
++        </div>
++        <div class="bar-row">
++          <div class="bar-label">Deutschland<span>seit 01.06.2026 offen</span></div>
++          <div class="bar-track">
++            <div class="bar-fill zero"></div>
++            <span class="bar-value zero">0 in Betrieb</span>
++          </div>
++        </div>
++      </div>
++      <figcaption>
++        Eine Skala, ein Maß. Deutschlands Balken ist nicht klein, sondern leer:
++        das Gesetz gilt seit gut drei Monaten, die Messinfrastruktur nicht.
++      </figcaption>
++    </figure>
++  </section>
++
++  <section>
++    <h2>Die größere Verschiebung: das EEG 2027</h2>
++    <p class="lede">
++      Nicht das Sharing entscheidet über die Wirtschaftlichkeit der nächsten
++      Projekte, sondern das Ende der festen Einspeisevergütung.
++    </p>
++
++    <ul class="timeline">
++      <li class="now">
++        <span class="tl-date">01.06.2026 — gilt</span>
++        <span class="tl-head">§ 42c EnWG in Kraft, begrenzt auf ein Netzgebiet</span>
++        <span class="tl-body">
++          Zwei Verträge je Abnehmer: Liefervertrag plus Vertrag zur gemeinsamen
++          Nutzung, letzterer mit Aufteilungsschlüssel und Vergütung in ct/kWh.
++        </span>
++      </li>
++      <li>
++        <span class="tl-date">01.08.2026 – 31.01.2027</span>
++        <span class="tl-head">Aktuelles Vergütungsfenster</span>
++        <span class="tl-body">
++          Teileinspeisung <span class="num">7,70</span> / <span class="num">6,66</span> /
++          <span class="num">5,44</span> ct/kWh nach Anlagengröße. Nächste Absenkung
++          zum 01.02.2027.
++        </span>
++      </li>
++      <li class="hot">
++        <span class="tl-date">2027 — Regierungsentwurf</span>
++        <span class="tl-head">Feste Einspeisevergütung entfällt für Neuanlagen</span>
++        <span class="tl-body">
++          Unter 25 kW: keine EEG-Förderung mehr, dazu dauerhafte Kappung der
++          Einspeiseleistung auf 50 %. 25–100 kW: Marktwertdurchleitung ohne
++          Förderelement. Ab 100 kW: zweiseitiger CfD mit jährlichem
++          Refinanzierungsbeitrag.
++        </span>
++      </li>
++      <li>
++        <span class="tl-date">01.06.2028</span>
++        <span class="tl-head">§ 42c erweitert sich auf angrenzende Netzgebiete</span>
++        <span class="tl-body">
++          Erst hier entsteht der Markt, den der Markenname beschreibt — und nur,
++          wenn Messung und Marktkommunikation bis dahin stehen.
++        </span>
++      </li>
++    </ul>
++
++    <div class="callout">
++      <h3>Was das für die Wirtschaftlichkeit bedeutet</h3>
++      <p>
++        Das 20-Jahres-Modell unterstellt eine feste Einspeisevergütung über die
++        gesamte Laufzeit. Für Anlagen, die nach 2026 in Betrieb gehen, ist das nicht
++        mehr die falsche Zahl — es ist die falsche <em>Struktur</em>.
++      </p>
++      <p>
++        Entzogen wird ausschließlich der Einspeiseerlös. Der im Gebäude verbrauchte
++        Strom bleibt unberührt. Damit steigt der relative Wert des Eigenverbrauchs —
++        also genau dessen, was Mieterstrom und gemeinschaftliche Gebäudeversorgung
++        organisieren. Die Regulierung drückt den Markt in den Keil hinein, den es
++        bereits gibt.
++      </p>
++    </div>
++  </section>
++
++  <section>
++    <h2>Wo der Umsatz liegt</h2>
++    <p class="lede">
++      Drei Horizonte, drei Käufer. Keiner davon erfordert, dass Energy Sharing
++      heute funktioniert.
++    </p>
++
++    <div class="horizons">
++      <div class="horizon">
++        <span class="when">jetzt · 2026–2027</span>
++        <h3>Qualifizierung und Strukturierung</h3>
++        <p>
++          Mieterstrom und gemeinschaftliche Gebäudeversorgung sind heute umsetzbar
++          und werden vom Rechner bereits abgebildet. Der Eligibility Check verkauft
++          sich über eine benannte Lücke, nicht über ein Versprechen.
++        </p>
++        <span class="buyer">Käufer: <b>Eigentümer, Verwalter, Genossenschaften</b></span>
++      </div>
++      <div class="horizon">
++        <span class="when">Welle · ab 2027</span>
++        <h3>Erzwungener Eigenverbrauch</h3>
++        <p>
++          Jede Neuanlage unter 25 kW verliert die Förderung und wird auf 50 %
++          Einspeiseleistung gekappt. Eigenverbrauch ist dann nicht mehr die bessere
++          Option, sondern die einzige. Das ist eine Nachfragewelle in genau diesen Keil.
++        </p>
++        <span class="buyer">Käufer: <b>Projektierer, Installateure, EPC</b></span>
++      </div>
++      <div class="horizon">
++        <span class="when">Graben · 2027–2028</span>
++        <h3>Sharing-Dienstleistung</h3>
++        <p>
++          Stadtwerke dürfen nicht betreiben und brauchen einen Prozess, den sie
++          anbieten können. Wer den Workflow schon gebaut hat, wenn die Messung
++          nachzieht, verkauft nicht mehr gegen Alternativen.
++        </p>
++        <span class="buyer">Käufer: <b>Stadtwerke, Messstellenbetreiber</b></span>
++      </div>
++    </div>
++
++    <div class="callout">
++      <h3>Zur API-Frage</h3>
++      <p>
++        Eine offene API auf die Rechenmaschine untergräbt die Leiter: der Rechner
++        ist der Köder, nicht das Produkt. Sinnvoll ist eine <em>geschlüsselte,
++        bezahlte</em> Schnittstelle für Stadtwerke und EPC, die Qualifizierung in
++        ihren eigenen Prozess ziehen wollen — dieselbe deterministische Engine,
++        dieselbe Herkunftskennzeichnung, abgerechnet pro Projekt. Kostenlos und
++        öffentlich verschenkt sie den einzigen Vorsprung, der schwer zu kopieren ist.
++      </p>
++    </div>
++  </section>
++
++  <section>
++    <h2>Was heute im Produkt korrigiert wurde</h2>
++    <p class="lede">
++      Drei regulierte Eingangswerte waren falsch, und alle drei sind nach
++      Anlagengröße gestaffelt, während der Rechner Skalare verwendete.
++    </p>
++
++    <div class="table-scroll">
++      <table>
++        <thead>
++          <tr>
++            <th>Größe</th>
++            <th class="n">vorher</th>
++            <th class="n">korrigiert</th>
++            <th>Grundlage</th>
++          </tr>
++        </thead>
++        <tbody>
++          <tr>
++            <td>Einspeisevergütung, 30 kWp</td>
++            <td class="n">7,86</td>
++            <td class="n">6,66</td>
++            <td>EEG-Fördersatz, Band 10–40 kWp</td>
++          </tr>
++          <tr>
++            <td>Mieterstromzuschlag, 30 kWp</td>
++            <td class="n">2,50</td>
++            <td class="n">2,36</td>
++            <td>EEG-Zuschlag, gleiches Band</td>
++          </tr>
++          <tr>
++            <td>CO₂-Faktor Strommix</td>
++            <td class="n">0,380</td>
++            <td class="n">0,344</td>
++            <td>Umweltbundesamt, 2025</td>
++          </tr>
++        </tbody>
++      </table>
++    </div>
++
++    <div class="table-scroll">
++      <table>
++        <thead>
++          <tr>
++            <th>Standardszenario</th>
++            <th class="n">vorher</th>
++            <th class="n">korrigiert</th>
++            <th class="n">Δ</th>
++          </tr>
++        </thead>
++        <tbody>
++          <tr>
++            <td>Kapitalwert (20 J.)</td>
++            <td class="n">22.151,81 €</td>
++            <td class="n">19.463,26 €</td>
++            <td class="n delta">−12,1 %</td>
++          </tr>
++          <tr>
++            <td>IRR</td>
++            <td class="n">9,56 %</td>
++            <td class="n">8,94 %</td>
++            <td class="n delta">−0,62 pp</td>
++          </tr>
++          <tr>
++            <td>CO₂-Einsparung</td>
++            <td class="n">92,98 t</td>
++            <td class="n">84,17 t</td>
++            <td class="n delta">−9,5 %</td>
++          </tr>
++        </tbody>
++      </table>
++    </div>
++
++    <p style="margin-top:22px">
++      Die Rechenlogik ist unverändert; nur ihre Eingangswerte waren falsch. Das
++      Standardszenario der Seite hat die eigene Rendite um rund ein Zehntel zu hoch
++      ausgewiesen. Der Annahmensatz wurde auf
++      <span class="num">de-mieterstrom-2026-09.2</span> gehoben, damit alte und neue
++      Berichte nicht stillschweigend vergleichbar wirken.
++    </p>
++  </section>
++
++  <section>
++    <h2>Was noch geprüft werden muss</h2>
++    <p class="lede">
++      Diese Punkte sind bewusst offen und im Code als unbelegt markiert.
++    </p>
++    <ul class="barriers">
++      <li style="border-left-color: var(--amber)">
++        <span class="figure" style="color: var(--amber)">3<small>Paragrafen</small></span>
++        <span class="body">
++          Die Zuordnung der drei Modelle zu ihren Paragrafen ist recherchiert, aber
++          nicht anwaltlich bestätigt. Im Modellregister hinterlegt; das Produkt zeigt
++          bis zur Freigabe keine Paragrafenangabe.
++        </span>
++      </li>
++      <li style="border-left-color: var(--amber)">
++        <span class="figure" style="color: var(--amber)">2<small>Tarifsätze</small></span>
++        <span class="body">
++          Einspeisevergütung und Mieterstromzuschlag stammen aus Sekundärquellen.
++          Gegen die amtliche Veröffentlichung zu prüfen — „jemand berichtet die Zahl
++          der Behörde“ ist nicht dieselbe Aussage wie „die Behörde veröffentlicht sie“.
++        </span>
++      </li>
++      <li style="border-left-color: var(--amber)">
++        <span class="figure" style="color: var(--amber)">6–10<small>% IRR-Band</small></span>
++        <span class="body">
++          Der interne Orientierungsbereich hat weiterhin keine belegte
++          Datengrundlage und wird im Bericht ausdrücklich als Platzhalter geführt.
++        </span>
++      </li>
++    </ul>
++
++    <details>
++      <summary>Quellen</summary>
++      <ul class="sources">
++        <li>GÖRG — Ausblick auf das ab 1. Juni 2026 geltende Energy Sharing gemäß § 42c EnWG (Geltungsbereich, Messanforderungen, Vertragspflichten)</li>
++        <li>Solarserver, 29.05.2026 — Energy Sharing in Deutschland: viele Fragen offen (5,5 % Smart-Meter-Quote, 860 Netzbetreiber, ~60 % Netzentgelte und Abgaben)</li>
++        <li>ZfK — Energy Sharing: Welche Rolle Stadtwerke einnehmen sollten (Ausschluss vom Anlagenbetrieb, Dienstleistungsmodell, Vergleichszahlen Österreich und Italien)</li>
++        <li>BBH-Blog — EEG 2027: Abschaffung der Einspeisevergütung und neue CfD-Regel (Schwellen 25 kW / 100 kW, Kappung, Refinanzierungsbeitrag)</li>
++        <li>Logic Energy — EEG-Vergütung 2026 (Teileinspeisungssätze, Gültigkeitsfenster 01.08.2026–31.01.2027)</li>
++        <li>volt-e.de — Mieterstromzuschlag 2026 (Staffelung nach Anlagengröße)</li>
++        <li>reduco.ai — Mieterstrom PV Mehrfamilienhaus (Preisobergrenze 90 % des Grundversorgungstarifs)</li>
++        <li>Umweltbundesamt, 23.03.2026 — CO₂-Emissionen pro Kilowattstunde Strom 2025 (344 g/kWh; 2024: 353 g/kWh)</li>
++      </ul>
++    </details>
++  </section>
++
++  <footer>
++    Energie Teilen · Marktlage 06.09.2026 · Jurisdiktion DE · Währung EUR<br>
++    Recherche aus Sekundärquellen sofern nicht anders angegeben. Keine Rechts-,
++    Steuer- oder Anlageberatung.
++  </footer>
++
++</div>
+diff --git a/package.json b/package.json
+index 1622bb4..3011b67 100644
+--- a/package.json
++++ b/package.json
+@@ -16,6 +16,7 @@
+     "test:watch": "vitest",
+     "verify": "pnpm check && pnpm test && pnpm build",
+     "dev:kv": "node scripts/dev-kv.mjs",
++    "doctor": "node scripts/doctor.mjs",
+     "format": "prettier --write ."
+   },
+   "dependencies": {
+diff --git a/scripts/doctor.mjs b/scripts/doctor.mjs
+new file mode 100644
+index 0000000..9f1678f
+--- /dev/null
++++ b/scripts/doctor.mjs
+@@ -0,0 +1,179 @@
++#!/usr/bin/env node
++/**
++ * scripts/doctor.mjs — the go-live gate.
++ *
++ * Nine patches of funnel work are deployed and the site has taken zero euros,
++ * because /api/pilot-checkout returns 503 to every visitor until Stripe is
++ * configured. That is not a code problem, so no amount of code fixes it. This
++ * turns the remaining gap into a checklist that says what is missing, what it
++ * costs while it stays missing, and exactly what to do about it.
++ *
++ * Reads only /api/health, which reports presence of configuration and never a
++ * secret value.
++ *
++ *   pnpm doctor                      # production
++ *   pnpm doctor http://localhost:3000
++ */
++
++const DEFAULT_URL = "https://energie-teilen-site.vercel.app";
++const base = (process.argv[2] || DEFAULT_URL).replace(/\/+$/, "");
++
++const c = {
++  reset: "[0m",
++  bold: "[1m",
++  dim: "[2m",
++  red: "[31m",
++  green: "[32m",
++  yellow: "[33m",
++  cyan: "[36m",
++};
++
++/**
++ * Ordered by what it costs to leave broken, not by where it sits in the stack.
++ * `blocking` means: money cannot be taken while this is false.
++ */
++const CHECKS = [
++  {
++    key: "stripe",
++    blocking: true,
++    label: "Stripe secret key",
++    impact: "Checkout returns 503 to every visitor. No payment is possible.",
++    fix: "Set STRIPE_SECRET_KEY (Vercel → Settings → Environment Variables).",
++  },
++  {
++    key: "prices",
++    blocking: true,
++    label: "Stripe price IDs (3 tiers)",
++    impact: "The tier the visitor selects cannot be priced, so checkout fails.",
++    fix: "Create three one-time Products in Stripe, then set STRIPE_PRICE_ET_ELIGIBILITY, _STRUCTURING, _MANDATE.",
++    nested: true,
++  },
++  {
++    key: "appUrl",
++    blocking: true,
++    label: "APP_URL",
++    impact:
++      "Stripe redirects back to localhost after payment, so the confirmation screen never renders.",
++    fix: `Set APP_URL=${DEFAULT_URL}`,
++    isString: true,
++  },
++  {
++    key: "stripeWebhook",
++    blocking: true,
++    label: "Stripe webhook secret",
++    impact:
++      "Payments succeed but nothing is recorded: no ledger entry, no confirmation, no order to fulfil.",
++    fix: `Add an endpoint at ${DEFAULT_URL}/api/stripe/webhook for checkout.session.completed AND checkout.session.async_payment_succeeded, then set STRIPE_WEBHOOK_SECRET.`,
++  },
++  {
++    key: "resend",
++    blocking: false,
++    label: "Resend API key",
++    impact: "The customer pays and receives nothing from you. Refund risk.",
++    fix: "Set RESEND_API_KEY and RESEND_FROM_EMAIL on a domain you control.",
++  },
++  {
++    key: "customerConfirmation",
++    blocking: false,
++    label: "Customer confirmation reply-to",
++    impact: "The confirmation email has no address for the customer to send project data to.",
++    fix: "Set ET_CUSTOMER_REPLY_TO (or LEAD_NOTIFICATION_EMAIL) to a domain address.",
++  },
++  {
++    key: "durableOrders",
++    blocking: false,
++    label: "Durable order ledger",
++    impact:
++      "A paid order exists only in Stripe and one email. It cannot be listed, tracked or chased.",
++    fix: "Create a free Upstash Redis DB, set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN.",
++  },
++  {
++    key: "adminApi",
++    blocking: false,
++    label: "Admin API",
++    impact: "No way to see open orders, what they are worth, or what is overdue.",
++    fix: "Set ADMIN_API_TOKEN to at least 32 random characters: openssl rand -hex 32",
++  },
++];
++
++function evaluate(config, check) {
++  if (check.nested) {
++    const p = config.prices ?? {};
++    const vals = Object.values(p);
++    return vals.length > 0 && vals.every(Boolean);
++  }
++  if (check.isString) {
++    const v = config[check.key];
++    return typeof v === "string" && v.length > 0 && v !== "(unset)";
++  }
++  return config[check.key] === true;
++}
++
++async function main() {
++  process.stdout.write(`${c.dim}Checking ${base}/api/health …${c.reset}\n\n`);
++
++  let config;
++  try {
++    const res = await fetch(`${base}/api/health?cb=${Date.now()}`, {
++      headers: { "cache-control": "no-cache" },
++    });
++    if (!res.ok) throw new Error(`HTTP ${res.status}`);
++    config = (await res.json()).config ?? {};
++  } catch (err) {
++    process.stdout.write(`${c.red}${c.bold}Could not reach the site.${c.reset} ${String(err)}\n`);
++    process.stdout.write(`${c.dim}Is it deployed? Try: npx vercel --prod${c.reset}\n`);
++    process.exit(2);
++  }
++
++  const results = CHECKS.map((check) => ({ ...check, ok: evaluate(config, check) }));
++  const blockers = results.filter((r) => r.blocking && !r.ok);
++  const degraded = results.filter((r) => !r.blocking && !r.ok);
++
++  for (const r of results) {
++    const mark = r.ok ? `${c.green}✓${c.reset}` : r.blocking ? `${c.red}✗${c.reset}` : `${c.yellow}!${c.reset}`;
++    process.stdout.write(`  ${mark} ${r.label}\n`);
++  }
++
++  process.stdout.write("\n");
++
++  if (blockers.length > 0) {
++    process.stdout.write(
++      `${c.red}${c.bold}REVENUE BLOCKED${c.reset} — ${blockers.length} of ${
++        results.filter((r) => r.blocking).length
++      } payment prerequisites are missing.\n` +
++        `${c.dim}The funnel is deployed and cannot take a single euro until these are set.${c.reset}\n\n`,
++    );
++    blockers.forEach((r, i) => {
++      process.stdout.write(`${c.bold}${i + 1}. ${r.label}${c.reset}\n`);
++      process.stdout.write(`   ${c.dim}Costs you:${c.reset} ${r.impact}\n`);
++      process.stdout.write(`   ${c.cyan}Fix:${c.reset} ${r.fix}\n\n`);
++    });
++  } else {
++    process.stdout.write(`${c.green}${c.bold}Payment path is configured.${c.reset}\n\n`);
++    process.stdout.write(`${c.dim}Prove it end to end before trusting it:${c.reset}\n`);
++    process.stdout.write(`  stripe listen --forward-to ${base}/api/stripe/webhook\n`);
++    process.stdout.write(`  ${c.dim}then buy a tier with test card 4242 4242 4242 4242 and confirm:${c.reset}\n`);
++    process.stdout.write(`  ${c.dim}confirmation screen → customer email → order in /api/admin/orders${c.reset}\n\n`);
++  }
++
++  if (degraded.length > 0) {
++    process.stdout.write(
++      `${c.yellow}${c.bold}DEGRADED${c.reset} — payment would work, fulfilment would not.\n\n`,
++    );
++    degraded.forEach((r) => {
++      process.stdout.write(`${c.bold}· ${r.label}${c.reset}\n`);
++      process.stdout.write(`   ${c.dim}Costs you:${c.reset} ${r.impact}\n`);
++      process.stdout.write(`   ${c.cyan}Fix:${c.reset} ${r.fix}\n\n`);
++    });
++  }
++
++  if (blockers.length === 0 && degraded.length === 0) {
++    process.stdout.write(`${c.green}${c.bold}All clear. Nothing between you and revenue but customers.${c.reset}\n`);
++  }
++
++  // Non-zero only for revenue blockers: degraded is a warning, not a failure,
++  // so this stays usable in CI without turning fulfilment gaps into red builds.
++  process.exit(blockers.length > 0 ? 1 : 0);
++}
++
++main();
+-- 
+2.43.0
+
