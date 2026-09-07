@@ -4,9 +4,9 @@
  * The durable store, extracted from server/index.ts so the ledger can use it
  * without importing the whole Express app.
  *
- * Upstash Redis over REST. Absent config is a supported state — the server
- * still runs — but callers are expected to notice and say so rather than
- * silently dropping data, which is what happened before the ledger existed.
+ * Upstash Redis over REST. Absent config is a supported state: the server still
+ * runs, and callers are expected to surface the absence rather than dropping
+ * data without a signal.
  */
 
 let kvPromise: Promise<any | null> | null = null;

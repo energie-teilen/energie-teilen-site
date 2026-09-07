@@ -15,17 +15,14 @@ import type { MieterstromResult } from "@/lib/mieterstrom";
 /**
  * EligibilityPanel
  *
- * The calculator used to compute NPV for anything you typed and stop there —
- * it qualified nobody. This turns the result into a decision: whether the
- * constellation clears the economic and structural bar, which fact is missing,
- * and which paid step is actually next.
+ * Turns the calculated result into a decision: whether the constellation
+ * clears the economic and structural bar, which fact is missing, and which
+ * paid step comes next.
  *
- * Four optional questions. Nothing is required, and nothing is assumed: an
- * unanswered question reports as a named gap rather than silently defaulting
- * to the answer that flatters the project. That named gap is the honest reason
- * to buy the Eligibility Check.
+ * Four optional questions. Nothing is required and nothing is assumed: an
+ * unanswered question is reported as a named gap.
  *
- * The verdict never claims legal compliance — the engine enforces that and
+ * The verdict never claims legal compliance; the engine enforces that and
  * eligibility.test.ts pins it.
  */
 
@@ -285,7 +282,7 @@ export function EligibilityPanel({
                 </Button>
               </div>
             ) : (
-              // Selling into a known blocker would be selling a failure.
+              // No paid step for a disqualified constellation.
               <div className="rounded-[20px] border border-border/60 bg-background/70 p-5">
                 <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
                   Nächster Schritt

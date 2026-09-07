@@ -1,30 +1,19 @@
 /**
  * shared/ledger.ts
  *
- * THE ORDER LEDGER — the minimal CRM, as a state machine rather than a table.
+ * Order ledger: Lead, Project, Stage, Owner, Next Action, Value, Source, held
+ * as a state machine rather than a flat table.
  *
- * Today a paid order exists in exactly two places: Stripe, and an email in the
- * operator's inbox. persistRecord() no-ops entirely without Upstash, and
- * /api/health reports durableKv:false on the live deployment — so in practice
- * there is no list of open orders, no record of which have been fulfilled, and
- * a dropped Resend message makes an order invisible. You cannot run a paid
- * funnel you cannot enumerate.
+ * Two properties define it:
  *
- * This is deliberately NOT a CRM product. It is the seven fields the brief
- * asks for — Lead, Project, Stage, Owner, Next Action, Value, Source — with
- * two properties that make it worth having:
+ *   1. Stage transitions are validated. An order cannot move from "paid" to
+ *      "delivered" without passing through the intermediate stages, and cannot
+ *      leave a terminal state.
  *
- *   1. Stage transitions are VALIDATED. An order cannot jump from "paid" to
- *      "delivered" without passing through the work, and it cannot leave a
- *      terminal state by accident.
+ *   2. Next Action is derived, never stored. It is computed from stage, age and
+ *      the tier's fulfillment spec, so it cannot go stale.
  *
- *   2. Next Action is DERIVED, never typed. A next action someone has to
- *      remember to update is a next action that goes stale in a week. It is
- *      computed from stage + age + the tier's own fulfillment spec, so the
- *      ledger tells you what to do rather than storing what you once thought.
- *
- * Pure module: no KV, no Stripe, no Express. server/ledger-store.ts persists
- * it; ledger.test.ts pins the machine.
+ * Pure module: no KV, no Stripe, no Express. server/ledger-store.ts persists it.
  */
 
 import { z } from "zod";
@@ -67,8 +56,7 @@ export const STAGE_LABEL_DE: Record<LedgerStage, string> = {
 
 /**
  * Allowed transitions. Anything not listed is rejected by advanceStage().
- * `closed` can be reopened to in_progress — real work reopens. `refunded` is
- * genuinely terminal: money went back, the order is over.
+ * `closed` may be reopened to in_progress; `refunded` is terminal.
  */
 export const STAGE_TRANSITIONS: Record<LedgerStage, LedgerStage[]> = {
   intake: ["paid", "closed"],
@@ -166,11 +154,8 @@ export const STAGE_SLA_DAYS: Partial<Record<LedgerStage, number>> = {
 };
 
 /**
- * What to do with this order, right now.
- *
- * Derived from stage, age and the tier's own fulfillment spec — never stored,
- * so it cannot go stale. This is the column that makes the ledger a worklist
- * instead of a log.
+ * The current next action for an order, derived from stage, age and the tier's
+ * fulfillment spec.
  */
 export function nextAction(
   record: Pick<OrderLedgerRecord, "stage" | "offerCode" | "updatedAt" | "email">,
@@ -227,9 +212,8 @@ export type AdvanceResult =
   | { ok: false; reason: "invalid_transition"; allowed: LedgerStage[] };
 
 /**
- * Move an order to a new stage, or refuse. Always appends to history — the
- * ledger keeps its own audit trail so "who moved this and when" never depends
- * on someone's memory.
+ * Move an order to a new stage, or refuse. Appends to the record's history so
+ * each transition carries actor and timestamp.
  */
 export function advanceStage(
   record: OrderLedgerRecord,

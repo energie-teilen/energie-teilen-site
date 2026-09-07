@@ -46,7 +46,7 @@ describe("legal model register", () => {
 });
 
 describe("the citation gate", () => {
-  // The whole point: an unchecked paragraph number cannot reach a user.
+  // An unverified paragraph number must not reach a user.
   it("renders no citation for any model until someone verifies it", () => {
     for (const id of LEGAL_MODEL_ORDER) {
       expect(formatCitation(LEGAL_MODELS[id]), `${id} must not render a citation`).toBeNull();

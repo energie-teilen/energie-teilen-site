@@ -1,29 +1,18 @@
 /**
  * shared/pilot-order.ts
  *
- * The FULFILLMENT half of the paid funnel.
+ * Fulfillment side of the paid funnel. Two responsibilities, both deterministic
+ * and unit-tested:
  *
- * Until now the funnel ended at `checkout_created`. Stripe redirected the
- * buyer to `/?paid=1&session_id=...` and nothing on either side of the wire
- * read it: no confirmation, no statement of what was bought, no next step.
- * This file closes that gap.
+ *   1. PILOT_OFFER_FULFILLMENT — what each paid tier delivers and which project
+ *      data the customer must supply before work starts.
  *
- * Two responsibilities, both deterministic and unit-tested:
+ *   2. toPilotOrder() — pure mapper from a Stripe Checkout Session to the safe
+ *      public projection. No Stripe SDK import, since this module is bundled
+ *      into the client; no secrets, line items or payment intents are exposed.
  *
- *   1. PILOT_OFFER_FULFILLMENT — what each paid tier actually delivers and
- *      which project data the customer must supply for work to start. This is
- *      operational truth, not marketing copy, so it lives next to the schema
- *      rather than in the React tree.
- *
- *   2. toPilotOrder() — a pure mapper from a Stripe Checkout Session to the
- *      safe public projection the browser is allowed to see. No Stripe SDK
- *      import: this module is bundled into the client, so it only knows a
- *      structural shape. No secrets, no line items, no payment intents.
- *
- * DELIBERATELY ABSENT: any delivery deadline or turnaround guarantee. The AGB
- * (§ 2) does not state one, so inventing one here would be selling a
- * contractual term that does not exist. If the operator wants to communicate a
- * response window, they set ET_PILOT_RESPONSE_WINDOW and it is echoed verbatim.
+ * No turnaround guarantee is expressed here. A response window is rendered only
+ * when ET_PILOT_RESPONSE_WINDOW is set, and is echoed verbatim.
  */
 
 import {

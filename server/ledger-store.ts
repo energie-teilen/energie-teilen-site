@@ -1,20 +1,16 @@
 /**
  * server/ledger-store.ts
  *
- * Persistence for the order ledger. Thin on purpose: Redis hash + a sorted
- * index, no ORM, no migrations, no new infrastructure.
+ * Persistence for the order ledger: a Redis key per record plus a sorted index.
+ * No ORM, no migrations.
  *
- * Two design decisions worth stating:
+ * Two design decisions:
  *
- *   1. The reference (ET-XXXXXXXX) is the key, not the Stripe session id. It
- *      is what the customer quotes, what the confirmation email carries and
- *      what the operator types. A ledger keyed on something nobody can read
- *      aloud is a ledger nobody uses.
+ *   1. The human reference (ET-XXXXXXXX) is the key, not the Stripe session id.
+ *      It is what the customer quotes and what the confirmation email carries.
  *
- *   2. When there is no durable store, writes DO NOT silently succeed. They
- *      return { durable: false } and the caller is expected to escalate. The
- *      previous behaviour — persistRecord() returning void whether or not it
- *      stored anything — is how a paid order became invisible.
+ *   2. Without a durable store, writes return { durable: false } rather than
+ *      reporting success, so the caller can escalate.
  */
 
 import {

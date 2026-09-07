@@ -39,7 +39,7 @@ describe("buildReportDoc", () => {
     expect(bytes.length).toBeGreaterThan(2000);
   });
 
-  // P0.6 — a result nobody can reproduce is a result nobody can rely on.
+  // Every output must be reproducible from its stamp.
   it("stamps model version, assumption set, jurisdiction, currency and date", () => {
     const raw = renderText();
     expect(raw).toContain(MODEL_VERSION);
@@ -70,8 +70,7 @@ describe("buildReportDoc", () => {
     expect(raw).toContain("energie-teilen.de");
   });
 
-  // The report used to promise a "Messkonzept-Skizze" it never contained.
-  // It must not claim a deliverable it does not produce.
+  // The report must not claim a deliverable it does not produce.
   it("does not claim to contain a Messkonzept it never renders", () => {
     expect(renderText()).not.toContain("Messkonzept");
   });
@@ -88,8 +87,8 @@ describe("buildReportDoc", () => {
     expect(renderText()).not.toMatch(/EnWG/);
   });
 
-  // jsPDF's built-in Helvetica is WinAnsi-encoded: U+2082 has no glyph and
-  // "CO₂" silently rendered as "CO ,". Keep PDF-bound strings ASCII.
+  // jsPDF's built-in Helvetica is WinAnsi-encoded: U+2082 has no glyph, so
+  // PDF-bound strings stay ASCII.
   it("renders no unmapped glyphs in the CO2 labels", () => {
     const raw = renderText();
     expect(raw).toContain("CO2-Einsparung");
@@ -117,7 +116,7 @@ describe("buildReportDoc", () => {
     expect(raw).not.toContain("Offene Angaben");
   });
 
-  // Selling into a known blocker would be selling a failure.
+  // No paid step is offered for a disqualified constellation.
   it("offers no paid step when the constellation is disqualified", () => {
     const raw = renderText({ ...DEFAULTS, anzahlWohneinheiten: 1 }, FIXED_NOW, QUALIFIED);
     expect(raw).not.toContain("Pilot Eligibility Check");
@@ -131,8 +130,7 @@ describe("buildReportDoc", () => {
     }
   });
 
-  // Layout regression guard: adding the model row once pushed the cashflow
-  // chart onto its own page and left half of page 1 blank.
+  // Layout regression guard.
   it("stays at three pages, so nothing spills into a half-empty page", () => {
     expect(buildReportDoc(DEFAULTS, scenarios, { now: FIXED_NOW }).getNumberOfPages()).toBe(3);
   });

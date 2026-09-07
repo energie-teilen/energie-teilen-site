@@ -1,30 +1,16 @@
 /**
  * client/src/lib/analytics.ts
  *
- * FUNNEL INSTRUMENTATION.
+ * Funnel instrumentation over Plausible.
  *
- * The site has had Plausible in the CSP and a pageview hook since launch, and
- * has recorded nothing useful, for two reasons found by reading the shipped
- * HTML rather than the config:
+ * Loads the script itself so the `window.plausible` queue stub exists before
+ * any event fires, and resolves the reporting domain from
+ * VITE_PLAUSIBLE_DOMAIN with the current hostname as fallback.
  *
- *   1. `data-domain="energie-teilen.de"` while the site serves from
- *      energie-teilen-site.vercel.app. Plausible discards events whose domain
- *      does not match a registered site, so every hit was dropped.
- *   2. No `window.plausible` queue stub. Any custom event fired before the
- *      deferred script finished loading — i.e. most of them — hit undefined
- *      and was lost.
- *
- * So there is now a qualification gate routing visitors to three different
- * tiers, and no way to know which verdict converts. That is a decision made on
- * opinion. This module makes it arithmetic.
- *
- * Rules this file enforces:
- *   - NO personal data, ever. Event properties are enums, counts and booleans.
- *     sanitiseProps() drops anything that looks like free text or an address,
- *     and the test suite pins that. A funnel measured at the cost of leaking a
- *     customer's email is not worth measuring.
- *   - Fails silent and never throws into a render path. Analytics must not be
- *     able to break the calculator.
+ * Rules this module enforces:
+ *   - No personal data. Event properties are enums, counts and booleans;
+ *     sanitiseProps() drops free text, emails, phone numbers and postcodes.
+ *   - Never throws into a render path.
  *   - Respects Do Not Track.
  */
 
@@ -130,19 +116,17 @@ export function doNotTrackEnabled(): boolean {
 export function analyticsDomain(): string {
   const configured = import.meta.env?.VITE_PLAUSIBLE_DOMAIN as string | undefined;
   if (configured && configured.trim().length > 0) return configured.trim();
-  // Falling back to the actual host is the honest default: it is right on the
-  // custom domain, and on any other host Plausible simply ignores the events
-  // rather than silently attributing them to the wrong site.
+  // Falling back to the actual host is correct on the custom domain; on any
+  // other host Plausible ignores the events rather than attributing them
+  // elsewhere.
   return w()?.location?.hostname ?? "";
 }
 
 let initialised = false;
 
 /**
- * Install the queue stub and load Plausible.
- *
- * The stub MUST exist before any track() call — that is the bug this replaces.
- * Idempotent; safe to call from a React effect.
+ * Install the queue stub and load Plausible. The stub must exist before any
+ * track() call. Idempotent; safe to call from a React effect.
  */
 export function initAnalytics(): void {
   const win = w();

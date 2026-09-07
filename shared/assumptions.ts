@@ -1,25 +1,15 @@
 /**
  * shared/assumptions.ts
  *
- * PROVENANCE AND VERSIONING FOR EVERY NUMBER THE PRODUCT SELLS.
+ * Provenance and versioning metadata for every input the model uses.
  *
- * The calculator is the wedge, and the PDF is the artefact a customer forwards
- * to an owner, a bank or a Stadtwerk. Before this file, that PDF presented
- * twelve default inputs, a CO2 factor and a "6–10 % IRR" benchmark with no
- * indication that most of them are unsourced starting values — and with no
- * version stamp, so two reports produced months apart under different defaults
- * were indistinguishable.
+ * Each value carries its source class, reference, as-of date and verification
+ * state, so a report can state where a number came from rather than presenting
+ * all inputs with equal authority. This module holds metadata only; the
+ * calculation itself is in client/src/lib/mieterstrom.ts.
  *
- * Selling an unsourced number as a fact is the fastest way to lose a
- * professional buyer. This module makes provenance explicit and machine-
- * readable, so the report can state it rather than imply authority it lacks.
- *
- * The math is untouched. This is metadata about the math.
- *
- * INVARIANT (enforced by assumptions.test.ts):
+ * Invariant (enforced by assumptions.test.ts):
  *   verified === true  ⇒  reference !== null AND asOf !== null
- * You cannot mark something verified without saying where it came from and as
- * of when. Today every entry is verified:false, which is the honest state.
  */
 
 // ============================================================================
@@ -59,7 +49,7 @@ export type AssumptionMeta = {
   source: SourceOfTruth;
   /**
    * Where the value comes from. MUST be non-null when verified is true.
-   * null means: nobody has sourced this yet.
+   * null means the value has not been sourced.
    */
   reference: string | null;
   /** ISO date the reference was checked. MUST be non-null when verified. */

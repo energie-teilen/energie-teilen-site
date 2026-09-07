@@ -180,15 +180,11 @@ export async function createPilotCheckout(
 // ============================================================================
 
 /**
- * Resolve the Stripe session id that Stripe appends to success_url into a
- * confirmation the customer can actually read.
+ * Resolve the Stripe session id appended to success_url into an order the
+ * customer can read. Called by <PilotConfirmation/> on /?paid=1&session_id=...
  *
- * Called by <PilotConfirmation/> when the browser lands on
- * /?paid=1&session_id=cs_... — the redirect target that, before this, was
- * silently ignored.
- *
- * Throws PilotApiError on 4xx/5xx so the caller can distinguish "unknown
- * reference" from "we are temporarily unable to check".
+ * Throws PilotApiError on 4xx/5xx so the caller can distinguish an unknown
+ * reference from a temporary lookup failure.
  */
 export async function getPilotOrder(
   sessionId: string,

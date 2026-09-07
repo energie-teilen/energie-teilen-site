@@ -1,25 +1,17 @@
 /**
  * shared/eligibility.ts
  *
- * THE QUALIFICATION GATE.
+ * Qualification engine: decides whether a constellation meets the economic and
+ * structural preconditions the calculator can observe.
  *
- * The free calculator computes NPV for anything you type and hands over a PDF
- * regardless of whether the project could ever proceed. It qualifies nobody.
- * That is how you end up selling Eligibility Checks to projects that were
- * never eligible, and how a serious buyer with a real constellation gets the
- * same answer as someone dragging sliders.
+ * Deterministic and rule-based — no model, no inference, no invented facts.
  *
- * This engine turns the wedge into a filter. It is deterministic, rule-based
- * and unit-tested — no model, no inference, no invented facts.
+ * Hard rule: this never declares legal compliance. It reports economic and
+ * structural preconditions in those words. REQUIRES_REVIEW means a human must
+ * look at it.
  *
- * HARD RULE, from the brief: this NEVER declares legal compliance. It reports
- * whether the ECONOMIC AND STRUCTURAL preconditions the calculator can see are
- * met, and it says so in those words. "REQUIRES_REVIEW" means a human has to
- * look; it does not mean "probably fine".
- *
- * The second job is just as important: when a fact is unknown, the engine says
- * WHICH fact and why it matters, instead of silently assuming the happy path.
- * That named gap is the honest reason to buy the paid Eligibility Check.
+ * When a fact is unknown the engine names that fact and why it matters rather
+ * than assuming a value for it.
  */
 
 import { z } from "zod";
@@ -407,7 +399,7 @@ function nextPaidStep(
 ): NextPaidStep | null {
   const facts = input.facts ?? {};
 
-  // Selling anything into a known blocker would be selling a failure.
+  // No paid step is offered when a blocker is already known.
   if (verdict === "NOT_ELIGIBLE") return null;
 
   if (verdict === "INSUFFICIENT_DATA" || verdict === "REQUIRES_REVIEW") {

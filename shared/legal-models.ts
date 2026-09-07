@@ -1,34 +1,24 @@
 /**
  * shared/legal-models.ts
  *
- * THE THREE MODELS, SEPARATED — AND THE GATE THAT KEEPS UNVERIFIED
- * STATUTORY CITATIONS OUT OF THE PRODUCT.
- *
- * The site was asserting "Mieterstrom nach §42b EnWG" in seven places,
- * including Schema.org FAQ markup that search engines surface as a rich
- * result. Mieterstrom, gemeinschaftliche Gebäudeversorgung and Energy Sharing
- * are three different models with three different scopes, and the product was
- * collapsing them into one paragraph number while the brand talked about a
- * fourth thing. Meanwhile the calculator models exactly ONE of them.
+ * Register of the three participation models — Mieterstrom, gemeinschaftliche
+ * Gebäudeversorgung and Energy Sharing — kept distinct, each with its own
+ * scope and statutory citation.
  *
  * Two rules this file enforces:
  *
- *   1. A statutory citation is rendered ONLY if a human has verified it.
- *      formatCitation() returns null for every unverified entry, so an
- *      unchecked paragraph number is structurally unable to reach a user.
- *      Today all three are unverified, so the product cites no paragraph at
- *      all — which is correct, because nobody has checked them.
+ *   1. A statutory citation renders only once verified. formatCitation()
+ *      returns null for an unverified entry, so an unchecked paragraph number
+ *      cannot reach a user.
  *
- *   2. No paragraph number may be hard-coded anywhere else. legal-models.test.ts
- *      scans the source tree (index.html included) and fails the build if one
- *      appears outside this file and the legal pages.
+ *   2. No paragraph number is hard-coded elsewhere. legal-models.test.ts scans
+ *      the source tree (index.html included) and fails the build otherwise.
  *
- * The `paragraph` fields below record what the team BELIEVES applies, so
- * counsel has one file to review rather than a grep. Verifying a model is a
- * two-field change — reference + asOf — and flipping `verified` turns the
- * citation on everywhere at once.
+ * The `paragraph` fields record the citation believed to apply, so review
+ * happens in one file. Verifying a model means supplying reference and asOf and
+ * setting `verified`.
  *
- * NONE OF THE THREE HAS BEEN VERIFIED BY COUNSEL.
+ * Status: none of the three is counsel-verified, so no citation renders.
  */
 
 export type LegalModelId = "mieterstrom" | "gebaeudeversorgung" | "energy_sharing";
@@ -134,7 +124,7 @@ export const LEGAL_MODEL_ORDER: LegalModelId[] = [
 /**
  * THE GATE.
  *
- * Returns a renderable citation string, or null when nobody has verified it.
+ * Returns a renderable citation string, or null while the entry is unverified.
  * Every call site must handle null by omitting the citation entirely — never
  * by falling back to the raw paragraph.
  */

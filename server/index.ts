@@ -5,6 +5,9 @@
  *   POST /api/pilot-checkout    → creates Stripe Checkout session
  *   POST /api/lead              → captures Rechner / free-tool leads
  *   GET  /api/pilot-order/:id   → post-payment order confirmation (safe projection)
+ *   GET  /api/v1/meta           → model, rates, validity windows (Bearer API key)
+ *   POST /api/v1/calculate      → deterministic economics + provenance
+ *   POST /api/v1/eligibility    → qualification verdict + next paid step
  *   GET  /api/admin/orders      → order ledger worklist (Bearer ADMIN_API_TOKEN)
  *   POST /api/admin/orders/:ref/stage → advance a ledger stage (Bearer)
  *   POST /api/stripe/webhook    → verified Stripe webhook (raw body, idempotent)
@@ -57,6 +60,8 @@ import {
   type OrderLedgerRecord,
 } from "../shared/ledger.js";
 import { getKv } from "./kv.js";
+import { mountApiV1 } from "./api-v1.js";
+import { apiKeysConfigured, configuredKeyLabels } from "./api-keys.js";
 import {
   Deadline,
   STEP_TIMEOUT_MS,
@@ -362,16 +367,11 @@ export async function buildApp(): Promise<Express> {
         const event = stripe.webhooks.constructEvent(req.body, signature, webhookSecret);
         eventId = event.id;
 
-        // Idempotency, done as a CLAIM rather than a tombstone.
+        // Idempotency as a claim, not a tombstone.
         //
-        // The previous version wrote a 7-day "handled" marker BEFORE doing any
-        // work. If the invocation then timed out or threw, Stripe's retry hit
-        // that marker and was skipped, so a confirmation could be lost with no
-        // trace anywhere. That is a silent failure on a paid order.
-        //
-        // Now: claim for 5 minutes (long enough that concurrent deliveries of
-        // the same event cannot both run), extend to 7 days only after the work
-        // succeeds, and RELEASE the claim on failure so the retry can redo it.
+        // Claim for 5 minutes — long enough that concurrent deliveries of the
+        // same event cannot both run — extend to 7 days once the work succeeds,
+        // and release the claim on failure so Stripe's retry can redo it.
         const kv = await getKv();
         const claimKey = `stripe:evt:${event.id}`;
         const CLAIM_TTL_S = 300;
@@ -758,10 +758,8 @@ export async function buildApp(): Promise<Express> {
   // ---------------------------------------------------------------------------
   // ADMIN — the order ledger
   //
-  // Your inbox was the database. These two endpoints make paid work
-  // enumerable: what is open, what is overdue, what it is worth, and what to
-  // do next. Deliberately JSON + curl rather than a console — the brief says
-  // minimal CRM, and a UI is not the bottleneck.
+  // Makes paid work enumerable: what is open, what is overdue, what it is
+  // worth, and what to do next. JSON only; no console UI.
   //
   // Disabled entirely unless ADMIN_API_TOKEN is set to >= 16 chars.
   // ---------------------------------------------------------------------------
@@ -876,6 +874,16 @@ export async function buildApp(): Promise<Express> {
     },
   );
 
+  // ---------------------------------------------------------------------------
+  // PUBLIC COMPUTATION API — /api/v1
+  //
+  // The deterministic engine behind a key. Every response carries the model
+  // stamp, per-input provenance and the validity window of each regulated rate.
+  // Disabled entirely unless ET_API_KEYS is configured.
+  // ---------------------------------------------------------------------------
+  const apiV1Limiter = createRateLimiter({ windowMs: 60_000, max: 120, bucket: "apiv1" });
+  mountApiV1(app, { limiter: apiV1Limiter });
+
   // GET /api/health
   app.get("/api/health", async (_req: Request, res: Response) => {
     res.json({
@@ -901,6 +909,8 @@ export async function buildApp(): Promise<Express> {
         adminApi: Boolean(
           process.env.ADMIN_API_TOKEN && process.env.ADMIN_API_TOKEN.length >= 16,
         ),
+        publicApi: apiKeysConfigured(),
+        publicApiClients: configuredKeyLabels().length,
         appUrl: process.env.APP_URL || "(unset)",
       },
     });

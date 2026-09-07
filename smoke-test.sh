@@ -24,6 +24,10 @@ chk "GET /api/pilot-order/ (404)"      "$(code "$B/api/pilot-order/")"          
 # token is wrong or unset — no probing difference.
 chk "GET /api/admin/orders (401)"      "$(code "$B/api/admin/orders")"              401
 chk "GET /api/admin/orders bad token"  "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong-token-value-here' "$B/api/admin/orders")" 401
+# Public API: never reachable without a key, 401 whether wrong or unset.
+chk "GET  /api/v1/meta (401)"          "$(code "$B/api/v1/meta")"                   401
+chk "POST /api/v1/calculate (401)"     "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"inputs":{"kwp":30}}' "$B/api/v1/calculate")" 401
+chk "POST /api/v1/eligibility (401)"   "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"inputs":{"kwp":30}}' "$B/api/v1/eligibility")" 401
 chk "POST /api/admin/orders/../stage (401)" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"stage":"closed"}' "$B/api/admin/orders/ET-AAAAAAAA/stage")" 401
 echo "  health: $(curl -s "$B/api/health")"
 # Confirmation transport must be configured, or paying customers hear nothing.
@@ -40,6 +44,10 @@ esac
 case "$H" in
   *'"adminApi":true'*) echo "  PASS admin API enabled"; pass=$((pass+1));;
   *) echo "  WARN admin API disabled (set ADMIN_API_TOKEN, >= 32 chars)";;
+esac
+case "$H" in
+  *'"publicApi":true'*) echo "  PASS public API enabled"; pass=$((pass+1));;
+  *) echo "  WARN public API disabled (set ET_API_KEYS; issue one with pnpm apikey:new <label>)";;
 esac
 LEAD=$(curl -s -X POST "$B/api/lead" -H 'content-type: application/json' -d '{"email":"smoke@example.com","source":"newsletter","consent":true,"website":""}')
 echo "  POST /api/lead → $LEAD"

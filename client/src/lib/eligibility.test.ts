@@ -240,8 +240,7 @@ describe("effort is a scope band, not a delivery promise", () => {
     }
   });
 
-  // Absence of an answer is uncertainty, not complexity. This once reported
-  // "hoch" for every visitor who answered nothing.
+  // Absence of an answer is uncertainty, not complexity.
   it("does not read an unanswered scope question as high effort", () => {
     expect(evaluateEligibility(build()).estimatedEffort).toBe("mittel");
   });

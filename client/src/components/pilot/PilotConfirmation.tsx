@@ -9,21 +9,17 @@ import { track } from "@/lib/analytics";
  *
  * The missing end of the paid funnel.
  *
- * Stripe's success_url returns the buyer to `/?paid=1&session_id=cs_...`.
- * Before this component existed, nothing in the client read either parameter:
- * a customer paid, was redirected, and landed on the marketing homepage with
- * no acknowledgement that anything had happened. This resolves the session id
- * against GET /api/pilot-order/:sessionId and renders a real confirmation.
+ * Stripe's success_url returns the buyer to `/?paid=1&session_id=cs_...`. This
+ * resolves that session id against GET /api/pilot-order/:sessionId and renders
+ * the confirmation.
  *
- * Design rules honoured here:
- *   - Never "Contact us". The panel states what was bought, the reference,
- *     what will be produced, and the exact project data the customer must
- *     send back. The next step is an action, not a wait.
- *   - No invented turnaround. `responseWindow` renders only when the operator
- *     has configured one server-side.
- *   - SEPA-aware: `processing` is a distinct, honest state, not a failure.
- *   - The URL is cleaned after reading so a refresh or a shared link does not
- *     replay a stale confirmation.
+ * Design rules:
+ *   - The panel states what was bought, the reference, what will be produced,
+ *     and the project data the customer must send back.
+ *   - `responseWindow` renders only when configured server-side.
+ *   - SEPA-aware: `processing` is a distinct state, not a failure.
+ *   - The URL is cleaned after reading so a refresh does not replay a stale
+ *     confirmation.
  */
 
 type Phase =

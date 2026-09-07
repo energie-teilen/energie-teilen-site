@@ -1,29 +1,18 @@
 /**
  * shared/tariffs.ts
  *
- * SOURCED REGULATORY VALUES — and the regime clock running against them.
+ * Regulated rates with their sources, validity windows and size bands.
  *
- * Every number the calculator used for regulated rates was a scalar guess:
- *   - Einspeisevergütung 7,86 ct/kWh, against an actual 6,66 for a 30 kWp
- *     plant in the current window. The model overstated feed-in revenue for
- *     every project in the 10–40 kWp band, which is most of them.
- *   - Mieterstromzuschlag 2,50 ct/kWh, size-independent, when the rate is
- *     banded and falls to 1,29 above 40 kWp.
- *   - CO2 factor 0,38 t/MWh, against the Umweltbundesamt figure of 0,344 for
- *     2025 — a 10 % overstatement of the headline environmental number.
+ * Einspeisevergütung, Mieterstromzuschlag and the CO2 factor are all banded by
+ * plant size and change on published schedules, so each is held as a table with
+ * an explicit validity window rather than as a constant.
  *
- * Worse than any individual figure: all three are BANDED BY PLANT SIZE and the
- * engine took a single scalar, so entering a different kWp silently kept a rate
- * that belonged to a different plant.
+ * Sourcing rule: `verified: true` means the value was read from the body that
+ * publishes it. A value taken from a secondary summary carries its reference
+ * and date but stays unverified.
  *
- * And the assumption underneath all of it has an expiry date. See
- * FIXED_TARIFF_REGIME below.
- *
- * Rule for this file: a value is only `verified: true` when it was read from
- * the body that publishes it. Values taken from a secondary summary of an
- * official rate carry the reference and the date but stay unverified, because
- * "someone reported the regulator's number" is not the same claim as "the
- * regulator published this number".
+ * FIXED_TARIFF_REGIME below records the horizon beyond which a fixed feed-in
+ * tariff can no longer be assumed.
  */
 
 // ============================================================================
@@ -50,11 +39,10 @@ export type TariffTable = {
 };
 
 /**
- * EEG feed-in tariff, Teileinspeisung (surplus feed-in) — the mode a
- * Mieterstrom plant is in, since the building consumes first.
+ * EEG feed-in tariff for Teileinspeisung (surplus feed-in), the mode a
+ * Mieterstrom plant operates in since the building consumes first.
  *
- * Rates step down half-yearly. The window matters: quoting a rate without its
- * validity period is how a report goes stale without anyone noticing.
+ * Rates step down half-yearly, so the validity window is part of the value.
  */
 export const FEED_IN_TARIFF: TariffTable = {
   bands: [
@@ -95,10 +83,8 @@ export const MIETERSTROM_ZUSCHLAG: TariffTable = {
 };
 
 /**
- * Look up the banded rate for a plant size.
- *
- * Returns null above the top band rather than extrapolating: a plant outside
- * the published schedule is a case for a human, not for a guess.
+ * Look up the banded rate for a plant size. Returns null above the top band
+ * rather than extrapolating beyond the published schedule.
  */
 export function lookupRate(table: TariffTable, kwp: number): number | null {
   if (!Number.isFinite(kwp) || kwp <= 0) return null;
@@ -123,8 +109,7 @@ export function bandLabel(table: TariffTable, kwp: number): string {
 
 /**
  * A Mieterstrom price may not exceed this share of the local basic-supply
- * tariff. The engine does not model it, so the most common way a project fails
- * compliance was invisible in the numbers.
+ * tariff. Checked separately from the cashflow model.
  */
 export const MIETERSTROM_PRICE_CAP_SHARE = 0.9;
 
@@ -148,11 +133,10 @@ export function maxMieterstromPrice(grundversorgungCtPerKwh: number): number {
 }
 
 /**
- * Is the modelled tenant price plausibly above the cap?
+ * Is the modelled tenant price above the cap?
  *
- * Without the local basic-supply tariff we cannot decide, so this answers
- * "unknown" rather than inventing a reference price — the same discipline the
- * eligibility engine uses for missing facts.
+ * Without the local basic-supply tariff the question is undecidable, so the
+ * result is "unknown" rather than a comparison against an invented reference.
  */
 export function priceCapCheck(
   tenantPriceCtPerKwh: number,
@@ -170,23 +154,20 @@ export function priceCapCheck(
 // ============================================================================
 
 /**
- * The 20-year cashflow model rests on a fixed feed-in tariff running for the
- * whole term. That regime is being abolished.
+ * The 20-year cashflow model assumes a fixed feed-in tariff for the full term.
  *
- * The EEG 2027 draft ends the fixed Einspeisevergütung for NEW plants and
+ * The EEG 2027 draft ends the fixed Einspeisevergütung for new plants and
  * replaces it with mandatory direct marketing:
  *   < 25 kW    — no EEG support at all, and a permanent cap of feed-in power
  *                at 50 % of rated capacity
  *   25–100 kW  — market-value pass-through, no subsidy element
  *   ≥ 100 kW   — two-sided CfD with an annual claw-back of excess earnings
  *
- * For any plant commissioned under that regime, this model is not merely
- * miscalibrated — its revenue structure is the wrong shape. The report has to
- * say so rather than quietly projecting a tariff that will not exist.
+ * For a plant commissioned under that regime the model's revenue structure no
+ * longer matches reality, so outputs carry an explicit warning.
  *
- * Note what this does NOT mean: it makes self-consumption worth MORE, not less.
- * Feed-in revenue is what is being withdrawn; electricity consumed in the
- * building is untouched. The wedge points at the right thing.
+ * Only feed-in revenue is affected. Electricity consumed in the building is
+ * untouched, which raises the relative weight of self-consumption.
  */
 export const FIXED_TARIFF_REGIME = {
   /** Last commissioning year for which a fixed tariff is safely assumable. */
@@ -251,9 +232,8 @@ export function regimeWarning(commissioningYear?: number): RegimeWarning {
 /**
  * Specific CO2 emissions of the German electricity mix.
  *
- * Read directly from the Umweltbundesamt publication, which is the body that
- * publishes it — so this one is verified. The previous 0,38 t/MWh overstated
- * the headline environmental figure by roughly 10 %.
+ * Read directly from the Umweltbundesamt publication, so this entry is
+ * verified.
  */
 export const CO2_FACTOR = {
   tPerMwh: 0.344,
@@ -264,3 +244,70 @@ export const CO2_FACTOR = {
   verified: true,
   note: "Der Faktor sinkt jährlich (2024: 353 g/kWh). Eine über 20 Jahre konstante Fortschreibung überschätzt die Einsparung tendenziell.",
 } as const;
+
+// ============================================================================
+// FRESHNESS
+// ============================================================================
+
+export type FreshnessStatus = "current" | "expiring" | "expired" | "open_ended";
+
+export type Freshness = {
+  status: FreshnessStatus;
+  validFrom: string;
+  validUntil: string | null;
+  /** Days until validUntil. Null when the window is open-ended. */
+  daysRemaining: number | null;
+};
+
+/** Inside this many days of expiry a rate is reported as "expiring". */
+export const EXPIRY_WARNING_DAYS = 45;
+
+const DAY_MS = 86_400_000;
+
+/**
+ * Where a dated table sits relative to its own validity window.
+ *
+ * Regulated rates step on published schedules. Reporting the window alongside
+ * the value lets a caller decide whether the answer is still usable, and lets
+ * the build fail before an expired rate ships.
+ */
+export function freshness(table: TariffTable, now: Date = new Date()): Freshness {
+  if (table.validUntil === null) {
+    return {
+      status: "open_ended",
+      validFrom: table.validFrom,
+      validUntil: null,
+      daysRemaining: null,
+    };
+  }
+
+  // End of the closing day, so a table is current for all of validUntil.
+  const endsAt = Date.parse(`${table.validUntil}T23:59:59Z`);
+  const daysRemaining = Math.floor((endsAt - now.getTime()) / DAY_MS);
+
+  const status: FreshnessStatus =
+    daysRemaining < 0 ? "expired" : daysRemaining <= EXPIRY_WARNING_DAYS ? "expiring" : "current";
+
+  return { status, validFrom: table.validFrom, validUntil: table.validUntil, daysRemaining };
+}
+
+/** Every dated table the product ships, for freshness reporting and CI. */
+export const DATED_TABLES: Record<string, TariffTable> = {
+  feedInTariff: FEED_IN_TARIFF,
+  mieterstromZuschlag: MIETERSTROM_ZUSCHLAG,
+};
+
+export type FreshnessReport = Record<string, Freshness>;
+
+export function freshnessReport(now: Date = new Date()): FreshnessReport {
+  return Object.fromEntries(
+    Object.entries(DATED_TABLES).map(([k, t]) => [k, freshness(t, now)]),
+  );
+}
+
+/** Tables whose window has already closed. Non-empty means stale rates ship. */
+export function expiredTables(now: Date = new Date()): string[] {
+  return Object.entries(DATED_TABLES)
+    .filter(([, t]) => freshness(t, now).status === "expired")
+    .map(([k]) => k);
+}

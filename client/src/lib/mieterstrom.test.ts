@@ -17,12 +17,10 @@ import {
  *   Mieterstromzuschlag 2,50 → 2,36 ct/kWh  (§ 21 Abs. 3 EEG 2023, same band)
  *   CO2-Faktor          0,38 → 0,344 t/MWh  (Umweltbundesamt, 2025)
  *
- * The engine math is unchanged; only its inputs were wrong. The correction
- * moves the headline default case by:
+ * The engine math is unchanged; only its inputs moved:
  *   NPV   22.151,81 → 19.463,26 €   (−12,1 %)
  *   IRR        9,56 → 8,94 %
  *   CO2       92,98 → 84,17 t       (−9,5 %)
- * The site had been overstating its own default scenario by roughly a tenth.
  */
 describe("calculateMieterstrom — DEFAULTS base case", () => {
   const r = calculateMieterstrom(DEFAULTS);

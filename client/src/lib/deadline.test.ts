@@ -127,13 +127,11 @@ describe("withDeadlineOr", () => {
 
 describe("isSignatureVerificationError", () => {
   // Stripe sets `name` to the generic "Error"; the discriminator is `type`.
-  // Checking `name` typechecked fine and silently returned 500 for a forged
-  // signature — telling Stripe to retry something that can never succeed.
   it("recognises the real Stripe error shape", () => {
     const real = Object.assign(new Error("No signatures found"), {
       type: "StripeSignatureVerificationError",
     });
-    expect(real.name).toBe("Error"); // the trap
+    expect(real.name).toBe("Error");
     expect(isSignatureVerificationError(real)).toBe(true);
   });
 

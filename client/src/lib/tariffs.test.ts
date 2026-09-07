@@ -5,7 +5,12 @@ import {
   FIXED_TARIFF_REGIME,
   MIETERSTROM_PRICE_CAP_SHARE,
   MIETERSTROM_ZUSCHLAG,
+  DATED_TABLES,
+  EXPIRY_WARNING_DAYS,
   bandLabel,
+  expiredTables,
+  freshness,
+  freshnessReport,
   lookupRate,
   maxMieterstromPrice,
   priceCapCheck,
@@ -14,7 +19,6 @@ import {
 import { DEFAULTS } from "./mieterstrom";
 
 describe("size-banded rates", () => {
-  // The scalar defaults silently applied one band's rate to every plant size.
   it("picks the band the plant actually falls in", () => {
     expect(lookupRate(FEED_IN_TARIFF, 8)).toBe(7.7);
     expect(lookupRate(FEED_IN_TARIFF, 30)).toBe(6.66);
@@ -30,7 +34,6 @@ describe("size-banded rates", () => {
     expect(lookupRate(FEED_IN_TARIFF, 40)).toBe(6.66);
   });
 
-  // A plant outside the published schedule is a case for a human, not a guess.
   it("refuses to extrapolate above the published schedule", () => {
     expect(lookupRate(FEED_IN_TARIFF, 250)).toBeNull();
     expect(lookupRate(MIETERSTROM_ZUSCHLAG, 250)).toBeNull();
@@ -126,5 +129,47 @@ describe("the regime clock", () => {
 
   it("says plainly that self-consumption is unaffected", () => {
     expect(regimeWarning(2028).detail).toContain("Eigenverbrauchsanteil");
+  });
+});
+
+describe("freshness", () => {
+  const table = FEED_IN_TARIFF; // valid 2026-08-01 … 2027-01-31
+
+  it("reports a rate inside its window as current", () => {
+    const f = freshness(table, new Date("2026-09-06T12:00:00Z"));
+    expect(f.status).toBe("current");
+    expect(f.validUntil).toBe("2027-01-31");
+    expect(f.daysRemaining).toBeGreaterThan(EXPIRY_WARNING_DAYS);
+  });
+
+  it("warns before the window closes, so a replacement can be sourced in time", () => {
+    const f = freshness(table, new Date("2027-01-10T12:00:00Z"));
+    expect(f.status).toBe("expiring");
+    expect(f.daysRemaining).toBeLessThanOrEqual(EXPIRY_WARNING_DAYS);
+    expect(f.daysRemaining).toBeGreaterThanOrEqual(0);
+  });
+
+  it("keeps a rate current through the whole of its closing day", () => {
+    expect(freshness(table, new Date("2027-01-31T18:00:00Z")).status).toBe("expiring");
+    expect(freshness(table, new Date("2027-02-01T00:00:01Z")).status).toBe("expired");
+  });
+
+  it("reports an open-ended table without inventing an end date", () => {
+    const f = freshness(MIETERSTROM_ZUSCHLAG, new Date("2030-01-01T00:00:00Z"));
+    expect(f.status).toBe("open_ended");
+    expect(f.daysRemaining).toBeNull();
+  });
+
+  it("covers every dated table in the report", () => {
+    expect(Object.keys(freshnessReport())).toEqual(Object.keys(DATED_TABLES));
+  });
+
+  // The guard: an expired rate must never ship silently.
+  it("ships no expired rate today", () => {
+    expect(expiredTables()).toEqual([]);
+  });
+
+  it("names the table that has expired when one has", () => {
+    expect(expiredTables(new Date("2030-01-01T00:00:00Z"))).toContain("feedInTariff");
   });
 });

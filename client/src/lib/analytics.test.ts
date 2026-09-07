@@ -9,11 +9,6 @@ import {
   type AnalyticsEvent,
 } from "./analytics";
 
-/**
- * The privacy boundary is the part worth testing hardest. A funnel measured at
- * the cost of leaking a customer's email is not worth measuring.
- */
-
 describe("sanitiseProps — the privacy boundary", () => {
   it("keeps low-cardinality categories, counts and flags", () => {
     expect(
@@ -35,8 +30,7 @@ describe("sanitiseProps — the privacy boundary", () => {
     expect(sanitiseProps({ ort: "60311 Frankfurt" })).toEqual({});
   });
 
-  // A truncated address is still an address, so long values are dropped
-  // outright rather than shortened.
+  // Long values are dropped outright rather than shortened.
   it("drops free text instead of truncating it", () => {
     const long = "Musterstrasse 12, Hinterhaus, bei Familie Schmidt, 3. OG links";
     expect(sanitiseProps({ location: long })).toEqual({});
@@ -149,7 +143,7 @@ describe("track", () => {
   });
 });
 
-describe("domain resolution — the bug that made every event vanish", () => {
+describe("domain resolution", () => {
   const original = globalThis.window;
   afterEach(() => {
     (globalThis as { window?: unknown }).window = original;

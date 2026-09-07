@@ -1,35 +1,28 @@
 /**
  * shared/deadline.ts
  *
- * Time budgeting for work that runs inside a serverless invocation.
+ * Time budgeting for work inside a serverless invocation.
  *
- * vercel.json caps the API function at a fixed duration. The Stripe webhook now
- * does several network round-trips — KV claim, ledger read, ledger write,
- * operator email, customer email, ledger write — on a cold Frankfurt lambda.
- * When that exceeds the ceiling the platform kills the invocation mid-flight:
- * Stripe sees a timeout, retries, and an endpoint that times out repeatedly is
- * eventually DISABLED by Stripe. Silently. You find out when a customer says
- * the confirmation never arrived.
+ * vercel.json caps the API function at a fixed duration. The Stripe webhook
+ * performs several network round-trips (KV claim, ledger read, ledger write,
+ * two emails, ledger write) and must finish inside that ceiling; an endpoint
+ * that repeatedly times out is disabled by Stripe.
  *
- * The tempting fix — respond 200 first, then do the work — is wrong on this
- * architecture. Lambda may freeze or reclaim the container the instant the
- * response is flushed, so work started after the response may never run at all.
- * That trades a loud failure for a silent one.
+ * Responding 200 before doing the work is not an option here: the platform may
+ * freeze or reclaim the container once the response is flushed, so work started
+ * after it may never run.
  *
- * So instead: keep the work in the request, but BOUND it. If the budget runs
- * out, acknowledge Stripe (so it stops retrying into a wall) and leave the
- * ledger in a stage whose derived next action already says what still has to
- * happen. Nothing is lost; it just becomes visible work instead of invisible
- * failure.
+ * The work therefore stays in the request and is bounded. If the budget is
+ * exhausted the request is acknowledged and the ledger stays in a stage whose
+ * derived next action states what remains.
  */
 
 /** Wall-clock ceiling from vercel.json, in ms. */
 export const FUNCTION_LIMIT_MS = 60_000;
 
 /**
- * How much of the ceiling the fulfillment work may consume. The remainder is
- * headroom for response serialisation and platform overhead — being killed at
- * 100% of the budget is exactly what this exists to prevent.
+ * Share of the ceiling the fulfillment work may consume. The remainder is
+ * headroom for response serialisation and platform overhead.
  */
 export const FULFILLMENT_BUDGET_MS = Math.floor(FUNCTION_LIMIT_MS * 0.7);
 
@@ -87,9 +80,8 @@ export class Deadline {
  * Run a promise with a ceiling. Rejects with DeadlineExceededError if it does
  * not settle in time.
  *
- * The underlying promise is NOT cancelled — nothing in JS can cancel a fetch
- * already in flight from the outside — so its rejection is swallowed to avoid
- * an unhandled rejection crashing the process after we have moved on.
+ * The underlying promise is not cancelled (JS cannot cancel an in-flight
+ * fetch), so its later rejection is swallowed to avoid an unhandled rejection.
  */
 export function withDeadline<T>(
   promise: Promise<T>,
@@ -127,12 +119,8 @@ export async function withDeadlineOr<T>(
 /**
  * Is this a Stripe webhook signature failure?
  *
- * Stripe's error objects set `name` to the generic "Error" — the real
- * discriminator is `type` (with the constructor name as a fallback for
- * bundlers that rewrite it). Checking `name` looked right, passed typecheck,
- * and quietly returned 500 for a forged signature: telling Stripe to retry a
- * request that can never succeed, and releasing the idempotency claim while
- * doing so. Caught by firing a forged signature at a running server.
+ * Stripe sets `name` to the generic "Error"; the discriminator is `type`, with
+ * the constructor name as a fallback for bundlers that rewrite it.
  */
 export function isSignatureVerificationError(err: unknown): boolean {
   if (typeof err !== "object" || err === null) return false;

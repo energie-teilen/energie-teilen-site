@@ -16,6 +16,7 @@
     "test:watch": "vitest",
     "verify": "pnpm check && pnpm test && pnpm build",
     "dev:kv": "node scripts/dev-kv.mjs",
+    "apikey:new": "node scripts/apikey.mjs",
     "format": "prettier --write ."
   },
   "dependencies": {

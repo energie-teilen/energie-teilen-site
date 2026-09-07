@@ -642,9 +642,8 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
         </div>
 
         {/*
-          The qualification gate. Sits between the numbers and the lead capture
-          so nobody reaches the PDF without seeing whether the constellation
-          clears the bar and what the actual next step is.
+          Qualification gate: sits between the numbers and the lead capture so
+          the verdict and next step are shown before the report is requested.
         */}
         <EligibilityPanel
           inputs={inputs}
