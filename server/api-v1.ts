@@ -27,8 +27,11 @@ import {
   type MetaResponse,
   type ProvenanceEntry,
   AllocationRequestSchema,
+  BillingRequestSchema,
   MesskonzeptRequestSchema,
+  type BillingResponse,
 } from "../shared/api-contract.js";
+import { BillingError, billPeriod, reconcile } from "../shared/billing.js";
 import {
   AllocationError,
   allocate,
@@ -304,6 +307,7 @@ export function mountApiV1(
         `${API_PREFIX}/eligibility`,
         `${API_PREFIX}/messkonzept`,
         `${API_PREFIX}/allocation`,
+        `${API_PREFIX}/billing`,
       ],
     };
 
@@ -456,6 +460,49 @@ export function mountApiV1(
       key: key ?? null,
       runs: runs as Record<AllocationKey, AllocationResult>,
       recommendation: key ? null : recommendKey(runs as Record<AllocationKey, AllocationResult>),
+    };
+
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json(body);
+  });
+
+  // --------------------------------------------------------------------------
+  // POST /api/v1/billing — annual statements from measured quantities
+  // --------------------------------------------------------------------------
+  app.post(`${API_PREFIX}/billing`, deps.limiter, requireKey, (req: Request, res: Response) => {
+    const parsed = BillingRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+    }
+
+    const { reference, ...input } = parsed.data;
+
+    let result: ReturnType<typeof billPeriod>;
+    try {
+      result = billPeriod(input);
+    } catch (err) {
+      if (err instanceof BillingError) {
+        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+      }
+      throw err;
+    }
+
+    const body: BillingResponse = {
+      ok: true,
+      reference: reference ?? null,
+      model: stamp(new Date()),
+      period: result.period,
+      days: result.days,
+      vatRate: result.vatRate,
+      statements: result.statements,
+      totals: result.totals,
+      priceCap: result.priceCap,
+      // Re-checked from the produced result, not assumed from the code path.
+      reconciliation: reconcile(result),
+      missingData: result.missingData,
+      warnings: result.warnings,
+      conventions: result.conventions,
+      disclaimer: result.disclaimer,
     };
 
     res.setHeader("Cache-Control", "no-store");

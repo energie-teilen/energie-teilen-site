@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Info, Split } from "lucide-react";
 import { track } from "@/lib/analytics";
 import { AllocationDayChart } from "@/components/AllocationDayChart";
+import { BillingPreview } from "@/components/BillingPreview";
 import {
   ILLUSTRATIVE_PROFILE_DISCLAIMER_DE,
   KEY_DESCRIPTION_DE,
@@ -198,6 +199,9 @@ export function AllocationPanel({ inputs }: { inputs: MieterstromInputs }) {
         <p className="text-sm leading-7 text-muted-foreground">{KEY_DESCRIPTION_DE[selected]}</p>
 
         <AllocationDayChart run={run} />
+
+        {/* The chain closes here: measured, allocated, billed. */}
+        <BillingPreview inputs={inputs} run={run} />
 
         {/* Per-participant outcome */}
         <div className="rounded-[20px] border border-border/60 bg-background/70 p-5">

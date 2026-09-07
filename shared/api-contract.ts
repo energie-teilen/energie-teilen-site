@@ -26,6 +26,11 @@ import { MieterstromInputsSchema } from "./schema.js";
 import { QualificationFactsSchema, EligibilityVerdictSchema } from "./eligibility.js";
 import { MesskonzeptInputSchema, MesskonzeptVariantSchema } from "./messkonzept.js";
 import { AllocationKeySchema, ParticipantSchema } from "./allocation.js";
+import {
+  BillingParticipantSchema,
+  BillingPeriodSchema,
+  TariffSchema,
+} from "./billing.js";
 
 /** Bumped only for a breaking change to request or response shape. */
 export const API_VERSION = "1.0.0";
@@ -358,3 +363,80 @@ export const AllocationResponseSchema = z.object({
     .nullable(),
 });
 export type AllocationResponse = z.infer<typeof AllocationResponseSchema>;
+
+// ============================================================================
+// BILLING
+// ============================================================================
+
+export const BillingRequestSchema = z.object({
+  period: BillingPeriodSchema,
+  tariff: TariffSchema,
+  participants: z.array(BillingParticipantSchema).min(1).max(2000),
+  vatRate: z.number().min(0).max(1).optional(),
+  reference: z.string().max(120).optional(),
+});
+export type BillingRequest = z.infer<typeof BillingRequestSchema>;
+
+export const StatementLineSchema = z.object({
+  code: z.string(),
+  label: z.string(),
+  quantity: z.number(),
+  unit: z.string(),
+  unitPriceCt: z.number(),
+  netCents: z.number().int(),
+});
+
+export const ParticipantStatementSchema = z.object({
+  id: z.string(),
+  label: z.string().nullable(),
+  unitLabel: z.string().nullable(),
+  meterNumber: z.string().nullable(),
+  lines: z.array(StatementLineSchema),
+  netCents: z.number().int(),
+  vatCents: z.number().int(),
+  grossCents: z.number().int(),
+  prepaidCents: z.number().int(),
+  balanceCents: z.number().int(),
+  consumptionKwh: z.number(),
+  sharedShare: z.number().nullable(),
+  savingVsGrundversorgungCents: z.number().int().nullable(),
+});
+
+export const BillingResponseSchema = z.object({
+  ok: z.literal(true),
+  reference: z.string().nullable(),
+  model: ApiModelStampSchema,
+  period: BillingPeriodSchema,
+  days: z.number().int(),
+  vatRate: z.number(),
+  statements: z.array(ParticipantStatementSchema),
+  totals: z.object({
+    participants: z.number().int(),
+    allocatedKwh: z.number(),
+    gridDrawKwh: z.number(),
+    consumptionKwh: z.number(),
+    netCents: z.number().int(),
+    vatCents: z.number().int(),
+    grossCents: z.number().int(),
+    prepaidCents: z.number().int(),
+    balanceCents: z.number().int(),
+    savingVsGrundversorgungCents: z.number().int().nullable(),
+  }),
+  priceCap: z.object({
+    status: z.enum(["ok", "over_cap", "unknown"]),
+    capCtPerKwh: z.number().nullable(),
+  }),
+  /**
+   * The identities the engine guarantees, re-checked from the response itself
+   * so an integrator can assert the statement adds up without trusting us.
+   */
+  reconciliation: z.object({
+    ok: z.boolean(),
+    failures: z.array(z.object({ code: z.string(), detail: z.string() })),
+  }),
+  missingData: z.array(z.string()),
+  warnings: z.array(z.object({ code: z.string(), message: z.string() })),
+  conventions: z.array(z.string()),
+  disclaimer: z.string(),
+});
+export type BillingResponse = z.infer<typeof BillingResponseSchema>;

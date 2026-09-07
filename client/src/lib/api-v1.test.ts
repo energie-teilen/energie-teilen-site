@@ -12,6 +12,8 @@ import {
   AllocationResponseSchema,
   MesskonzeptRequestSchema,
   MesskonzeptResponseSchema,
+  BillingRequestSchema,
+  BillingResponseSchema,
 } from "../../../shared/api-contract";
 import {
   extractApiKey,
@@ -229,5 +231,48 @@ describe("allocation contract", () => {
   it("returns a run per key, and a recommendation only for a comparison", () => {
     expect(AllocationResponseSchema.shape.runs).toBeDefined();
     expect(AllocationResponseSchema.shape.recommendation.safeParse(null).success).toBe(true);
+  });
+});
+
+describe("billing contract", () => {
+  const base = {
+    period: { from: "2026-01-01", to: "2027-01-01" },
+    tariff: { mieterstromCtPerKwh: 28, reststromCtPerKwh: 34, grundpreisEurPerYear: 120 },
+    participants: [{ id: "we-1", allocatedKwh: 1200, gridDrawKwh: 1800 }],
+  };
+
+  it("accepts a period, a tariff and at least one participant", () => {
+    expect(BillingRequestSchema.safeParse(base).success).toBe(true);
+    expect(BillingRequestSchema.safeParse({ ...base, participants: [] }).success).toBe(false);
+  });
+
+  it("rejects a reversed period rather than billing backwards", () => {
+    expect(
+      BillingRequestSchema.safeParse({
+        ...base,
+        period: { from: "2027-01-01", to: "2026-01-01" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("treats the basic-supply reference as optional", () => {
+    expect(
+      BillingRequestSchema.safeParse({
+        ...base,
+        tariff: { ...base.tariff, grundversorgungCtPerKwh: 36 },
+      }).success,
+    ).toBe(true);
+  });
+
+  it("returns the reconciliation alongside the statements", () => {
+    expect(BillingResponseSchema.shape.reconciliation).toBeDefined();
+    expect(BillingResponseSchema.shape.conventions).toBeDefined();
+    expect(BillingResponseSchema.shape.disclaimer).toBeDefined();
+  });
+
+  it("keeps every money field an integer count of cents", () => {
+    const totals = BillingResponseSchema.shape.totals;
+    expect(totals.shape.grossCents.safeParse(1234).success).toBe(true);
+    expect(totals.shape.grossCents.safeParse(12.34).success).toBe(false);
   });
 });
