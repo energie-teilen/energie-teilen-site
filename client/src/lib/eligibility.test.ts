@@ -110,6 +110,36 @@ describe("review rules", () => {
   });
 });
 
+describe("the feed-in regime change", () => {
+  // The 20-year model assumes a fixed feed-in tariff; that regime is being
+  // withdrawn for new plants under the EEG 2027 draft.
+  it("flags a planned plant, because it will be commissioned after the change", () => {
+    const r = evaluateEligibility(build({}, COMPLETE_FACTS));
+    expect(r.findings.map((f) => f.code)).toContain("feed_in_regime_change");
+  });
+
+  it("does not flag a plant that already exists", () => {
+    const r = evaluateEligibility(build({}, { ...COMPLETE_FACTS, generationStatus: "existing" }));
+    expect(r.findings.map((f) => f.code)).not.toContain("feed_in_regime_change");
+  });
+
+  // It applies to every planned plant, so escalating the verdict on it would
+  // make REQUIRES_REVIEW meaningless.
+  it("does not move the verdict", () => {
+    expect(evaluateEligibility(build({}, COMPLETE_FACTS)).verdict).toBe("ELIGIBLE");
+  });
+
+  it("surfaces as the main risk when nothing worse exists", () => {
+    const r = evaluateEligibility(build({}, COMPLETE_FACTS));
+    expect(r.mainRisk).toContain("Direktvermarktung");
+  });
+
+  it("says self-consumption is unaffected, so the wedge still holds", () => {
+    const r = evaluateEligibility(build({}, COMPLETE_FACTS));
+    expect(r.mainRisk).toContain("Eigenverbrauchsanteil");
+  });
+});
+
 describe("it never claims legal compliance", () => {
   const cases: [string, EligibilityInput][] = [
     ["complete", build({}, COMPLETE_FACTS)],

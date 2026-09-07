@@ -28,6 +28,19 @@ describe("assumption register integrity", () => {
 
   // THE invariant. You cannot claim a value is verified without saying where
   // it came from and as of when.
+  it("now carries a real source for the regulated rates", () => {
+    // These read "unbelegt" on every report until they were sourced.
+    expect(MIETERSTROM_ASSUMPTIONS.einspeiseverguetungCtPerKwh.reference).toContain("Tarifregister");
+    expect(MIETERSTROM_ASSUMPTIONS.mieterstromZuschlagCtPerKwh.reference).toContain("Mieterstromzuschlag");
+    // The paragraph itself stays in the register, not in prose the user reads.
+    expect(MIETERSTROM_ASSUMPTIONS.einspeiseverguetungCtPerKwh.reference).not.toMatch(/§/);
+    expect(IMPLICIT_ASSUMPTIONS.co2Faktor.verified).toBe(true);
+  });
+
+  it("warns that the feed-in assumption has an expiry date", () => {
+    expect(MIETERSTROM_ASSUMPTIONS.einspeiseverguetungCtPerKwh.note).toContain("EEG 2027");
+  });
+
   it("never marks a value verified without a reference and a date", () => {
     const all = [...Object.entries(MIETERSTROM_ASSUMPTIONS), ...Object.entries(IMPLICIT_ASSUMPTIONS)];
     for (const [key, meta] of all) {
@@ -51,7 +64,8 @@ describe("assumption register integrity", () => {
     // The 2 %/a opex escalation and the CO2 factor shaped every result while
     // appearing nowhere in the UI or the report.
     expect(IMPLICIT_ASSUMPTIONS.betriebskostenInflation.value).toBe("2,0");
-    expect(IMPLICIT_ASSUMPTIONS.co2Faktor.value).toBe("0,38");
+    // Corrected to the Umweltbundesamt 2025 figure; 0,38 overstated it ~10%.
+    expect(IMPLICIT_ASSUMPTIONS.co2Faktor.value).toBe("0,344");
     expect(IMPLICIT_ASSUMPTIONS.benchmarkIrrBand.source).toBe("PLACEHOLDER");
   });
 
