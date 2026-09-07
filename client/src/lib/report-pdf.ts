@@ -21,6 +21,19 @@ import {
   intakeChecklistFor,
   type QualificationFacts,
 } from "../../../shared/eligibility";
+import {
+  criticalPath,
+  deriveMesskonzept,
+  type GridConnection,
+  type Storage,
+} from "../../../shared/messkonzept";
+
+/** The metering answers the qualification questions do not cover. */
+export type MesskonzeptAnswers = {
+  gridConnection?: GridConnection;
+  storage?: Storage;
+  commercialUnits?: number;
+};
 
 export type ScenarioBundle = {
   konservativ: MieterstromResult; realistisch: MieterstromResult; optimistisch: MieterstromResult;
@@ -121,7 +134,7 @@ function drawChart(doc: jsPDF, s: ScenarioBundle, x: number, y: number, w: numbe
 export function buildReportDoc(
   inputs: MieterstromInputs,
   scenarios: ScenarioBundle,
-  options?: { now?: Date; facts?: QualificationFacts },
+  options?: { now?: Date; facts?: QualificationFacts; messkonzept?: MesskonzeptAnswers },
 ): jsPDF {
   // Every output is versioned: model, assumption set, date, jurisdiction,
   // currency and the scenario the narrative refers to. `now` is injectable so
@@ -262,6 +275,84 @@ export function buildReportDoc(
     y += 10;
   }
 
+  // ── Messkonzept und Umsetzungspfad ──────────────────────────────────────
+  // Derived from the same constellation the verdict used. Reported as an
+  // engineering proposal: the network operator's approval is authoritative,
+  // and the section says so rather than implying the concept is settled.
+  const konzept = deriveMesskonzept({
+    units: Math.max(1, Math.round(inputs.anzahlWohneinheiten)),
+    kwp: inputs.kwp,
+    gridConnection: options?.messkonzept?.gridConnection,
+    buildingScope: options?.facts?.buildingScope,
+    ownerConstellation: options?.facts?.ownerConstellation,
+    generationStatus: options?.facts?.generationStatus,
+    metering: options?.facts?.metering,
+    storage: options?.messkonzept?.storage,
+    commercialUnits: options?.messkonzept?.commercialUnits,
+  });
+
+  if (y + 150 > pageH - 60) { doc.addPage(); y = 104; }
+  doc.setFont("helvetica", "bold").setFontSize(13).setTextColor(BRAND.ink).text("Messkonzept und Umsetzungspfad", margin, y); y += 14;
+  doc.setFont("helvetica", "bold").setFontSize(9.5).setTextColor(BRAND.green).text(konzept.variantLabel, margin, y); y += 13;
+  doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(BRAND.muted);
+  (doc.splitTextToSize(konzept.rationale, pageW - margin * 2) as string[]).forEach((ln) => {
+    doc.text(ln, margin, y); y += 11;
+  });
+  y += 8;
+
+  if (konzept.meters.length > 0) {
+    autoTable(doc, {
+      startY: y, margin: { left: margin, right: margin },
+      head: [["Messeinrichtung", "Anzahl", "Eigenschaft", "Zweck"]],
+      body: konzept.meters.map((m) => [
+        m.label,
+        String(m.count),
+        [m.bidirectional ? "Zweirichtung" : null, m.intervalMetering ? "15-Minuten-Werte" : null]
+          .filter(Boolean)
+          .join(", ") || "Standard",
+        m.purpose,
+      ]),
+      foot: [["Gesamt", String(konzept.meterCount), "", ""]],
+      styles: { fontSize: 8.5, cellPadding: 4 },
+      headStyles: { fillColor: BRAND.green, textColor: "#ffffff", fontStyle: "bold" },
+      footStyles: { fillColor: BRAND.panel, textColor: BRAND.ink, fontStyle: "bold" },
+      columnStyles: { 1: { halign: "right", cellWidth: 44 }, 2: { cellWidth: 96 } },
+      alternateRowStyles: { fillColor: BRAND.panel },
+    });
+    // @ts-expect-error autotable augments doc at runtime
+    y = doc.lastAutoTable.finalY + 18;
+  }
+
+  const blocking = criticalPath(konzept);
+  if (blocking.length > 0) {
+    if (y + 30 + blocking.length * 12 > pageH - 60) { doc.addPage(); y = 104; }
+    doc.setFont("helvetica", "bold").setFontSize(11).setTextColor(BRAND.ink);
+    doc.text("Kritischer Pfad", margin, y); y += 14;
+    doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(BRAND.muted);
+    blocking.forEach((t, i) => {
+      const lines = doc.splitTextToSize(`${i + 1}.  ${t.title}  (${t.owner})`, pageW - margin * 2) as string[];
+      lines.forEach((ln) => { doc.text(ln, margin, y); y += 11; });
+    });
+    y += 8;
+  }
+
+  if (konzept.warnings.length > 0) {
+    if (y + 30 + konzept.warnings.length * 22 > pageH - 60) { doc.addPage(); y = 104; }
+    doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(BRAND.brown);
+    konzept.warnings.forEach((w) => {
+      const lines = doc.splitTextToSize(`\u2022  ${w.message}`, pageW - margin * 2) as string[];
+      lines.forEach((ln) => { doc.text(ln, margin, y); y += 11; });
+      y += 2;
+    });
+    y += 6;
+  }
+
+  doc.setFont("helvetica", "normal").setFontSize(8).setTextColor(BRAND.muted);
+  (doc.splitTextToSize(konzept.disclaimer, pageW - margin * 2) as string[]).forEach((ln) => {
+    doc.text(ln, margin, y); y += 10;
+  });
+  y += 16;
+
   // ── Herkunft der Annahmen ───────────────────────────────────────────────
   // The section that stops this report from selling placeholders as facts.
   // Start here only if there is real room; autoTable flows the rest itself.
@@ -336,9 +427,18 @@ export function buildReportDoc(
 export function downloadReportPdf(
   inputs: MieterstromInputs,
   scenarios: ScenarioBundle,
-  options?: { facts?: QualificationFacts; filename?: string; now?: Date },
+  options?: {
+    facts?: QualificationFacts;
+    messkonzept?: MesskonzeptAnswers;
+    filename?: string;
+    now?: Date;
+  },
 ): void {
-  buildReportDoc(inputs, scenarios, { now: options?.now, facts: options?.facts }).save(
+  buildReportDoc(inputs, scenarios, {
+    now: options?.now,
+    facts: options?.facts,
+    messkonzept: options?.messkonzept,
+  }).save(
     options?.filename ?? "energie-teilen-wirtschaftlichkeitsbericht.pdf",
   );
 }

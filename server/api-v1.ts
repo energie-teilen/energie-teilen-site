@@ -21,10 +21,23 @@ import {
   type ApiV1Error,
   type ApiV1ErrorCode,
   type CalculateResponse,
+  type AllocationResponse,
   type EligibilityResponse,
+  type MesskonzeptResponse,
   type MetaResponse,
   type ProvenanceEntry,
+  AllocationRequestSchema,
+  MesskonzeptRequestSchema,
 } from "../shared/api-contract.js";
+import {
+  AllocationError,
+  allocate,
+  compareKeys,
+  KEY_LABEL_DE,
+  type AllocationKey,
+  type AllocationResult,
+} from "../shared/allocation.js";
+import { criticalPath, deriveMesskonzept } from "../shared/messkonzept.js";
 import {
   ASSUMPTION_SET,
   MODEL_VERSION,
@@ -203,6 +216,33 @@ function buildWarnings(
   return warnings;
 }
 
+/**
+ * Which key placed the most energy with participants, and by how much.
+ *
+ * Comparative, not advisory: it reports the computed difference between the
+ * best and worst key on this data. It does not state which key may be agreed
+ * in a given constellation.
+ */
+function recommendKey(runs: Record<AllocationKey, AllocationResult>) {
+  const entries = Object.entries(runs) as [AllocationKey, AllocationResult][];
+  if (entries.length < 2) return null;
+
+  const sorted = [...entries].sort(
+    (a, b) => b[1].totals.allocatedKwh - a[1].totals.allocatedKwh,
+  );
+  const [bestKey, best] = sorted[0];
+  const [worstKey, worst] = sorted[sorted.length - 1];
+
+  return {
+    key: bestKey,
+    keyLabel: KEY_LABEL_DE[bestKey],
+    additionalSelfConsumptionKwh: best.totals.allocatedKwh - worst.totals.allocatedKwh,
+    additionalSelfConsumptionPoints:
+      (best.totals.selfConsumptionRate - worst.totals.selfConsumptionRate) * 100,
+    comparedTo: worstKey,
+  };
+}
+
 // ============================================================================
 // MOUNT
 // ============================================================================
@@ -258,7 +298,13 @@ export function mountApiV1(
           citation: formatCitation(m),
         };
       }),
-      endpoints: [`${API_PREFIX}/meta`, `${API_PREFIX}/calculate`, `${API_PREFIX}/eligibility`],
+      endpoints: [
+        `${API_PREFIX}/meta`,
+        `${API_PREFIX}/calculate`,
+        `${API_PREFIX}/eligibility`,
+        `${API_PREFIX}/messkonzept`,
+        `${API_PREFIX}/allocation`,
+      ],
     };
 
     res.setHeader("Cache-Control", "no-store");
@@ -337,6 +383,79 @@ export function mountApiV1(
           }
         : null,
       disclaimer: API_DISCLAIMER_DE,
+    };
+
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json(body);
+  });
+
+  // --------------------------------------------------------------------------
+  // POST /api/v1/messkonzept — meter inventory, market roles, critical path
+  // --------------------------------------------------------------------------
+  app.post(`${API_PREFIX}/messkonzept`, deps.limiter, requireKey, (req: Request, res: Response) => {
+    const parsed = MesskonzeptRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+    }
+
+    const now = new Date();
+    const result = deriveMesskonzept(parsed.data.constellation);
+
+    const body: MesskonzeptResponse = {
+      ok: true,
+      reference: parsed.data.reference ?? null,
+      model: stamp(now),
+      variant: result.variant,
+      variantLabel: result.variantLabel,
+      rationale: result.rationale,
+      meters: result.meters,
+      meterCount: result.meterCount,
+      roles: result.roles,
+      tasks: result.tasks,
+      criticalPath: criticalPath(result),
+      warnings: result.warnings,
+      missingInputs: result.missingInputs,
+      confidence: result.confidence,
+      disclaimer: result.disclaimer,
+    };
+
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json(body);
+  });
+
+  // --------------------------------------------------------------------------
+  // POST /api/v1/allocation — interval-level Aufteilungsschlüssel
+  // --------------------------------------------------------------------------
+  app.post(`${API_PREFIX}/allocation`, deps.limiter, requireKey, (req: Request, res: Response) => {
+    const parsed = AllocationRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+    }
+
+    const { key, generationKwh, participants, includeSeries } = parsed.data;
+    const options = { includeSeries };
+
+    let runs: Partial<Record<AllocationKey, AllocationResult>>;
+    try {
+      runs = key
+        ? { [key]: allocate({ key, generationKwh, participants }, options) }
+        : compareKeys({ generationKwh, participants }, options);
+    } catch (err) {
+      // A shape the schema cannot express — mismatched series lengths, shares
+      // over 100 %. Reported as the caller's input error, with its code.
+      if (err instanceof AllocationError) {
+        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+      }
+      throw err;
+    }
+
+    const body: AllocationResponse = {
+      ok: true,
+      reference: parsed.data.reference ?? null,
+      model: stamp(new Date()),
+      key: key ?? null,
+      runs: runs as Record<AllocationKey, AllocationResult>,
+      recommendation: key ? null : recommendKey(runs as Record<AllocationKey, AllocationResult>),
     };
 
     res.setHeader("Cache-Control", "no-store");

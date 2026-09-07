@@ -2,6 +2,8 @@ import { type ScenarioBundle } from "@/lib/report-pdf";
 import { SensitivityTornado } from "@/components/SensitivityTornado";
 import { BreakEvenPanel } from "@/components/BreakEvenPanel";
 import { EligibilityPanel } from "@/components/EligibilityPanel";
+import { MesskonzeptPanel, type MesskonzeptAnswers } from "@/components/MesskonzeptPanel";
+import { AllocationPanel } from "@/components/AllocationPanel";
 import type { QualificationFacts } from "../../../shared/eligibility";
 import { evaluateEligibility } from "../../../shared/eligibility";
 import { track } from "@/lib/analytics";
@@ -467,17 +469,22 @@ function SliderField({
 }
 
 const FACTS_STORAGE_KEY = "et:rechner:facts:v1";
+const MESSKONZEPT_STORAGE_KEY = "et:rechner:messkonzept:v1";
 
 function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void }) {
   const [inputs, setInputs] = useState<MieterstromInputs>(DEFAULTS);
   // Qualification answers live here, not in the panel, so the downloaded PDF
   // carries exactly the same verdict the visitor just read on screen.
   const [facts, setFacts] = useState<QualificationFacts>({});
+  // The metering answers the qualification questions do not cover.
+  const [messkonzeptAnswers, setMesskonzeptAnswers] = useState<MesskonzeptAnswers>({});
 
   useEffect(() => {
     try {
       const raw = localStorage.getItem(FACTS_STORAGE_KEY);
       if (raw) setFacts(JSON.parse(raw) as QualificationFacts);
+      const rawMk = localStorage.getItem(MESSKONZEPT_STORAGE_KEY);
+      if (rawMk) setMesskonzeptAnswers(JSON.parse(rawMk) as MesskonzeptAnswers);
     } catch {
       // ignore
     }
@@ -490,6 +497,14 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
       // ignore
     }
   }, [facts]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(MESSKONZEPT_STORAGE_KEY, JSON.stringify(messkonzeptAnswers));
+    } catch {
+      // ignore
+    }
+  }, [messkonzeptAnswers]);
   const [, startTransition] = useTransition();
 
   // Hydrate from localStorage on first mount (returning visitor sees last scenario)
@@ -653,11 +668,27 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
           onProceedToPilot={onProceedToPilot}
         />
 
+        {/*
+          Buildability, after the verdict: which meters, which roles, which
+          blocking step. The engine reports "not determinable" rather than
+          drawing a concept the connection situation does not support.
+        */}
+        <MesskonzeptPanel
+          inputs={inputs}
+          facts={facts}
+          answers={messkonzeptAnswers}
+          onAnswersChange={setMesskonzeptAnswers}
+        />
+
+        {/* What the metering is for: the split, and what it is worth. */}
+        <AllocationPanel inputs={inputs} />
+
         <LeadCaptureBand
           inputs={inputs}
           result={baseScenario}
           facts={facts}
           scenarios={{ konservativ: conservativeScenario, realistisch: baseScenario, optimistisch: optimisticScenario }}
+          messkonzept={messkonzeptAnswers}
           onProceedToPilot={onProceedToPilot}
         />
       </div>
@@ -670,12 +701,14 @@ function LeadCaptureBand({
   result,
   facts,
   scenarios,
+  messkonzept,
   onProceedToPilot,
 }: {
   inputs: MieterstromInputs;
   result: MieterstromResult;
   facts: QualificationFacts;
   scenarios: ScenarioBundle;
+  messkonzept: MesskonzeptAnswers;
   onProceedToPilot: () => void;
 }) {
   const [email, setEmail] = useState("");
@@ -710,7 +743,7 @@ function LeadCaptureBand({
       });
       try {
         const { downloadReportPdf } = await import("@/lib/report-pdf");
-        downloadReportPdf(inputs, scenarios, { facts });
+        downloadReportPdf(inputs, scenarios, { facts, messkonzept });
       } catch (err) { console.error("PDF generation failed", err); }
       if (res.persisted === "server") {
         toast.success(

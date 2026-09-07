@@ -73,6 +73,8 @@ describe("event vocabulary", () => {
       "checkout_started",
       "checkout_succeeded",
       "checkout_canceled",
+      "messkonzept_derived",
+      "allocation_compared",
     ];
     expect([...ANALYTICS_EVENTS]).toEqual(expected);
   });

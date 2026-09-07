@@ -3,6 +3,7 @@ import { buildReportDoc, type ScenarioBundle } from "./report-pdf";
 import { calculateMieterstrom, DEFAULTS } from "./mieterstrom";
 import { ASSUMPTION_SET, MODEL_VERSION } from "../../../shared/assumptions";
 import type { QualificationFacts } from "../../../shared/eligibility";
+import type { MesskonzeptAnswers } from "./report-pdf";
 
 const QUALIFIED: QualificationFacts = {
   ownerConstellation: "single_owner",
@@ -25,8 +26,9 @@ function renderText(
   inputs = DEFAULTS,
   now = FIXED_NOW,
   facts?: QualificationFacts,
+  messkonzept?: MesskonzeptAnswers,
 ): string {
-  const uri = buildReportDoc(inputs, scenarios, { now, facts }).output("datauristring");
+  const uri = buildReportDoc(inputs, scenarios, { now, facts, messkonzept }).output("datauristring");
   return Buffer.from(uri.split(",")[1], "base64").toString("latin1");
 }
 
@@ -70,9 +72,32 @@ describe("buildReportDoc", () => {
     expect(raw).toContain("energie-teilen.de");
   });
 
-  // The report must not claim a deliverable it does not produce.
-  it("does not claim to contain a Messkonzept it never renders", () => {
-    expect(renderText()).not.toContain("Messkonzept");
+  // The metering section is derived, not asserted: without the connection
+  // situation the report says so rather than printing a plausible concept.
+  it("reports the metering concept as not determinable when nothing decides it", () => {
+    const raw = renderText();
+    expect(raw).toContain("Messkonzept und Umsetzungspfad");
+    expect(raw).toContain("Nicht bestimmbar");
+    expect(raw).not.toContain("Summenz");
+  });
+
+  it("renders the meter inventory once the connection situation is given", () => {
+    const raw = renderText(DEFAULTS, FIXED_NOW, QUALIFIED, {
+      gridConnection: "single_connection",
+    });
+    expect(raw).toContain("Summenz");
+    expect(raw).toContain("Erzeugungsz");
+    expect(raw).toContain("Kritischer Pfad");
+  });
+
+  it("keeps the network operator's approval as the last word", () => {
+    for (const raw of [
+      renderText(),
+      renderText(DEFAULTS, FIXED_NOW, QUALIFIED, { gridConnection: "public_grid" }),
+    ]) {
+      expect(raw).toContain("Netzbetreiber");
+      expect(raw).toContain("geblich");
+    }
   });
 
   // P0.3 — the report must say which of the three models it computes.
@@ -133,6 +158,16 @@ describe("buildReportDoc", () => {
   // Layout regression guard.
   it("stays at three pages, so nothing spills into a half-empty page", () => {
     expect(buildReportDoc(DEFAULTS, scenarios, { now: FIXED_NOW }).getNumberOfPages()).toBe(3);
+  });
+
+  it("stays within four pages with the full metering section rendered", () => {
+    const pages = buildReportDoc(DEFAULTS, scenarios, {
+      now: FIXED_NOW,
+      facts: QUALIFIED,
+      messkonzept: { gridConnection: "single_connection", storage: "planned", commercialUnits: 2 },
+    }).getNumberOfPages();
+    expect(pages).toBeLessThanOrEqual(4);
+    expect(pages).toBeGreaterThanOrEqual(3);
   });
 
   it("is byte-identical for the same inputs and the same clock", () => {

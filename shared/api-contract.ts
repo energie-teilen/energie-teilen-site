@@ -24,6 +24,8 @@
 import { z } from "zod";
 import { MieterstromInputsSchema } from "./schema.js";
 import { QualificationFactsSchema, EligibilityVerdictSchema } from "./eligibility.js";
+import { MesskonzeptInputSchema, MesskonzeptVariantSchema } from "./messkonzept.js";
+import { AllocationKeySchema, ParticipantSchema } from "./allocation.js";
 
 /** Bumped only for a breaking change to request or response shape. */
 export const API_VERSION = "1.0.0";
@@ -228,3 +230,131 @@ export const MetaResponseSchema = z.object({
   endpoints: z.array(z.string()),
 });
 export type MetaResponse = z.infer<typeof MetaResponseSchema>;
+
+// ============================================================================
+// MESSKONZEPT
+// ============================================================================
+
+export const MesskonzeptRequestSchema = z.object({
+  constellation: MesskonzeptInputSchema,
+  reference: z.string().max(120).optional(),
+});
+export type MesskonzeptRequest = z.infer<typeof MesskonzeptRequestSchema>;
+
+export const MeterSpecSchema = z.object({
+  code: z.string(),
+  label: z.string(),
+  count: z.number().int().nonnegative(),
+  bidirectional: z.boolean(),
+  intervalMetering: z.boolean(),
+  purpose: z.string(),
+});
+
+export const MarketRoleSchema = z.object({
+  code: z.string(),
+  label: z.string(),
+  filledBy: z.string(),
+  responsibility: z.string(),
+});
+
+export const MesskonzeptTaskSchema = z.object({
+  code: z.string(),
+  title: z.string(),
+  owner: z.string(),
+  blocking: z.boolean(),
+});
+
+export const MesskonzeptResponseSchema = z.object({
+  ok: z.literal(true),
+  reference: z.string().nullable(),
+  model: ApiModelStampSchema,
+  variant: MesskonzeptVariantSchema,
+  variantLabel: z.string(),
+  rationale: z.string(),
+  meters: z.array(MeterSpecSchema),
+  meterCount: z.number().int().nonnegative(),
+  roles: z.array(MarketRoleSchema),
+  tasks: z.array(MesskonzeptTaskSchema),
+  /** Blocking tasks only, in order. */
+  criticalPath: z.array(MesskonzeptTaskSchema),
+  warnings: z.array(z.object({ code: z.string(), message: z.string() })),
+  missingInputs: z.array(z.string()),
+  confidence: z.enum(["high", "medium", "insufficient_data"]),
+  /** The network operator's approval is authoritative; this is a proposal. */
+  disclaimer: z.string(),
+});
+export type MesskonzeptResponse = z.infer<typeof MesskonzeptResponseSchema>;
+
+// ============================================================================
+// ALLOCATION
+// ============================================================================
+
+export const AllocationRequestSchema = z.object({
+  /** Omit to run all three keys and return the comparison. */
+  key: AllocationKeySchema.optional(),
+  generationKwh: z.array(z.number().min(0)).min(1).max(35_040),
+  participants: z.array(ParticipantSchema).min(1).max(500),
+  /** Return per-interval series as well as totals. Off by default. */
+  includeSeries: z.boolean().optional().default(false),
+  reference: z.string().max(120).optional(),
+});
+export type AllocationRequest = z.infer<typeof AllocationRequestSchema>;
+
+export const ParticipantAllocationSchema = z.object({
+  id: z.string(),
+  label: z.string().nullable(),
+  share: z.number().nullable(),
+  consumptionKwh: z.number(),
+  allocatedKwh: z.number(),
+  gridDrawKwh: z.number(),
+  coverageRate: z.number().nullable(),
+  series: z.array(z.number()).nullable(),
+});
+
+export const AllocationTotalsSchema = z.object({
+  generationKwh: z.number(),
+  consumptionKwh: z.number(),
+  allocatedKwh: z.number(),
+  feedInKwh: z.number(),
+  gridDrawKwh: z.number(),
+  selfConsumptionRate: z.number(),
+  autarkyRate: z.number(),
+  intervals: z.number().int(),
+  intervalMinutes: z.number().int(),
+});
+
+export const AllocationRunSchema = z.object({
+  key: AllocationKeySchema,
+  keyLabel: z.string(),
+  keyDescription: z.string(),
+  participants: z.array(ParticipantAllocationSchema),
+  totals: AllocationTotalsSchema,
+  generationSeries: z.array(z.number()).nullable(),
+  feedInSeries: z.array(z.number()).nullable(),
+  warnings: z.array(z.object({ code: z.string(), message: z.string() })),
+  disclaimer: z.string(),
+});
+
+export const AllocationResponseSchema = z.object({
+  ok: z.literal(true),
+  reference: z.string().nullable(),
+  model: ApiModelStampSchema,
+  /** The requested key, or null when all three were run. */
+  key: AllocationKeySchema.nullable(),
+  /** Keyed by allocation key. One entry for a single run, three for a comparison. */
+  runs: z.record(AllocationKeySchema, AllocationRunSchema),
+  /**
+   * Which key placed the most energy with participants, and how much more than
+   * the worst. Present only for a comparison.
+   */
+  recommendation: z
+    .object({
+      key: AllocationKeySchema,
+      keyLabel: z.string(),
+      additionalSelfConsumptionKwh: z.number(),
+      additionalSelfConsumptionPoints: z.number(),
+      comparedTo: AllocationKeySchema,
+    })
+    .nullable(),
+});
+export type AllocationResponse = z.infer<typeof AllocationResponseSchema>;

@@ -8,6 +8,10 @@ import {
   EligibilityResponseSchema,
   MetaResponseSchema,
   ApiV1ErrorSchema,
+  AllocationRequestSchema,
+  AllocationResponseSchema,
+  MesskonzeptRequestSchema,
+  MesskonzeptResponseSchema,
 } from "../../../shared/api-contract";
 import {
   extractApiKey,
@@ -141,5 +145,89 @@ describe("api key authentication", () => {
     expect(hashApiKey(KEY)).toMatch(/^[0-9a-f]{64}$/);
     expect(hashApiKey(KEY)).toBe(hashApiKey(KEY));
     expect(hashApiKey(KEY)).not.toBe(hashApiKey(KEY + "x"));
+  });
+});
+
+describe("messkonzept contract", () => {
+  it("requires the constellation, not just a plant size", () => {
+    expect(MesskonzeptRequestSchema.safeParse({}).success).toBe(false);
+    expect(
+      MesskonzeptRequestSchema.safeParse({ constellation: { units: 20, kwp: 60 } }).success,
+    ).toBe(true);
+  });
+
+  it("rejects an unknown grid-connection value rather than falling back", () => {
+    expect(
+      MesskonzeptRequestSchema.safeParse({
+        constellation: { units: 20, kwp: 60, gridConnection: "irgendwas" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("carries the model stamp, the critical path and the disclaimer", () => {
+    expect(MesskonzeptResponseSchema.shape.model).toBeDefined();
+    expect(MesskonzeptResponseSchema.shape.criticalPath).toBeDefined();
+    expect(MesskonzeptResponseSchema.shape.disclaimer).toBeDefined();
+  });
+
+  it("keeps a not-determinable verdict expressible in the response", () => {
+    expect(
+      MesskonzeptResponseSchema.shape.variant.safeParse("not_determinable").success,
+    ).toBe(true);
+  });
+});
+
+describe("allocation contract", () => {
+  const base = {
+    generationKwh: [1, 2, 3],
+    participants: [{ id: "a", consumptionKwh: [1, 1, 1] }],
+  };
+
+  it("treats the key as optional, so a comparison is the default", () => {
+    const r = AllocationRequestSchema.safeParse(base);
+    expect(r.success).toBe(true);
+    if (r.success) {
+      expect(r.data.key).toBeUndefined();
+      expect(r.data.includeSeries).toBe(false);
+    }
+  });
+
+  it("accepts a single named key", () => {
+    expect(AllocationRequestSchema.safeParse({ ...base, key: "cascading" }).success).toBe(true);
+  });
+
+  it("rejects an unknown key", () => {
+    expect(AllocationRequestSchema.safeParse({ ...base, key: "irgendwie" }).success).toBe(false);
+  });
+
+  it("rejects negative energy and empty series at the boundary", () => {
+    expect(
+      AllocationRequestSchema.safeParse({ ...base, generationKwh: [-1, 0, 0] }).success,
+    ).toBe(false);
+    expect(AllocationRequestSchema.safeParse({ ...base, generationKwh: [] }).success).toBe(false);
+    expect(AllocationRequestSchema.safeParse({ ...base, participants: [] }).success).toBe(false);
+  });
+
+  it("bounds the request so one call cannot become an unbounded computation", () => {
+    expect(
+      AllocationRequestSchema.safeParse({
+        ...base,
+        generationKwh: new Array(40_000).fill(0),
+      }).success,
+    ).toBe(false);
+    expect(
+      AllocationRequestSchema.safeParse({
+        ...base,
+        participants: Array.from({ length: 600 }, (_, i) => ({
+          id: `p${i}`,
+          consumptionKwh: [1, 1, 1],
+        })),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("returns a run per key, and a recommendation only for a comparison", () => {
+    expect(AllocationResponseSchema.shape.runs).toBeDefined();
+    expect(AllocationResponseSchema.shape.recommendation.safeParse(null).success).toBe(true);
   });
 });

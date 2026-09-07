@@ -35,6 +35,10 @@ export const ANALYTICS_EVENTS = [
   "checkout_succeeded",
   /** Returned from Stripe having abandoned. */
   "checkout_canceled",
+  /** The metering-concept engine produced a variant the visitor can see. */
+  "messkonzept_derived",
+  /** The allocation keys were compared on the visitor's constellation. */
+  "allocation_compared",
 ] as const;
 
 export type AnalyticsEvent = (typeof ANALYTICS_EVENTS)[number];
