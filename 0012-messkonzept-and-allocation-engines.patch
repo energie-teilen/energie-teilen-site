@@ -1,0 +1,3778 @@
+From cc021c06d29b1492f44ed666d2b688d4cdc17aba Mon Sep 17 00:00:00 2001
+From: energie-teilen <noreply@energie-teilen.de>
+Date: Mon, 7 Sep 2026 20:09:07 +0000
+Subject: [PATCH] feat(engine): metering-concept generator and interval
+ allocation engine
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two deterministic engines and the surfaces that use them.
+
+shared/messkonzept.ts derives the metering concept from a constellation:
+the variant (Summenzähler / Einzelzähler / Viertelstundenbilanzierung),
+the meter inventory with counts and interval-metering flags, the market
+roles, an ordered task list with blocking flags, warnings and missing
+inputs. Without the grid-connection situation it returns
+"not determinable" and names that as the only task, rather than drawing a
+concept the inputs do not support. Every result carries the statement
+that the network operator's and metering operator's approval is
+authoritative.
+
+shared/allocation.ts distributes generation across participants over
+fifteen-minute intervals under three keys — static shares, dynamic pro
+rata, and static-with-redistribution. Allocation plus feed-in equals
+generation in every interval by construction, and no participant is ever
+allocated more than they consumed; both invariants are pinned by test,
+including across a full year of intervals. compareKeys() runs all three
+on one dataset so the difference in self-consumption is computed rather
+than asserted. illustrativeDayProfile() and illustrativeShares() produce
+a deterministic demonstration profile, labelled as not being measurement.
+
+Surfaces:
+- POST /api/v1/messkonzept and POST /api/v1/allocation, listed in
+  /api/v1/meta, with the same model stamp and error discipline as the
+  existing endpoints; an AllocationError becomes a 400 with its code.
+- MesskonzeptPanel with an SVG topology diagram drawn from the same
+  result object the inventory table shows.
+- AllocationPanel with a day chart and a per-participant coverage
+  breakdown, leading with the percentage-point spread between keys.
+- The report PDF gains a "Messkonzept und Umsetzungspfad" section with
+  the meter inventory, the critical path and the approval statement.
+
+93 new tests; 310 total. Typecheck, tests and build clean.
+---
+ client/src/components/AllocationDayChart.tsx  | 197 +++++++
+ client/src/components/AllocationPanel.tsx     | 255 +++++++++
+ client/src/components/MesskonzeptPanel.tsx    | 386 ++++++++++++++
+ client/src/components/MesskonzeptTopology.tsx | 404 ++++++++++++++
+ client/src/lib/allocation.test.ts             | 424 +++++++++++++++
+ client/src/lib/analytics.test.ts              |   2 +
+ client/src/lib/analytics.ts                   |   4 +
+ client/src/lib/api-v1.test.ts                 |  88 ++++
+ client/src/lib/messkonzept.test.ts            | 258 +++++++++
+ client/src/lib/report-pdf.test.ts             |  43 +-
+ client/src/lib/report-pdf.ts                  | 106 +++-
+ client/src/pages/Home.tsx                     |  35 +-
+ server/api-v1.ts                              | 121 ++++-
+ shared/allocation.ts                          | 487 +++++++++++++++++
+ shared/api-contract.ts                        | 130 +++++
+ shared/messkonzept.ts                         | 497 ++++++++++++++++++
+ 16 files changed, 3428 insertions(+), 9 deletions(-)
+ create mode 100644 client/src/components/AllocationDayChart.tsx
+ create mode 100644 client/src/components/AllocationPanel.tsx
+ create mode 100644 client/src/components/MesskonzeptPanel.tsx
+ create mode 100644 client/src/components/MesskonzeptTopology.tsx
+ create mode 100644 client/src/lib/allocation.test.ts
+ create mode 100644 client/src/lib/messkonzept.test.ts
+ create mode 100644 shared/allocation.ts
+ create mode 100644 shared/messkonzept.ts
+
+diff --git a/client/src/components/AllocationDayChart.tsx b/client/src/components/AllocationDayChart.tsx
+new file mode 100644
+index 0000000..0b0824b
+--- /dev/null
++++ b/client/src/components/AllocationDayChart.tsx
+@@ -0,0 +1,197 @@
++import { useMemo, useState } from "react";
++import {
++  INTERVALS_PER_HOUR,
++  type AllocationResult,
++} from "../../../shared/allocation";
++
++/**
++ * AllocationDayChart
++ *
++ * One day of fifteen-minute intervals: how much of the generation went to
++ * participants, and how much was fed in.
++ *
++ * Drawn from the same result the panel reports in figures, so the picture and
++ * the numbers cannot disagree. Hovering reads out a single interval — the
++ * resolution the market actually settles at.
++ */
++
++const W = 900;
++const H = 300;
++const PAD = { top: 18, right: 18, bottom: 34, left: 52 };
++
++function hourLabel(interval: number): string {
++  const h = Math.floor(interval / INTERVALS_PER_HOUR);
++  const m = (interval % INTERVALS_PER_HOUR) * 15;
++  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
++}
++
++export function AllocationDayChart({ run }: { run: AllocationResult }) {
++  const [hover, setHover] = useState<number | null>(null);
++
++  const data = useMemo(() => {
++    const generation = run.generationSeries ?? [];
++    const n = generation.length;
++    const allocated = new Array<number>(n).fill(0);
++    for (const p of run.participants) {
++      if (!p.series) continue;
++      for (let t = 0; t < n; t++) allocated[t] += p.series[t];
++    }
++    const peak = Math.max(...generation, 0.0001);
++    return { generation, allocated, n, peak };
++  }, [run]);
++
++  if (data.n === 0) return null;
++
++  const plotW = W - PAD.left - PAD.right;
++  const plotH = H - PAD.top - PAD.bottom;
++  const x = (t: number) => PAD.left + (t / (data.n - 1)) * plotW;
++  const y = (v: number) => PAD.top + plotH - (v / data.peak) * plotH;
++
++  const areaPath = (series: number[]) => {
++    const top = series.map((v, t) => `${t === 0 ? "M" : "L"} ${x(t).toFixed(2)} ${y(v).toFixed(2)}`).join(" ");
++    return `${top} L ${x(data.n - 1).toFixed(2)} ${y(0).toFixed(2)} L ${x(0).toFixed(2)} ${y(0).toFixed(2)} Z`;
++  };
++
++  const gridLines = [0.25, 0.5, 0.75, 1].map((f) => ({ f, v: data.peak * f }));
++
++  return (
++    <figure className="overflow-hidden rounded-[20px] border border-border/60 bg-background/70">
++      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/50 px-5 py-3">
++        <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
++          Beispieltag · {data.n} Viertelstunden
++        </p>
++        <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
++          <span className="flex items-center gap-1.5">
++            <span aria-hidden className="h-2.5 w-2.5 rounded-sm bg-primary/70" />
++            An Teilnehmer zugeordnet
++          </span>
++          <span className="flex items-center gap-1.5">
++            <span aria-hidden className="h-2.5 w-2.5 rounded-sm bg-primary/18" />
++            Eingespeist
++          </span>
++        </div>
++      </div>
++
++      <div className="overflow-x-auto">
++        <svg
++          viewBox={`0 0 ${W} ${H}`}
++          role="img"
++          aria-label={`Zuordnung über einen Tag, ${run.keyLabel}`}
++          className="h-auto w-full min-w-[34rem]"
++          onMouseLeave={() => setHover(null)}
++          onMouseMove={(e) => {
++            const rect = e.currentTarget.getBoundingClientRect();
++            const px = ((e.clientX - rect.left) / rect.width) * W;
++            const t = Math.round(((px - PAD.left) / plotW) * (data.n - 1));
++            setHover(t >= 0 && t < data.n ? t : null);
++          }}
++        >
++          {gridLines.map(({ f, v }) => (
++            <g key={f}>
++              <line
++                x1={PAD.left}
++                x2={W - PAD.right}
++                y1={y(v)}
++                y2={y(v)}
++                stroke="color-mix(in oklab, var(--foreground) 10%, transparent)"
++                strokeWidth={1}
++              />
++              <text
++                x={PAD.left - 8}
++                y={y(v) + 4}
++                textAnchor="end"
++                fontSize={11}
++                fill="var(--muted-foreground)"
++              >
++                {v.toLocaleString("de-DE", { maximumFractionDigits: 1 })}
++              </text>
++            </g>
++          ))}
++          <text
++            x={PAD.left - 8}
++            y={y(0) + 4}
++            textAnchor="end"
++            fontSize={11}
++            fill="var(--muted-foreground)"
++          >
++            0
++          </text>
++
++          {/* Generation envelope — everything under it was produced. */}
++          <path
++            d={areaPath(data.generation)}
++            fill="color-mix(in oklab, var(--primary) 14%, transparent)"
++          />
++          {/* Allocated share — what stayed with the participants. */}
++          <path
++            d={areaPath(data.allocated)}
++            fill="color-mix(in oklab, var(--primary) 55%, transparent)"
++          />
++          <path
++            d={data.generation
++              .map((v, t) => `${t === 0 ? "M" : "L"} ${x(t).toFixed(2)} ${y(v).toFixed(2)}`)
++              .join(" ")}
++            fill="none"
++            stroke="color-mix(in oklab, var(--primary) 70%, transparent)"
++            strokeWidth={1.75}
++          />
++
++          {/* Hour ticks every three hours */}
++          {Array.from({ length: 9 }, (_, i) => i * 3 * INTERVALS_PER_HOUR)
++            .filter((t) => t < data.n)
++            .map((t) => (
++              <text
++                key={t}
++                x={x(t)}
++                y={H - 12}
++                textAnchor="middle"
++                fontSize={11}
++                fill="var(--muted-foreground)"
++              >
++                {hourLabel(t)}
++              </text>
++            ))}
++
++          {hover !== null ? (
++            <g>
++              <line
++                x1={x(hover)}
++                x2={x(hover)}
++                y1={PAD.top}
++                y2={PAD.top + plotH}
++                stroke="color-mix(in oklab, var(--foreground) 32%, transparent)"
++                strokeWidth={1}
++                strokeDasharray="4 4"
++              />
++              <circle cx={x(hover)} cy={y(data.generation[hover])} r={3.5} fill="var(--primary)" />
++              <circle cx={x(hover)} cy={y(data.allocated[hover])} r={3.5} fill="var(--primary)" />
++            </g>
++          ) : null}
++        </svg>
++      </div>
++
++      <figcaption className="border-t border-border/50 px-5 py-3 text-xs leading-6 text-muted-foreground">
++        {hover === null ? (
++          <>
++            {run.keyLabel} · {run.totals.allocatedKwh.toLocaleString("de-DE", { maximumFractionDigits: 1 })} kWh
++            zugeordnet, {run.totals.feedInKwh.toLocaleString("de-DE", { maximumFractionDigits: 1 })} kWh
++            eingespeist. Zeigen Sie auf den Verlauf für eine einzelne Viertelstunde.
++          </>
++        ) : (
++          <>
++            {hourLabel(hover)} · Erzeugung{" "}
++            {data.generation[hover].toLocaleString("de-DE", { maximumFractionDigits: 2 })} kWh ·
++            zugeordnet {data.allocated[hover].toLocaleString("de-DE", { maximumFractionDigits: 2 })} kWh
++            · eingespeist{" "}
++            {(data.generation[hover] - data.allocated[hover]).toLocaleString("de-DE", {
++              maximumFractionDigits: 2,
++            })}{" "}
++            kWh
++          </>
++        )}
++      </figcaption>
++    </figure>
++  );
++}
++
++export default AllocationDayChart;
+diff --git a/client/src/components/AllocationPanel.tsx b/client/src/components/AllocationPanel.tsx
+new file mode 100644
+index 0000000..5ed4210
+--- /dev/null
++++ b/client/src/components/AllocationPanel.tsx
+@@ -0,0 +1,255 @@
++import { useEffect, useMemo, useState } from "react";
++import { Info, Split } from "lucide-react";
++import { track } from "@/lib/analytics";
++import { AllocationDayChart } from "@/components/AllocationDayChart";
++import {
++  ILLUSTRATIVE_PROFILE_DISCLAIMER_DE,
++  KEY_DESCRIPTION_DE,
++  KEY_LABEL_DE,
++  compareKeys,
++  illustrativeDayProfile,
++  illustrativeShares,
++  type AllocationKey,
++} from "../../../shared/allocation";
++import type { MieterstromInputs } from "../../../shared/schema";
++
++/**
++ * AllocationPanel
++ *
++ * The Aufteilungsschlüssel, shown as what it actually is: a decision with a
++ * number attached.
++ *
++ * Three keys run against the same day of fifteen-minute values, and the
++ * difference between them — how much generated energy stays with the
++ * participants instead of being fed in — is computed, not asserted.
++ *
++ * The profiles are an illustrative shape, and the panel says so in the same
++ * view as the figures. Real interval data replaces them; the engine is the
++ * same either way.
++ */
++
++const KEY_ORDER: AllocationKey[] = ["static", "dynamic", "cascading"];
++
++const KEY_SHORT: Record<AllocationKey, string> = {
++  static: "Statisch",
++  dynamic: "Dynamisch",
++  cascading: "Mit Nachverteilung",
++};
++
++/** Consumption per household for the illustrative day. Stated, not inferred. */
++const DAILY_CONSUMPTION_KWH = 8;
++const PEAK_SUN_HOURS = 3.5;
++
++function pct(v: number): string {
++  return `${(v * 100).toLocaleString("de-DE", { maximumFractionDigits: 1 })} %`;
++}
++
++function kwh(v: number): string {
++  return `${v.toLocaleString("de-DE", { maximumFractionDigits: 1 })} kWh`;
++}
++
++export function AllocationPanel({ inputs }: { inputs: MieterstromInputs }) {
++  const participants = Math.max(2, Math.min(24, Math.round(inputs.anzahlWohneinheiten)));
++
++  const profile = useMemo(
++    () =>
++      illustrativeDayProfile({
++        kwp: inputs.kwp,
++        dailyConsumptionKwh: DAILY_CONSUMPTION_KWH,
++        participants,
++        peakSunHours: PEAK_SUN_HOURS,
++      }),
++    [inputs.kwp, participants],
++  );
++
++  const runs = useMemo(() => {
++    const shares = illustrativeShares(participants);
++    return compareKeys(
++      {
++        generationKwh: profile.generationKwh,
++        participants: profile.consumptionKwh.map((c, i) => ({
++          id: `we-${i + 1}`,
++          label: `WE ${i + 1}`,
++          share: shares[i],
++          consumptionKwh: c,
++        })),
++      },
++      { includeSeries: true },
++    );
++  }, [profile, participants]);
++
++  const best = useMemo(
++    () =>
++      KEY_ORDER.reduce((a, b) =>
++        runs[b].totals.allocatedKwh > runs[a].totals.allocatedKwh ? b : a,
++      ),
++    [runs],
++  );
++  const worst = useMemo(
++    () =>
++      KEY_ORDER.reduce((a, b) =>
++        runs[b].totals.allocatedKwh < runs[a].totals.allocatedKwh ? b : a,
++      ),
++    [runs],
++  );
++
++  const [selected, setSelected] = useState<AllocationKey>("cascading");
++  const run = runs[selected];
++
++  const spreadKwh = runs[best].totals.allocatedKwh - runs[worst].totals.allocatedKwh;
++  const spreadPoints =
++    (runs[best].totals.selfConsumptionRate - runs[worst].totals.selfConsumptionRate) * 100;
++
++  useEffect(() => {
++    track("allocation_compared", {
++      participants,
++      best,
++      spread_points: Math.round(spreadPoints * 10) / 10,
++    });
++  }, [participants, best, spreadPoints]);
++
++  const maxAllocated = Math.max(...KEY_ORDER.map((k) => runs[k].totals.allocatedKwh), 1);
++
++  return (
++    <div className="rounded-[28px] border border-border/70 bg-card p-6 sm:p-8">
++      <div className="space-y-6">
++        <div className="flex items-start gap-4">
++          <Split className="mt-0.5 h-6 w-6 shrink-0 text-primary" />
++          <div className="min-w-0 flex-1 space-y-2">
++            <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-primary">
++              Aufteilungsschlüssel
++            </p>
++            <h3 className="font-display text-xl font-semibold tracking-[-0.02em] text-foreground">
++              Wie der erzeugte Strom auf die Teilnehmer verteilt wird
++            </h3>
++            <p className="text-sm leading-7 text-muted-foreground">
++              Der Schlüssel wird viertelstündlich angewendet. Er entscheidet, wie viel
++              der Erzeugung bei den Teilnehmern bleibt statt eingespeist zu werden —
++              und das ist ein Betrag, kein Detail.
++            </p>
++          </div>
++        </div>
++
++        {/* The number that makes the choice concrete */}
++        <div className="rounded-[20px] border border-primary/25 bg-primary/5 p-5">
++          <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
++            Unterschied zwischen bestem und schwächstem Schlüssel
++          </p>
++          <p className="mt-2 font-display text-2xl font-semibold tracking-[-0.02em] text-foreground">
++            {spreadPoints.toLocaleString("de-DE", { maximumFractionDigits: 1 })} Prozentpunkte
++            Eigennutzung
++            <span className="ml-2 text-base font-normal text-muted-foreground">
++              ({kwh(spreadKwh)} am Beispieltag)
++            </span>
++          </p>
++          <p className="mt-2 text-sm leading-7 text-foreground/90">
++            {KEY_LABEL_DE[best]} statt {KEY_SHORT[worst].toLowerCase()} — bei{" "}
++            {participants} Teilnehmern und {inputs.kwp} kWp. Jede Kilowattstunde, die
++            zugeordnet statt eingespeist wird, wird zum Mieterstrompreis statt zur
++            Einspeisevergütung abgerechnet.
++          </p>
++        </div>
++
++        {/* Key selection */}
++        <div className="grid gap-2.5 sm:grid-cols-3">
++          {KEY_ORDER.map((k) => {
++            const active = selected === k;
++            const totals = runs[k].totals;
++            return (
++              <button
++                key={k}
++                type="button"
++                onClick={() => setSelected(k)}
++                aria-pressed={active}
++                className={`rounded-2xl border p-4 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 ${
++                  active
++                    ? "border-primary/50 bg-primary/8"
++                    : "border-border/70 bg-background/60 hover:border-border"
++                }`}
++              >
++                <span className="flex items-baseline justify-between gap-2">
++                  <span className="text-sm font-medium text-foreground">{KEY_SHORT[k]}</span>
++                  {k === best ? (
++                    <span className="rounded-full bg-primary/12 px-2 py-0.5 text-[0.65rem] font-semibold text-primary">
++                      höchste Eigennutzung
++                    </span>
++                  ) : null}
++                </span>
++                <span className="mt-2 block font-display text-lg font-semibold tabular-nums text-foreground">
++                  {pct(totals.selfConsumptionRate)}
++                </span>
++                <span className="mt-1 block text-xs text-muted-foreground">
++                  {kwh(totals.allocatedKwh)} zugeordnet
++                </span>
++                <span
++                  aria-hidden
++                  className="mt-2.5 block h-1.5 w-full overflow-hidden rounded-full bg-border/60"
++                >
++                  <span
++                    className="block h-full rounded-full bg-primary/70"
++                    style={{ width: `${(totals.allocatedKwh / maxAllocated) * 100}%` }}
++                  />
++                </span>
++              </button>
++            );
++          })}
++        </div>
++
++        <p className="text-sm leading-7 text-muted-foreground">{KEY_DESCRIPTION_DE[selected]}</p>
++
++        <AllocationDayChart run={run} />
++
++        {/* Per-participant outcome */}
++        <div className="rounded-[20px] border border-border/60 bg-background/70 p-5">
++          <div className="flex items-baseline justify-between gap-4">
++            <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
++              Deckungsgrad je Teilnehmer
++            </p>
++            <p className="text-xs text-muted-foreground">
++              Autarkie gesamt {pct(run.totals.autarkyRate)}
++            </p>
++          </div>
++          <ul className="mt-4 space-y-2">
++            {run.participants.map((p) => (
++              <li key={p.id} className="flex items-center gap-3">
++                <span className="w-16 shrink-0 text-xs text-muted-foreground">{p.label}</span>
++                <span
++                  aria-hidden
++                  className="h-2 flex-1 overflow-hidden rounded-full bg-border/60"
++                >
++                  <span
++                    className="block h-full rounded-full bg-primary/60"
++                    style={{ width: `${Math.min(100, (p.coverageRate ?? 0) * 100)}%` }}
++                  />
++                </span>
++                <span className="w-14 shrink-0 text-right text-xs tabular-nums text-foreground">
++                  {p.coverageRate === null ? "—" : pct(p.coverageRate)}
++                </span>
++              </li>
++            ))}
++          </ul>
++        </div>
++
++        {run.warnings.length > 0 ? (
++          <ul className="space-y-2">
++            {run.warnings.map((w) => (
++              <li
++                key={w.code}
++                className="flex items-start gap-2.5 rounded-2xl border border-border/60 bg-background/70 px-4 py-3"
++              >
++                <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
++                <span className="text-sm leading-6 text-foreground/90">{w.message}</span>
++              </li>
++            ))}
++          </ul>
++        ) : null}
++
++        <p className="text-[0.72rem] leading-6 text-muted-foreground">
++          {ILLUSTRATIVE_PROFILE_DISCLAIMER_DE} {run.disclaimer}
++        </p>
++      </div>
++    </div>
++  );
++}
++
++export default AllocationPanel;
+diff --git a/client/src/components/MesskonzeptPanel.tsx b/client/src/components/MesskonzeptPanel.tsx
+new file mode 100644
+index 0000000..78b5711
+--- /dev/null
++++ b/client/src/components/MesskonzeptPanel.tsx
+@@ -0,0 +1,386 @@
++import { useEffect, useMemo } from "react";
++import { AlertTriangle, CircleHelp, Gauge, Users, Workflow } from "lucide-react";
++import { track } from "@/lib/analytics";
++import { MesskonzeptTopology } from "@/components/MesskonzeptTopology";
++import {
++  criticalPath,
++  deriveMesskonzept,
++  type GridConnection,
++  type MesskonzeptInput,
++  type MesskonzeptVariant,
++  type Storage,
++} from "../../../shared/messkonzept";
++import type { QualificationFacts } from "../../../shared/eligibility";
++import type { MieterstromInputs } from "../../../shared/schema";
++
++/**
++ * MesskonzeptPanel
++ *
++ * The step after the economics: how the constellation is actually metered.
++ *
++ * It reads the qualification answers already given above and asks only for what
++ * it additionally needs — the grid-connection situation, storage and commercial
++ * units. From those it derives the metering variant, the meter inventory, the
++ * market roles and the ordered critical path, and draws the topology.
++ *
++ * The engine refuses to guess: without the connection situation the variant is
++ * "not determinable" and the panel says so instead of showing a plausible
++ * diagram that might be the wrong one.
++ */
++
++export type MesskonzeptAnswers = {
++  gridConnection?: GridConnection;
++  storage?: Storage;
++  commercialUnits?: number;
++};
++
++const GRID_OPTIONS: { value: GridConnection; label: string; hint: string }[] = [
++  {
++    value: "single_connection",
++    label: "Ein gemeinsamer Hausanschluss",
++    hint: "Alle Einheiten liegen hinter einem Netzanschlusspunkt.",
++  },
++  {
++    value: "per_unit_connection",
++    label: "Ein Anschluss je Einheit",
++    hint: "Jede Einheit ist einzeln ans Netz angeschlossen.",
++  },
++  {
++    value: "public_grid",
++    label: "Beteiligte im öffentlichen Netz",
++    hint: "Die Teilnehmer liegen an unterschiedlichen Netzanschlusspunkten.",
++  },
++];
++
++const STORAGE_OPTIONS: { value: Storage; label: string }[] = [
++  { value: "none", label: "Kein Speicher" },
++  { value: "planned", label: "Speicher geplant" },
++  { value: "existing", label: "Speicher vorhanden" },
++];
++
++const CONFIDENCE_LABEL: Record<string, string> = {
++  high: "Belastbar auf Basis der Angaben",
++  medium: "Vorläufig — mehrere Angaben offen",
++  insufficient_data: "Nicht bestimmbar",
++};
++
++const VARIANT_TONE: Record<MesskonzeptVariant, string> = {
++  summenzaehler: "border-primary/25 bg-primary/5",
++  einzelzaehler: "border-primary/25 bg-primary/5",
++  viertelstunden_bilanzierung: "border-amber-500/30 bg-amber-500/6",
++  not_determinable: "border-border/70 bg-card",
++};
++
++function Chip({
++  active,
++  onClick,
++  children,
++  hint,
++}: {
++  active: boolean;
++  onClick: () => void;
++  children: React.ReactNode;
++  hint?: string;
++}) {
++  return (
++    <button
++      type="button"
++      onClick={onClick}
++      aria-pressed={active}
++      className={`rounded-2xl border px-4 py-3 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 ${
++        active
++          ? "border-primary/50 bg-primary/8 text-foreground"
++          : "border-border/70 bg-background/60 text-muted-foreground hover:border-border hover:text-foreground"
++      }`}
++    >
++      <span className="block text-sm font-medium leading-6">{children}</span>
++      {hint ? <span className="mt-0.5 block text-xs leading-5 opacity-80">{hint}</span> : null}
++    </button>
++  );
++}
++
++export function MesskonzeptPanel({
++  inputs,
++  facts,
++  answers,
++  onAnswersChange,
++}: {
++  inputs: MieterstromInputs;
++  facts: QualificationFacts;
++  answers: MesskonzeptAnswers;
++  onAnswersChange: (next: MesskonzeptAnswers) => void;
++}) {
++  const constellation: MesskonzeptInput = useMemo(
++    () => ({
++      units: Math.max(1, Math.round(inputs.anzahlWohneinheiten)),
++      kwp: inputs.kwp,
++      gridConnection: answers.gridConnection,
++      buildingScope: facts.buildingScope,
++      ownerConstellation: facts.ownerConstellation,
++      generationStatus: facts.generationStatus,
++      metering: facts.metering,
++      storage: answers.storage,
++      commercialUnits: answers.commercialUnits,
++    }),
++    [inputs.anzahlWohneinheiten, inputs.kwp, answers, facts],
++  );
++
++  const result = useMemo(() => deriveMesskonzept(constellation), [constellation]);
++  const path = useMemo(() => criticalPath(result), [result]);
++
++  const determinable = result.variant !== "not_determinable";
++
++  // Which metering variant visitors land on is the signal that says which
++  // constellation the market actually brings, and where the concept stalls.
++  useEffect(() => {
++    track("messkonzept_derived", {
++      variant: result.variant,
++      confidence: result.confidence,
++      meters: result.meterCount,
++      blocking: path.length,
++    });
++  }, [result.variant, result.confidence, result.meterCount, path.length]);
++
++  return (
++    <div className="space-y-5">
++      {/* ── The one question the variant actually turns on ── */}
++      <div className="rounded-[24px] border border-border/70 bg-card p-5 sm:p-6">
++        <div className="space-y-1">
++          <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-primary">
++            Messkonzept
++          </p>
++          <h3 className="font-display text-xl font-semibold tracking-[-0.02em] text-foreground">
++            Wie wird gemessen — und wie viele Zähler braucht es?
++          </h3>
++          <p className="text-sm leading-7 text-muted-foreground">
++            Die Wirtschaftlichkeit entscheidet, ob sich ein Projekt lohnt. Das
++            Messkonzept entscheidet, ob es gebaut werden kann. Ausschlaggebend ist
++            die Netzanschlusssituation.
++          </p>
++        </div>
++
++        <div className="mt-5 space-y-4">
++          <div className="space-y-2">
++            <p className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-muted-foreground">
++              Netzanschlusssituation
++            </p>
++            <div className="grid gap-2.5 sm:grid-cols-3">
++              {GRID_OPTIONS.map((o) => (
++                <Chip
++                  key={o.value}
++                  active={answers.gridConnection === o.value}
++                  hint={o.hint}
++                  onClick={() =>
++                    onAnswersChange({
++                      ...answers,
++                      gridConnection: answers.gridConnection === o.value ? undefined : o.value,
++                    })
++                  }
++                >
++                  {o.label}
++                </Chip>
++              ))}
++            </div>
++          </div>
++
++          <div className="grid gap-4 sm:grid-cols-2">
++            <label className="block space-y-1.5">
++              <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-muted-foreground">
++                Speicher
++              </span>
++              <select
++                value={answers.storage ?? ""}
++                onChange={(e) =>
++                  onAnswersChange({
++                    ...answers,
++                    storage: (e.target.value || undefined) as Storage | undefined,
++                  })
++                }
++                className="w-full rounded-xl border border-border/70 bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
++              >
++                <option value="">Keine Angabe</option>
++                {STORAGE_OPTIONS.map((o) => (
++                  <option key={o.value} value={o.value}>
++                    {o.label}
++                  </option>
++                ))}
++              </select>
++            </label>
++
++            <label className="block space-y-1.5">
++              <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-muted-foreground">
++                Davon gewerbliche Einheiten
++              </span>
++              <input
++                type="number"
++                min={0}
++                max={Math.round(inputs.anzahlWohneinheiten)}
++                value={answers.commercialUnits ?? ""}
++                placeholder="Keine Angabe"
++                onChange={(e) => {
++                  const raw = e.target.value;
++                  onAnswersChange({
++                    ...answers,
++                    commercialUnits: raw === "" ? undefined : Math.max(0, Number(raw)),
++                  });
++                }}
++                className="w-full rounded-xl border border-border/70 bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
++              />
++            </label>
++          </div>
++        </div>
++      </div>
++
++      {/* ── Variant, topology and inventory ── */}
++      <div className={`rounded-[28px] border p-6 sm:p-8 ${VARIANT_TONE[result.variant]}`}>
++        <div className="space-y-6">
++          <div className="flex items-start gap-4">
++            {determinable ? (
++              <Gauge className="mt-0.5 h-6 w-6 shrink-0 text-primary" />
++            ) : (
++              <CircleHelp className="mt-0.5 h-6 w-6 shrink-0 text-muted-foreground" />
++            )}
++            <div className="min-w-0 flex-1 space-y-2">
++              <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
++                Abgeleitetes Messkonzept · {CONFIDENCE_LABEL[result.confidence]}
++              </p>
++              <h4 className="font-display text-xl font-semibold tracking-[-0.02em] text-foreground">
++                {result.variantLabel}
++              </h4>
++              <p className="text-sm leading-7 text-foreground/90">{result.rationale}</p>
++            </div>
++          </div>
++
++          {determinable ? (
++            <>
++              <MesskonzeptTopology result={result} units={constellation.units} />
++
++              {/* Meter inventory */}
++              <div className="rounded-[20px] border border-border/60 bg-background/70 p-5">
++                <div className="flex items-baseline justify-between gap-4">
++                  <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
++                    Zählerinventar
++                  </p>
++                  <p className="font-display text-lg font-semibold text-foreground">
++                    {result.meterCount} Messeinrichtungen
++                  </p>
++                </div>
++                <div className="mt-4 overflow-x-auto">
++                  <table className="w-full min-w-[34rem] text-left text-sm">
++                    <thead>
++                      <tr className="text-[0.68rem] uppercase tracking-[0.14em] text-muted-foreground">
++                        <th className="pb-2 pr-4 font-medium">Zähler</th>
++                        <th className="pb-2 pr-4 font-medium">Anzahl</th>
++                        <th className="pb-2 pr-4 font-medium">Eigenschaft</th>
++                        <th className="pb-2 font-medium">Zweck</th>
++                      </tr>
++                    </thead>
++                    <tbody className="align-top">
++                      {result.meters.map((m) => (
++                        <tr key={m.code} className="border-t border-border/50">
++                          <td className="py-3 pr-4 font-medium text-foreground">{m.label}</td>
++                          <td className="py-3 pr-4 tabular-nums text-foreground">{m.count}</td>
++                          <td className="py-3 pr-4 text-muted-foreground">
++                            <span className="flex flex-wrap gap-1.5">
++                              {m.bidirectional ? (
++                                <span className="rounded-full border border-border/60 px-2 py-0.5 text-[0.68rem]">
++                                  Zweirichtung
++                                </span>
++                              ) : null}
++                              {m.intervalMetering ? (
++                                <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[0.68rem] text-amber-700">
++                                  15-Minuten-Werte
++                                </span>
++                              ) : null}
++                              {!m.bidirectional && !m.intervalMetering ? (
++                                <span className="text-[0.68rem]">Standard</span>
++                              ) : null}
++                            </span>
++                          </td>
++                          <td className="py-3 leading-6 text-muted-foreground">{m.purpose}</td>
++                        </tr>
++                      ))}
++                    </tbody>
++                  </table>
++                </div>
++              </div>
++
++              {/* Market roles */}
++              <div className="rounded-[20px] border border-border/60 bg-background/70 p-5">
++                <p className="flex items-center gap-2 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
++                  <Users className="h-3.5 w-3.5" />
++                  Marktrollen
++                </p>
++                <ul className="mt-4 grid gap-3 sm:grid-cols-2">
++                  {result.roles.map((r) => (
++                    <li key={r.code} className="rounded-2xl border border-border/50 bg-card/60 p-4">
++                      <p className="font-display text-sm font-semibold text-foreground">{r.label}</p>
++                      <p className="mt-1 text-xs leading-6 text-primary/90">{r.filledBy}</p>
++                      <p className="mt-1.5 text-xs leading-6 text-muted-foreground">
++                        {r.responsibility}
++                      </p>
++                    </li>
++                  ))}
++                </ul>
++              </div>
++            </>
++          ) : null}
++
++          {/* Critical path — blocking first, then the rest */}
++          <div className="rounded-[20px] border border-border/60 bg-background/70 p-5">
++            <p className="flex items-center gap-2 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
++              <Workflow className="h-3.5 w-3.5" />
++              {determinable ? `Kritischer Pfad · ${path.length} blockierende Schritte` : "Nächster Schritt"}
++            </p>
++            <ol className="mt-4 space-y-3">
++              {result.tasks.map((t, i) => (
++                <li key={t.code} className="flex items-start gap-3">
++                  <span
++                    className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[0.7rem] font-semibold tabular-nums ${
++                      t.blocking
++                        ? "bg-primary/12 text-primary"
++                        : "bg-muted text-muted-foreground"
++                    }`}
++                  >
++                    {i + 1}
++                  </span>
++                  <span className="min-w-0 flex-1">
++                    <span className="block text-sm leading-6 text-foreground/90">{t.title}</span>
++                    <span className="mt-0.5 block text-xs text-muted-foreground">
++                      {t.owner}
++                      {t.blocking ? " · blockierend" : " · parallel möglich"}
++                    </span>
++                  </span>
++                </li>
++              ))}
++            </ol>
++          </div>
++
++          {result.warnings.length > 0 ? (
++            <ul className="space-y-2.5">
++              {result.warnings.map((w) => (
++                <li
++                  key={w.code}
++                  className="flex items-start gap-2.5 rounded-2xl border border-amber-500/25 bg-amber-500/6 px-4 py-3"
++                >
++                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
++                  <span className="text-sm leading-6 text-foreground/90">{w.message}</span>
++                </li>
++              ))}
++            </ul>
++          ) : null}
++
++          {result.missingInputs.length > 0 ? (
++            <p className="text-xs leading-6 text-muted-foreground">
++              Noch offen: {result.missingInputs.join(" · ")}
++            </p>
++          ) : null}
++
++          <p className="text-[0.72rem] leading-6 text-muted-foreground">{result.disclaimer}</p>
++        </div>
++      </div>
++    </div>
++  );
++}
++
++export default MesskonzeptPanel;
+diff --git a/client/src/components/MesskonzeptTopology.tsx b/client/src/components/MesskonzeptTopology.tsx
+new file mode 100644
+index 0000000..e15e8f9
+--- /dev/null
++++ b/client/src/components/MesskonzeptTopology.tsx
+@@ -0,0 +1,404 @@
++import { useMemo } from "react";
++import type { MesskonzeptResult } from "../../../shared/messkonzept";
++
++/**
++ * MesskonzeptTopology
++ *
++ * Draws the derived metering concept: where the plant sits, which meter stands
++ * at which point, and how the units connect.
++ *
++ * Rendered from the same result object the panel shows in table form, so the
++ * diagram can never disagree with the inventory beside it. Nothing here decides
++ * anything — it only draws what the engine derived.
++ */
++
++const W = 900;
++const H = 420;
++
++/** Above this, units are drawn as a group with a count rather than one by one. */
++const MAX_DRAWN_UNITS = 8;
++
++type Tone = "grid" | "plant" | "meter" | "unit" | "storage";
++
++const TONE_FILL: Record<Tone, string> = {
++  grid: "var(--muted)",
++  plant: "color-mix(in oklab, var(--primary) 12%, transparent)",
++  meter: "var(--card)",
++  unit: "var(--card)",
++  storage: "color-mix(in oklab, var(--primary) 8%, transparent)",
++};
++
++const TONE_STROKE: Record<Tone, string> = {
++  grid: "var(--border)",
++  plant: "color-mix(in oklab, var(--primary) 45%, transparent)",
++  meter: "color-mix(in oklab, var(--primary) 35%, transparent)",
++  unit: "var(--border)",
++  storage: "color-mix(in oklab, var(--primary) 35%, transparent)",
++};
++
++function Node({
++  x,
++  y,
++  w,
++  h,
++  tone,
++  title,
++  subtitle,
++}: {
++  x: number;
++  y: number;
++  w: number;
++  h: number;
++  tone: Tone;
++  title: string;
++  subtitle?: string;
++}) {
++  return (
++    <g>
++      <rect
++        x={x}
++        y={y}
++        width={w}
++        height={h}
++        rx={14}
++        fill={TONE_FILL[tone]}
++        stroke={TONE_STROKE[tone]}
++        strokeWidth={1.5}
++      />
++      <text
++        x={x + w / 2}
++        y={subtitle ? y + h / 2 - 4 : y + h / 2 + 5}
++        textAnchor="middle"
++        fontSize={15}
++        fontWeight={600}
++        fill="var(--foreground)"
++      >
++        {title}
++      </text>
++      {subtitle ? (
++        <text
++          x={x + w / 2}
++          y={y + h / 2 + 16}
++          textAnchor="middle"
++          fontSize={12}
++          fill="var(--muted-foreground)"
++        >
++          {subtitle}
++        </text>
++      ) : null}
++    </g>
++  );
++}
++
++/** A meter symbol on a line: the circle every schematic uses. */
++function Meter({
++  x,
++  y,
++  label,
++  interval,
++  bidirectional,
++}: {
++  x: number;
++  y: number;
++  label: string;
++  interval?: boolean;
++  bidirectional?: boolean;
++}) {
++  return (
++    <g>
++      <circle
++        cx={x}
++        cy={y}
++        r={15}
++        fill="var(--card)"
++        stroke={interval ? "var(--chart-4, var(--primary))" : "color-mix(in oklab, var(--primary) 55%, transparent)"}
++        strokeWidth={2}
++      />
++      <text
++        x={x}
++        y={y + 4}
++        textAnchor="middle"
++        fontSize={bidirectional ? 13 : 9}
++        fontWeight={700}
++        fill="var(--foreground)"
++      >
++        {bidirectional ? "⇅" : "kWh"}
++      </text>
++      <text x={x} y={y + 32} textAnchor="middle" fontSize={11} fill="var(--muted-foreground)">
++        {label}
++      </text>
++      {interval ? (
++        <text x={x} y={y + 46} textAnchor="middle" fontSize={10} fill="var(--muted-foreground)">
++          15-Min
++        </text>
++      ) : null}
++    </g>
++  );
++}
++
++function Wire({
++  d,
++  dashed,
++  label,
++}: {
++  d: string;
++  dashed?: boolean;
++  label?: { x: number; y: number; text: string };
++}) {
++  return (
++    <g>
++      <path
++        d={d}
++        fill="none"
++        stroke="color-mix(in oklab, var(--foreground) 28%, transparent)"
++        strokeWidth={1.75}
++        strokeDasharray={dashed ? "6 5" : undefined}
++        strokeLinecap="round"
++      />
++      {label ? (
++        <text
++          x={label.x}
++          y={label.y}
++          textAnchor="middle"
++          fontSize={11}
++          fill="var(--muted-foreground)"
++        >
++          {label.text}
++        </text>
++      ) : null}
++    </g>
++  );
++}
++
++function UnitRow({
++  units,
++  y,
++  meterLabel,
++  interval,
++  connectTo,
++}: {
++  units: number;
++  y: number;
++  meterLabel: string;
++  interval: boolean;
++  /** y-coordinate of the bus or bar the units connect up to. */
++  connectTo: number;
++}) {
++  const drawn = Math.min(units, MAX_DRAWN_UNITS);
++  const boxW = 82;
++  const gap = 14;
++  const totalW = drawn * boxW + (drawn - 1) * gap;
++  const startX = (W - totalW) / 2;
++
++  return (
++    <g>
++      {Array.from({ length: drawn }, (_, i) => {
++        const x = startX + i * (boxW + gap);
++        const cx = x + boxW / 2;
++        return (
++          <g key={i}>
++            <Wire d={`M ${cx} ${connectTo} L ${cx} ${y - 26}`} />
++            <circle
++              cx={cx}
++              cy={y - 26}
++              r={9}
++              fill="var(--card)"
++              stroke={
++                interval
++                  ? "var(--chart-4, var(--primary))"
++                  : "color-mix(in oklab, var(--primary) 45%, transparent)"
++              }
++              strokeWidth={1.75}
++            />
++            <Node
++              x={x}
++              y={y}
++              w={boxW}
++              h={46}
++              tone="unit"
++              title={`WE ${i + 1}`}
++            />
++          </g>
++        );
++      })}
++      <text
++        x={W / 2}
++        y={y + 70}
++        textAnchor="middle"
++        fontSize={11}
++        fill="var(--muted-foreground)"
++      >
++        {units > drawn
++          ? `${meterLabel} · ${units} Einheiten insgesamt (${drawn} dargestellt)`
++          : `${meterLabel} · ${units} Einheiten`}
++        {interval ? " · 15-Minuten-Werte" : ""}
++      </text>
++    </g>
++  );
++}
++
++export function MesskonzeptTopology({
++  result,
++  units,
++}: {
++  result: MesskonzeptResult;
++  units: number;
++}) {
++  const hasStorage = useMemo(
++    () => result.meters.some((m) => m.code === "speicherzaehler"),
++    [result.meters],
++  );
++
++  if (result.variant === "not_determinable") return null;
++
++  const gridBar = { x: 60, y: 24, w: W - 120, h: 46 };
++  const plant = { x: 60, y: 190, w: 150, h: 62 };
++  const storage = { x: W - 210, y: 190, w: 150, h: 62 };
++
++  const caption =
++    result.variant === "summenzaehler"
++      ? "Alle Einheiten hinter einem Netzanschlusspunkt. Der Zweirichtungszähler misst Bezug und Einspeisung der Liegenschaft, die Unterzähler den Verbrauch je Einheit."
++      : result.variant === "einzelzaehler"
++        ? "Jede Einheit ist einzeln ans Netz angeschlossen und wird an ihrem eigenen Netzanschlusspunkt gemessen."
++        : "Die Teilnehmer liegen an verschiedenen Netzanschlusspunkten. Die Zuordnung erfolgt rechnerisch aus viertelstündlichen Messwerten.";
++
++  return (
++    <figure className="overflow-hidden rounded-[20px] border border-border/60 bg-background/70">
++      <div className="overflow-x-auto">
++        <svg
++          viewBox={`0 0 ${W} ${H}`}
++          role="img"
++          aria-label={`Schema: ${result.variantLabel}`}
++          className="h-auto w-full min-w-[38rem]"
++        >
++          {/* Public grid */}
++          <Node
++            x={gridBar.x}
++            y={gridBar.y}
++            w={gridBar.w}
++            h={gridBar.h}
++            tone="grid"
++            title="Öffentliches Netz"
++          />
++
++          {/* PV plant, always with its own generation meter */}
++          <Node x={plant.x} y={plant.y} w={plant.w} h={plant.h} tone="plant" title="PV-Anlage" />
++
++          {hasStorage ? (
++            <Node
++              x={storage.x}
++              y={storage.y}
++              w={storage.w}
++              h={storage.h}
++              tone="storage"
++              title="Speicher"
++            />
++          ) : null}
++
++          {result.variant === "summenzaehler" ? (
++            <>
++              {/* Grid → summation meter → house bus */}
++              <Wire d={`M ${W / 2} ${gridBar.y + gridBar.h} L ${W / 2} ${112}`} />
++              <Meter x={W / 2} y={127} label="Zweirichtungszähler" bidirectional />
++              <Wire d={`M ${W / 2} ${142} L ${W / 2} ${221}`} />
++
++              {/* House bus */}
++              <Wire d={`M ${plant.x + plant.w + 60} 221 L ${W - plant.x - plant.w - 60} 221`} />
++              <text
++                x={W / 2 + 175}
++                y={212}
++                textAnchor="middle"
++                fontSize={11}
++                fill="var(--muted-foreground)"
++              >
++                Kundenanlage
++              </text>
++
++              {/* Plant → generation meter → bus */}
++              <Wire d={`M ${plant.x + plant.w} 221 L ${plant.x + plant.w + 45} 221`} />
++              <Meter x={plant.x + plant.w + 45} y={221} label="Erzeugung" />
++
++              {hasStorage ? (
++                <>
++                  <Wire d={`M ${storage.x - 45} 221 L ${storage.x} 221`} />
++                  <Meter x={storage.x - 45} y={221} label="Ein-/Ausspeicherung" bidirectional />
++                </>
++              ) : null}
++
++              <UnitRow units={units} y={300} meterLabel="Unterzähler" interval={false} connectTo={221} />
++            </>
++          ) : null}
++
++          {result.variant === "einzelzaehler" ? (
++            <>
++              {/* Plant feeds the grid through its own meter */}
++              <Wire d={`M ${plant.x + plant.w / 2} ${plant.y} L ${plant.x + plant.w / 2} ${146}`} />
++              <Meter x={plant.x + plant.w / 2} y={131} label="Erzeugung" />
++              <Wire
++                d={`M ${plant.x + plant.w / 2} ${116} L ${plant.x + plant.w / 2} ${gridBar.y + gridBar.h}`}
++              />
++
++              {hasStorage ? (
++                <>
++                  <Wire d={`M ${storage.x + storage.w / 2} ${storage.y} L ${storage.x + storage.w / 2} ${146}`} />
++                  <Meter x={storage.x + storage.w / 2} y={131} label="Speicher" bidirectional />
++                  <Wire
++                    d={`M ${storage.x + storage.w / 2} ${116} L ${storage.x + storage.w / 2} ${gridBar.y + gridBar.h}`}
++                  />
++                </>
++              ) : null}
++
++              <UnitRow
++                units={units}
++                y={300}
++                meterLabel="Entnahmezähler je Einheit"
++                interval={false}
++                connectTo={gridBar.y + gridBar.h}
++              />
++            </>
++          ) : null}
++
++          {result.variant === "viertelstunden_bilanzierung" ? (
++            <>
++              <Wire d={`M ${plant.x + plant.w / 2} ${plant.y} L ${plant.x + plant.w / 2} ${146}`} />
++              <Meter x={plant.x + plant.w / 2} y={131} label="Erzeugung" interval />
++              <Wire
++                d={`M ${plant.x + plant.w / 2} ${116} L ${plant.x + plant.w / 2} ${gridBar.y + gridBar.h}`}
++              />
++
++              {hasStorage ? (
++                <>
++                  <Wire d={`M ${storage.x + storage.w / 2} ${storage.y} L ${storage.x + storage.w / 2} ${146}`} />
++                  <Meter x={storage.x + storage.w / 2} y={131} label="Speicher" bidirectional interval />
++                  <Wire
++                    d={`M ${storage.x + storage.w / 2} ${116} L ${storage.x + storage.w / 2} ${gridBar.y + gridBar.h}`}
++                  />
++                </>
++              ) : null}
++
++              {/* The allocation itself is a calculation, not a wire. */}
++              <Wire
++                d={`M ${plant.x + plant.w / 2} ${plant.y + plant.h / 2} C ${W / 2} ${plant.y + 120}, ${W / 2} ${plant.y + 120}, ${W / 2} ${252}`}
++                dashed
++                label={{ x: W / 2 + 130, y: plant.y + 96, text: "rechnerische Zuordnung je Viertelstunde" }}
++              />
++
++              <UnitRow
++                units={units}
++                y={300}
++                meterLabel="Teilnehmer mit Zählerstandsgangmessung"
++                interval
++                connectTo={gridBar.y + gridBar.h}
++              />
++            </>
++          ) : null}
++        </svg>
++      </div>
++      <figcaption className="border-t border-border/50 px-5 py-3 text-xs leading-6 text-muted-foreground">
++        {caption}
++      </figcaption>
++    </figure>
++  );
++}
++
++export default MesskonzeptTopology;
+diff --git a/client/src/lib/allocation.test.ts b/client/src/lib/allocation.test.ts
+new file mode 100644
+index 0000000..547b21d
+--- /dev/null
++++ b/client/src/lib/allocation.test.ts
+@@ -0,0 +1,424 @@
++import { describe, it, expect } from "vitest";
++import {
++  ALLOCATION_DISCLAIMER_DE,
++  AllocationError,
++  AllocationInputSchema,
++  ILLUSTRATIVE_PROFILE_DISCLAIMER_DE,
++  INTERVALS_PER_DAY,
++  INTERVAL_MINUTES,
++  allocate,
++  compareKeys,
++  illustrativeDayProfile,
++  illustrativeShares,
++  type AllocationInput,
++  type AllocationKey,
++} from "../../../shared/allocation";
++
++const KEYS: AllocationKey[] = ["static", "dynamic", "cascading"];
++
++/** Two participants, four intervals, deliberately mismatched profiles. */
++function twoParty(key: AllocationKey): AllocationInput {
++  return {
++    key,
++    generationKwh: [0, 4, 10, 2],
++    participants: [
++      { id: "a", share: 0.5, consumptionKwh: [1, 1, 1, 1] },
++      { id: "b", share: 0.5, consumptionKwh: [1, 5, 5, 1] },
++    ],
++  };
++}
++
++describe("energy conservation", () => {
++  it.each(KEYS)("closes the balance exactly for the %s key", (key) => {
++    const r = allocate(twoParty(key));
++    expect(r.totals.allocatedKwh + r.totals.feedInKwh).toBeCloseTo(r.totals.generationKwh, 12);
++  });
++
++  it.each(KEYS)("closes the balance in every interval for the %s key", (key) => {
++    const r = allocate(twoParty(key), { includeSeries: true });
++    for (let t = 0; t < r.totals.intervals; t++) {
++      const allocated = r.participants.reduce((s, p) => s + p.series![t], 0);
++      expect(allocated + r.feedInSeries![t]).toBeCloseTo(r.generationSeries![t], 12);
++    }
++  });
++
++  it.each(KEYS)("never allocates more than a participant consumed (%s)", (key) => {
++    const r = allocate(twoParty(key), { includeSeries: true });
++    for (const p of r.participants) {
++      expect(p.allocatedKwh).toBeLessThanOrEqual(p.consumptionKwh + 1e-12);
++      expect(p.gridDrawKwh).toBeGreaterThanOrEqual(-1e-12);
++    }
++  });
++
++  it.each(KEYS)("never allocates more than was generated (%s)", (key) => {
++    const r = allocate(twoParty(key));
++    expect(r.totals.allocatedKwh).toBeLessThanOrEqual(r.totals.generationKwh + 1e-12);
++    expect(r.totals.feedInKwh).toBeGreaterThanOrEqual(-1e-12);
++  });
++
++  it("holds the balance across a full year of intervals", () => {
++    const n = 4 * 24 * 365;
++    const generationKwh = Array.from({ length: n }, (_, t) => (t % 96 > 24 && t % 96 < 72 ? 0.9 : 0));
++    const r = allocate({
++      key: "cascading",
++      generationKwh,
++      participants: [
++        { id: "a", share: 0.4, consumptionKwh: Array.from({ length: n }, () => 0.3) },
++        { id: "b", share: 0.6, consumptionKwh: Array.from({ length: n }, (_, t) => (t % 3 === 0 ? 1.2 : 0.1)) },
++      ],
++    });
++    expect(r.totals.allocatedKwh + r.totals.feedInKwh).toBeCloseTo(r.totals.generationKwh, 6);
++  });
++});
++
++describe("static key", () => {
++  it("caps each participant at their agreed share of the interval", () => {
++    // Interval 2: 10 kWh generated, a is capped by its 1 kWh demand, b by its
++    // 50 % share of 10 kWh = 5 kWh, which exactly meets its 5 kWh demand.
++    const r = allocate(twoParty("static"), { includeSeries: true });
++    expect(r.participants[0].series![2]).toBeCloseTo(1, 12);
++    expect(r.participants[1].series![2]).toBeCloseTo(5, 12);
++    expect(r.feedInSeries![2]).toBeCloseTo(4, 12);
++  });
++
++  it("leaves energy unplaced when one participant's share exceeds their demand", () => {
++    const r = allocate(twoParty("static"));
++    expect(r.totals.feedInKwh).toBeGreaterThan(0);
++  });
++
++  it("reports the agreed share back on each participant", () => {
++    const r = allocate(twoParty("static"));
++    expect(r.participants.map((p) => p.share)).toEqual([0.5, 0.5]);
++  });
++});
++
++describe("dynamic key", () => {
++  it("gives every participant the same coverage ratio while generation is scarce", () => {
++    const r = allocate({
++      key: "dynamic",
++      generationKwh: [3],
++      participants: [
++        { id: "a", consumptionKwh: [2] },
++        { id: "b", consumptionKwh: [4] },
++      ],
++    });
++    expect(r.participants[0].coverageRate).toBeCloseTo(0.5, 12);
++    expect(r.participants[1].coverageRate).toBeCloseTo(0.5, 12);
++  });
++
++  it("covers everyone fully once generation exceeds total demand", () => {
++    const r = allocate({
++      key: "dynamic",
++      generationKwh: [10],
++      participants: [
++        { id: "a", consumptionKwh: [2] },
++        { id: "b", consumptionKwh: [4] },
++      ],
++    });
++    expect(r.totals.allocatedKwh).toBeCloseTo(6, 12);
++    expect(r.totals.feedInKwh).toBeCloseTo(4, 12);
++  });
++
++  it("does not report a share, because it does not use one", () => {
++    const r = allocate(twoParty("dynamic"));
++    expect(r.participants.every((p) => p.share === null)).toBe(true);
++  });
++
++  it("allocates nothing when nobody is consuming", () => {
++    const r = allocate({
++      key: "dynamic",
++      generationKwh: [5],
++      participants: [{ id: "a", consumptionKwh: [0] }],
++    });
++    expect(r.totals.allocatedKwh).toBe(0);
++    expect(r.totals.feedInKwh).toBeCloseTo(5, 12);
++    expect(r.participants[0].coverageRate).toBeNull();
++  });
++});
++
++describe("cascading key", () => {
++  it("redistributes the unused remainder to unmet demand", () => {
++    // Same interval as the static case: the 4 kWh a cannot use goes to b, which
++    // still has 5 kWh of demand and only received 5 of it.
++    const r = allocate(twoParty("cascading"), { includeSeries: true });
++    expect(r.participants[0].series![2]).toBeCloseTo(1, 12);
++    expect(r.participants[1].series![2]).toBeCloseTo(5, 12);
++    expect(r.feedInSeries![2]).toBeCloseTo(4, 12);
++  });
++
++  it("places strictly more than the static key when shares are mismatched", () => {
++    const input = {
++      generationKwh: [10],
++      participants: [
++        { id: "a", share: 0.8, consumptionKwh: [1] },
++        { id: "b", share: 0.2, consumptionKwh: [9] },
++      ],
++    };
++    const stat = allocate({ ...input, key: "static" });
++    const casc = allocate({ ...input, key: "cascading" });
++    expect(stat.totals.allocatedKwh).toBeCloseTo(3, 12); // 1 + 2
++    expect(casc.totals.allocatedKwh).toBeCloseTo(10, 12); // 1 + 9
++    expect(casc.totals.allocatedKwh).toBeGreaterThan(stat.totals.allocatedKwh);
++  });
++
++  it("never places more than the total demand", () => {
++    const r = allocate({
++      key: "cascading",
++      generationKwh: [100],
++      participants: [
++        { id: "a", share: 0.5, consumptionKwh: [1] },
++        { id: "b", share: 0.5, consumptionKwh: [2] },
++      ],
++    });
++    expect(r.totals.allocatedKwh).toBeCloseTo(3, 12);
++    expect(r.totals.feedInKwh).toBeCloseTo(97, 12);
++  });
++
++  it("terminates with many participants and a single dominant share", () => {
++    const n = 50;
++    const demand = 0.1 + 3 * (n - 1);
++    const participants = Array.from({ length: n }, (_, i) => ({
++      id: `p${i}`,
++      share: i === 0 ? 0.51 : 0.49 / (n - 1),
++      consumptionKwh: [i === 0 ? 0.1 : 3],
++    }));
++
++    // Enough generation: every participant ends fully covered despite one
++    // holding a majority share they cannot use.
++    const ample = allocate({ key: "cascading", generationKwh: [demand * 2], participants });
++    expect(ample.totals.allocatedKwh).toBeCloseTo(demand, 9);
++
++    // Scarce generation: everything generated is placed, nothing more.
++    const scarce = allocate({ key: "cascading", generationKwh: [100], participants });
++    expect(scarce.totals.allocatedKwh).toBeCloseTo(100, 9);
++    expect(scarce.totals.feedInKwh).toBeCloseTo(0, 9);
++  });
++});
++
++describe("key comparison", () => {
++  it("runs every key against one dataset", () => {
++    const r = compareKeys({
++      generationKwh: [10],
++      participants: [
++        { id: "a", share: 0.8, consumptionKwh: [1] },
++        { id: "b", share: 0.2, consumptionKwh: [9] },
++      ],
++    });
++    expect(Object.keys(r).sort()).toEqual(["cascading", "dynamic", "static"]);
++    expect(r.cascading.totals.selfConsumptionRate).toBeGreaterThan(
++      r.static.totals.selfConsumptionRate,
++    );
++  });
++
++  it("keeps every key's balance closed", () => {
++    const r = compareKeys({
++      generationKwh: [0, 4, 10, 2],
++      participants: [
++        { id: "a", share: 0.5, consumptionKwh: [1, 1, 1, 1] },
++        { id: "b", share: 0.5, consumptionKwh: [1, 5, 5, 1] },
++      ],
++    });
++    for (const key of KEYS) {
++      expect(r[key].totals.allocatedKwh + r[key].totals.feedInKwh).toBeCloseTo(16, 12);
++    }
++  });
++});
++
++describe("rates", () => {
++  it("computes self-consumption against generation and autarky against demand", () => {
++    const r = allocate({
++      key: "dynamic",
++      generationKwh: [10],
++      participants: [{ id: "a", consumptionKwh: [4] }],
++    });
++    expect(r.totals.selfConsumptionRate).toBeCloseTo(0.4, 12);
++    expect(r.totals.autarkyRate).toBeCloseTo(1, 12);
++  });
++
++  it("reports zero rather than dividing by zero when nothing was generated", () => {
++    const r = allocate({
++      key: "dynamic",
++      generationKwh: [0, 0],
++      participants: [{ id: "a", consumptionKwh: [1, 1] }],
++    });
++    expect(r.totals.selfConsumptionRate).toBe(0);
++    expect(r.warnings.map((w) => w.code)).toContain("no_generation");
++  });
++});
++
++describe("validation", () => {
++  it("rejects a consumption series of the wrong length", () => {
++    expect(() =>
++      allocate({
++        key: "dynamic",
++        generationKwh: [1, 2, 3],
++        participants: [{ id: "a", consumptionKwh: [1, 2] }],
++      }),
++    ).toThrow(AllocationError);
++  });
++
++  it("rejects duplicate participant ids", () => {
++    expect(() =>
++      allocate({
++        key: "dynamic",
++        generationKwh: [1],
++        participants: [
++          { id: "a", consumptionKwh: [1] },
++          { id: "a", consumptionKwh: [1] },
++        ],
++      }),
++    ).toThrow(/mehrfach/);
++  });
++
++  it("rejects shares summing above one", () => {
++    expect(() =>
++      allocate({
++        key: "static",
++        generationKwh: [1],
++        participants: [
++          { id: "a", share: 0.7, consumptionKwh: [1] },
++          { id: "b", share: 0.7, consumptionKwh: [1] },
++        ],
++      }),
++    ).toThrow(/100 %/);
++  });
++
++  it("rejects shares given for only some participants", () => {
++    expect(() =>
++      allocate({
++        key: "static",
++        generationKwh: [1],
++        participants: [
++          { id: "a", share: 0.5, consumptionKwh: [1] },
++          { id: "b", consumptionKwh: [1] },
++        ],
++      }),
++    ).toThrow(/alle Teilnehmer oder für keinen/);
++  });
++
++  it("splits equally when no shares are given, and says so", () => {
++    const r = allocate({
++      key: "static",
++      generationKwh: [4],
++      participants: [
++        { id: "a", consumptionKwh: [4] },
++        { id: "b", consumptionKwh: [4] },
++      ],
++    });
++    expect(r.participants.map((p) => p.share)).toEqual([0.5, 0.5]);
++    expect(r.warnings.map((w) => w.code)).toContain("shares_defaulted_equal");
++  });
++
++  it("permits shares below one and reports the shortfall", () => {
++    const r = allocate({
++      key: "static",
++      generationKwh: [10],
++      participants: [
++        { id: "a", share: 0.3, consumptionKwh: [10] },
++        { id: "b", share: 0.3, consumptionKwh: [10] },
++      ],
++    });
++    expect(r.totals.allocatedKwh).toBeCloseTo(6, 12);
++    expect(r.warnings.map((w) => w.code)).toContain("shares_below_one");
++  });
++
++  it("rejects negative values and empty series at the schema boundary", () => {
++    expect(() =>
++      AllocationInputSchema.parse({
++        key: "dynamic",
++        generationKwh: [-1],
++        participants: [{ id: "a", consumptionKwh: [1] }],
++      }),
++    ).toThrow();
++    expect(() =>
++      AllocationInputSchema.parse({ key: "dynamic", generationKwh: [], participants: [] }),
++    ).toThrow();
++  });
++
++  it("carries the disclaimer on every result", () => {
++    for (const key of KEYS) {
++      expect(allocate(twoParty(key)).disclaimer).toBe(ALLOCATION_DISCLAIMER_DE);
++    }
++  });
++});
++
++describe("illustrative profile", () => {
++  it("produces a full day at the settlement resolution", () => {
++    const p = illustrativeDayProfile({ kwp: 30, dailyConsumptionKwh: 8, participants: 6 });
++    expect(p.generationKwh).toHaveLength(INTERVALS_PER_DAY);
++    expect(INTERVALS_PER_DAY * INTERVAL_MINUTES).toBe(24 * 60);
++    expect(p.consumptionKwh).toHaveLength(6);
++    expect(p.consumptionKwh.every((c) => c.length === INTERVALS_PER_DAY)).toBe(true);
++  });
++
++  it("scales generation to the plant size and peak-sun hours", () => {
++    const p = illustrativeDayProfile({
++      kwp: 30,
++      dailyConsumptionKwh: 8,
++      participants: 2,
++      peakSunHours: 4,
++    });
++    expect(p.generationKwh.reduce((s, v) => s + v, 0)).toBeCloseTo(120, 6);
++  });
++
++  it("generates nothing at night", () => {
++    const p = illustrativeDayProfile({ kwp: 30, dailyConsumptionKwh: 8, participants: 2 });
++    expect(p.generationKwh[0]).toBe(0);
++    expect(p.generationKwh[INTERVALS_PER_DAY - 1]).toBe(0);
++  });
++
++  it("gives participants distinguishable profiles, so the keys differ", () => {
++    const p = illustrativeDayProfile({ kwp: 30, dailyConsumptionKwh: 8, participants: 4 });
++    expect(p.consumptionKwh[0]).not.toEqual(p.consumptionKwh[1]);
++
++    const compared = compareKeys({
++      generationKwh: p.generationKwh,
++      participants: p.consumptionKwh.map((c, i) => ({ id: `p${i}`, share: 0.25, consumptionKwh: c })),
++    });
++    expect(compared.cascading.totals.allocatedKwh).toBeGreaterThan(
++      compared.static.totals.allocatedKwh,
++    );
++  });
++
++  it("is deterministic", () => {
++    const args = { kwp: 30, dailyConsumptionKwh: 8, participants: 4 };
++    expect(illustrativeDayProfile(args)).toEqual(illustrativeDayProfile(args));
++  });
++
++  it("produces shares that sum to one", () => {
++    for (const n of [2, 3, 7, 12, 40]) {
++      const shares = illustrativeShares(n);
++      expect(shares).toHaveLength(n);
++      expect(shares.reduce((s, v) => s + v, 0)).toBeCloseTo(1, 12);
++      expect(shares.every((v) => v > 0)).toBe(true);
++    }
++  });
++
++  // Shares that happen to track demand make every key produce the same answer,
++  // which would misrepresent the choice as immaterial.
++  it("produces shares that do not track the demand ordering", () => {
++    const n = 12;
++    const shares = illustrativeShares(n);
++    const p = illustrativeDayProfile({ kwp: 30, dailyConsumptionKwh: 8, participants: n });
++    const demand = p.consumptionKwh.map((c) => c.reduce((s, v) => s + v, 0));
++    const rank = (a: number[]) =>
++      a.map((_, i) => i).sort((x, y) => a[x] - a[y]).join(",");
++    expect(rank(shares)).not.toBe(rank(demand));
++  });
++
++  it("makes the static key measurably worse than the others on that data", () => {
++    const n = 12;
++    const shares = illustrativeShares(n);
++    const p = illustrativeDayProfile({ kwp: 30, dailyConsumptionKwh: 8, participants: n });
++    const r = compareKeys({
++      generationKwh: p.generationKwh,
++      participants: p.consumptionKwh.map((c, i) => ({ id: `p${i}`, share: shares[i], consumptionKwh: c })),
++    });
++    expect(r.cascading.totals.allocatedKwh).toBeGreaterThan(r.static.totals.allocatedKwh);
++    expect(r.dynamic.totals.allocatedKwh).toBeGreaterThan(r.static.totals.allocatedKwh);
++  });
++
++  it("states that it is not measurement", () => {
++    expect(ILLUSTRATIVE_PROFILE_DISCLAIMER_DE).toMatch(/nicht um Messwerte/);
++  });
++});
+diff --git a/client/src/lib/analytics.test.ts b/client/src/lib/analytics.test.ts
+index ed05e12..4f6d8ac 100644
+--- a/client/src/lib/analytics.test.ts
++++ b/client/src/lib/analytics.test.ts
+@@ -73,6 +73,8 @@ describe("event vocabulary", () => {
+       "checkout_started",
+       "checkout_succeeded",
+       "checkout_canceled",
++      "messkonzept_derived",
++      "allocation_compared",
+     ];
+     expect([...ANALYTICS_EVENTS]).toEqual(expected);
+   });
+diff --git a/client/src/lib/analytics.ts b/client/src/lib/analytics.ts
+index 9513b10..72917c3 100644
+--- a/client/src/lib/analytics.ts
++++ b/client/src/lib/analytics.ts
+@@ -35,6 +35,10 @@ export const ANALYTICS_EVENTS = [
+   "checkout_succeeded",
+   /** Returned from Stripe having abandoned. */
+   "checkout_canceled",
++  /** The metering-concept engine produced a variant the visitor can see. */
++  "messkonzept_derived",
++  /** The allocation keys were compared on the visitor's constellation. */
++  "allocation_compared",
+ ] as const;
+ 
+ export type AnalyticsEvent = (typeof ANALYTICS_EVENTS)[number];
+diff --git a/client/src/lib/api-v1.test.ts b/client/src/lib/api-v1.test.ts
+index df58ed8..cc8d6c6 100644
+--- a/client/src/lib/api-v1.test.ts
++++ b/client/src/lib/api-v1.test.ts
+@@ -8,6 +8,10 @@ import {
+   EligibilityResponseSchema,
+   MetaResponseSchema,
+   ApiV1ErrorSchema,
++  AllocationRequestSchema,
++  AllocationResponseSchema,
++  MesskonzeptRequestSchema,
++  MesskonzeptResponseSchema,
+ } from "../../../shared/api-contract";
+ import {
+   extractApiKey,
+@@ -143,3 +147,87 @@ describe("api key authentication", () => {
+     expect(hashApiKey(KEY)).not.toBe(hashApiKey(KEY + "x"));
+   });
+ });
++
++describe("messkonzept contract", () => {
++  it("requires the constellation, not just a plant size", () => {
++    expect(MesskonzeptRequestSchema.safeParse({}).success).toBe(false);
++    expect(
++      MesskonzeptRequestSchema.safeParse({ constellation: { units: 20, kwp: 60 } }).success,
++    ).toBe(true);
++  });
++
++  it("rejects an unknown grid-connection value rather than falling back", () => {
++    expect(
++      MesskonzeptRequestSchema.safeParse({
++        constellation: { units: 20, kwp: 60, gridConnection: "irgendwas" },
++      }).success,
++    ).toBe(false);
++  });
++
++  it("carries the model stamp, the critical path and the disclaimer", () => {
++    expect(MesskonzeptResponseSchema.shape.model).toBeDefined();
++    expect(MesskonzeptResponseSchema.shape.criticalPath).toBeDefined();
++    expect(MesskonzeptResponseSchema.shape.disclaimer).toBeDefined();
++  });
++
++  it("keeps a not-determinable verdict expressible in the response", () => {
++    expect(
++      MesskonzeptResponseSchema.shape.variant.safeParse("not_determinable").success,
++    ).toBe(true);
++  });
++});
++
++describe("allocation contract", () => {
++  const base = {
++    generationKwh: [1, 2, 3],
++    participants: [{ id: "a", consumptionKwh: [1, 1, 1] }],
++  };
++
++  it("treats the key as optional, so a comparison is the default", () => {
++    const r = AllocationRequestSchema.safeParse(base);
++    expect(r.success).toBe(true);
++    if (r.success) {
++      expect(r.data.key).toBeUndefined();
++      expect(r.data.includeSeries).toBe(false);
++    }
++  });
++
++  it("accepts a single named key", () => {
++    expect(AllocationRequestSchema.safeParse({ ...base, key: "cascading" }).success).toBe(true);
++  });
++
++  it("rejects an unknown key", () => {
++    expect(AllocationRequestSchema.safeParse({ ...base, key: "irgendwie" }).success).toBe(false);
++  });
++
++  it("rejects negative energy and empty series at the boundary", () => {
++    expect(
++      AllocationRequestSchema.safeParse({ ...base, generationKwh: [-1, 0, 0] }).success,
++    ).toBe(false);
++    expect(AllocationRequestSchema.safeParse({ ...base, generationKwh: [] }).success).toBe(false);
++    expect(AllocationRequestSchema.safeParse({ ...base, participants: [] }).success).toBe(false);
++  });
++
++  it("bounds the request so one call cannot become an unbounded computation", () => {
++    expect(
++      AllocationRequestSchema.safeParse({
++        ...base,
++        generationKwh: new Array(40_000).fill(0),
++      }).success,
++    ).toBe(false);
++    expect(
++      AllocationRequestSchema.safeParse({
++        ...base,
++        participants: Array.from({ length: 600 }, (_, i) => ({
++          id: `p${i}`,
++          consumptionKwh: [1, 1, 1],
++        })),
++      }).success,
++    ).toBe(false);
++  });
++
++  it("returns a run per key, and a recommendation only for a comparison", () => {
++    expect(AllocationResponseSchema.shape.runs).toBeDefined();
++    expect(AllocationResponseSchema.shape.recommendation.safeParse(null).success).toBe(true);
++  });
++});
+diff --git a/client/src/lib/messkonzept.test.ts b/client/src/lib/messkonzept.test.ts
+new file mode 100644
+index 0000000..a7f46f8
+--- /dev/null
++++ b/client/src/lib/messkonzept.test.ts
+@@ -0,0 +1,258 @@
++import { describe, it, expect } from "vitest";
++import {
++  MESSKONZEPT_DISCLAIMER_DE,
++  MesskonzeptInputSchema,
++  VARIANT_LABEL_DE,
++  criticalPath,
++  deriveMesskonzept,
++  type MesskonzeptInput,
++} from "../../../shared/messkonzept";
++
++function build(over: Partial<MesskonzeptInput> = {}): MesskonzeptInput {
++  return MesskonzeptInputSchema.parse({ units: 24, kwp: 60, ...over });
++}
++
++describe("variant selection", () => {
++  it("chooses the summation model behind one house connection", () => {
++    const r = deriveMesskonzept(build({ gridConnection: "single_connection" }));
++    expect(r.variant).toBe("summenzaehler");
++    expect(r.variantLabel).toBe(VARIANT_LABEL_DE.summenzaehler);
++  });
++
++  it("chooses individual metering when every unit has its own connection", () => {
++    expect(deriveMesskonzept(build({ gridConnection: "per_unit_connection" })).variant).toBe(
++      "einzelzaehler",
++    );
++  });
++
++  it("chooses interval balancing for participants on the public grid", () => {
++    expect(deriveMesskonzept(build({ gridConnection: "public_grid" })).variant).toBe(
++      "viertelstunden_bilanzierung",
++    );
++  });
++
++  // The one unambiguous inference: participants at different connection points
++  // cannot sit behind a single Hausanschluss.
++  it("infers the public grid from a scope spanning several sites", () => {
++    const r = deriveMesskonzept(build({ buildingScope: "across_grid" }));
++    expect(r.variant).toBe("viertelstunden_bilanzierung");
++  });
++
++  it("refuses to guess when the connection situation is unknown", () => {
++    const r = deriveMesskonzept(build());
++    expect(r.variant).toBe("not_determinable");
++    expect(r.confidence).toBe("insufficient_data");
++    expect(r.meters).toHaveLength(0);
++    expect(r.roles).toHaveLength(0);
++  });
++
++  it("does not infer a connection situation from a single building alone", () => {
++    // A single building can still have one connection per unit.
++    expect(deriveMesskonzept(build({ buildingScope: "single_building" })).variant).toBe(
++      "not_determinable",
++    );
++  });
++
++  it("names clarifying the connection as the only task when nothing is determinable", () => {
++    const r = deriveMesskonzept(build());
++    expect(r.tasks).toHaveLength(1);
++    expect(r.tasks[0].code).toBe("clarify_grid_connection");
++    expect(r.tasks[0].blocking).toBe(true);
++  });
++});
++
++describe("meter inventory", () => {
++  it("always meters generation separately", () => {
++    for (const gridConnection of ["single_connection", "per_unit_connection", "public_grid"] as const) {
++      const r = deriveMesskonzept(build({ gridConnection }));
++      expect(r.meters.map((m) => m.code)).toContain("erzeugungszaehler");
++    }
++  });
++
++  it("counts one summation meter plus one submeter per unit", () => {
++    const r = deriveMesskonzept(build({ units: 24, gridConnection: "single_connection" }));
++    const byCode = Object.fromEntries(r.meters.map((m) => [m.code, m]));
++    expect(byCode.summenzaehler.count).toBe(1);
++    expect(byCode.summenzaehler.bidirectional).toBe(true);
++    expect(byCode.unterzaehler.count).toBe(24);
++    expect(r.meterCount).toBe(1 + 1 + 24);
++  });
++
++  it("counts one meter per unit for individual metering", () => {
++    const r = deriveMesskonzept(build({ units: 12, gridConnection: "per_unit_connection" }));
++    expect(r.meterCount).toBe(1 + 12);
++  });
++
++  it("flags interval metering only where the model requires it", () => {
++    const summen = deriveMesskonzept(build({ gridConnection: "single_connection" }));
++    expect(summen.meters.some((m) => m.intervalMetering)).toBe(false);
++
++    const grid = deriveMesskonzept(build({ gridConnection: "public_grid" }));
++    expect(grid.meters.filter((m) => m.intervalMetering).length).toBeGreaterThan(0);
++  });
++
++  it("adds a storage meter when storage is present or planned", () => {
++    for (const storage of ["planned", "existing"] as const) {
++      const r = deriveMesskonzept(build({ gridConnection: "single_connection", storage }));
++      expect(r.meters.map((m) => m.code)).toContain("speicherzaehler");
++    }
++    const none = deriveMesskonzept(build({ gridConnection: "single_connection", storage: "none" }));
++    expect(none.meters.map((m) => m.code)).not.toContain("speicherzaehler");
++  });
++
++  it("derives the meter count from the inventory rather than restating it", () => {
++    const r = deriveMesskonzept(build({ units: 7, gridConnection: "single_connection", storage: "existing" }));
++    expect(r.meterCount).toBe(r.meters.reduce((s, m) => s + m.count, 0));
++  });
++});
++
++describe("market roles", () => {
++  it("names the four roles every constellation has to fill", () => {
++    const codes = deriveMesskonzept(build({ gridConnection: "single_connection" })).roles.map((r) => r.code);
++    expect(codes).toEqual(expect.arrayContaining(["anlagenbetreiber", "lieferant", "msb", "vnb"]));
++  });
++
++  it("adds balancing and marketing roles once the public grid is involved", () => {
++    const codes = deriveMesskonzept(build({ gridConnection: "public_grid" })).roles.map((r) => r.code);
++    expect(codes).toContain("bkv");
++    expect(codes).toContain("direktvermarkter");
++  });
++
++  it("does not add a balancing role behind a single connection", () => {
++    const codes = deriveMesskonzept(build({ gridConnection: "single_connection" })).roles.map((r) => r.code);
++    expect(codes).not.toContain("bkv");
++  });
++
++  it("routes the operator role through the owners' association for a WEG", () => {
++    const r = deriveMesskonzept(build({ gridConnection: "single_connection", ownerConstellation: "weg" }));
++    expect(r.roles.find((x) => x.code === "anlagenbetreiber")!.filledBy).toMatch(/Eigentümergemeinschaft/);
++  });
++});
++
++describe("tasks and critical path", () => {
++  it("puts the owners' resolution first for a WEG", () => {
++    const r = deriveMesskonzept(build({ gridConnection: "single_connection", ownerConstellation: "weg" }));
++    expect(r.tasks[0].code).toBe("weg_beschluss");
++  });
++
++  it("omits the owners' resolution for a single owner", () => {
++    const r = deriveMesskonzept(build({ gridConnection: "single_connection", ownerConstellation: "single_owner" }));
++    expect(r.tasks.map((t) => t.code)).not.toContain("weg_beschluss");
++  });
++
++  it("returns only blocking tasks on the critical path, in order", () => {
++    const r = deriveMesskonzept(build({ gridConnection: "single_connection", ownerConstellation: "weg" }));
++    const path = criticalPath(r);
++    expect(path.every((t) => t.blocking)).toBe(true);
++    expect(path.map((t) => t.code)).toEqual(
++      r.tasks.filter((t) => t.blocking).map((t) => t.code),
++    );
++    expect(path.map((t) => t.code)).not.toContain("abrechnung");
++  });
++
++  it("states the two-contract requirement only for the public-grid model", () => {
++    const grid = deriveMesskonzept(build({ gridConnection: "public_grid" }));
++    expect(grid.tasks.find((t) => t.code === "contracts")!.title).toMatch(/zwei Verträge/);
++
++    const summen = deriveMesskonzept(build({ gridConnection: "single_connection" }));
++    expect(summen.tasks.find((t) => t.code === "contracts")!.title).not.toMatch(/zwei Verträge/);
++  });
++
++  it("counts the interval measuring points into the metering-operator task", () => {
++    const r = deriveMesskonzept(build({ units: 30, gridConnection: "public_grid" }));
++    // 30 participant meters plus the generation meter.
++    expect(r.tasks.find((t) => t.code === "msb_appoint")!.title).toMatch(/31 Messpunkte/);
++  });
++
++  it("adds a storage task when storage is in scope", () => {
++    const r = deriveMesskonzept(build({ gridConnection: "single_connection", storage: "planned" }));
++    expect(r.tasks.map((t) => t.code)).toContain("speicher_messkonzept");
++  });
++});
++
++describe("warnings", () => {
++  it("warns about interval metering availability where it is required", () => {
++    const r = deriveMesskonzept(build({ gridConnection: "public_grid" }));
++    expect(r.warnings.map((w) => w.code)).toContain("interval_metering_required");
++  });
++
++  it("warns when the existing metering situation is unclear", () => {
++    const r = deriveMesskonzept(build({ gridConnection: "single_connection", metering: "unclear" }));
++    expect(r.warnings.map((w) => w.code)).toContain("metering_unclear");
++  });
++
++  it("warns that an existing plant may not be convertible", () => {
++    const r = deriveMesskonzept(build({ gridConnection: "single_connection", generationStatus: "existing" }));
++    expect(r.warnings.map((w) => w.code)).toContain("existing_plant_rewiring");
++  });
++
++  it("warns about commercial units only when there are some", () => {
++    const withCommercial = deriveMesskonzept(
++      build({ gridConnection: "single_connection", commercialUnits: 3 }),
++    );
++    expect(withCommercial.warnings.map((w) => w.code)).toContain("commercial_units");
++
++    const without = deriveMesskonzept(build({ gridConnection: "single_connection", commercialUnits: 0 }));
++    expect(without.warnings.map((w) => w.code)).not.toContain("commercial_units");
++  });
++
++  it("warns about submetering effort above a hundred units", () => {
++    const big = deriveMesskonzept(build({ units: 140, gridConnection: "single_connection" }));
++    expect(big.warnings.map((w) => w.code)).toContain("large_submetering");
++
++    const small = deriveMesskonzept(build({ units: 40, gridConnection: "single_connection" }));
++    expect(small.warnings.map((w) => w.code)).not.toContain("large_submetering");
++  });
++});
++
++describe("confidence and missing inputs", () => {
++  it("names every unanswered input", () => {
++    const r = deriveMesskonzept(build({ gridConnection: "single_connection" }));
++    expect(r.missingInputs).toContain("Eigentümerkonstellation");
++    expect(r.missingInputs).not.toContain("Netzanschlusssituation");
++  });
++
++  it("reports high confidence once most inputs are known", () => {
++    const r = deriveMesskonzept(
++      build({
++        gridConnection: "single_connection",
++        buildingScope: "single_building",
++        ownerConstellation: "single_owner",
++        generationStatus: "planned",
++        metering: "ready",
++        storage: "none",
++      }),
++    );
++    expect(r.missingInputs).toHaveLength(0);
++    expect(r.confidence).toBe("high");
++  });
++
++  it("drops to medium confidence while several inputs are open", () => {
++    expect(deriveMesskonzept(build({ gridConnection: "single_connection" })).confidence).toBe("medium");
++  });
++});
++
++describe("output discipline", () => {
++  it("carries the approval disclaimer on every result", () => {
++    for (const gridConnection of ["single_connection", "per_unit_connection", "public_grid"] as const) {
++      expect(deriveMesskonzept(build({ gridConnection })).disclaimer).toBe(MESSKONZEPT_DISCLAIMER_DE);
++    }
++    expect(deriveMesskonzept(build()).disclaimer).toBe(MESSKONZEPT_DISCLAIMER_DE);
++  });
++
++  it("names the network operator's approval as authoritative", () => {
++    expect(MESSKONZEPT_DISCLAIMER_DE).toMatch(/Netzbetreiber/);
++    expect(MESSKONZEPT_DISCLAIMER_DE).toMatch(/maßgeblich/);
++  });
++
++  it("is deterministic", () => {
++    const input = build({ gridConnection: "single_connection", ownerConstellation: "weg", storage: "planned" });
++    expect(deriveMesskonzept(input)).toEqual(deriveMesskonzept(input));
++  });
++
++  it("rejects inputs outside the accepted range", () => {
++    expect(() => MesskonzeptInputSchema.parse({ units: 0, kwp: 60 })).toThrow();
++    expect(() => MesskonzeptInputSchema.parse({ units: 10, kwp: 0 })).toThrow();
++    expect(() => MesskonzeptInputSchema.parse({ units: 10, kwp: 60, storage: "maybe" })).toThrow();
++  });
++});
+diff --git a/client/src/lib/report-pdf.test.ts b/client/src/lib/report-pdf.test.ts
+index 61716c5..098f8ac 100644
+--- a/client/src/lib/report-pdf.test.ts
++++ b/client/src/lib/report-pdf.test.ts
+@@ -3,6 +3,7 @@ import { buildReportDoc, type ScenarioBundle } from "./report-pdf";
+ import { calculateMieterstrom, DEFAULTS } from "./mieterstrom";
+ import { ASSUMPTION_SET, MODEL_VERSION } from "../../../shared/assumptions";
+ import type { QualificationFacts } from "../../../shared/eligibility";
++import type { MesskonzeptAnswers } from "./report-pdf";
+ 
+ const QUALIFIED: QualificationFacts = {
+   ownerConstellation: "single_owner",
+@@ -25,8 +26,9 @@ function renderText(
+   inputs = DEFAULTS,
+   now = FIXED_NOW,
+   facts?: QualificationFacts,
++  messkonzept?: MesskonzeptAnswers,
+ ): string {
+-  const uri = buildReportDoc(inputs, scenarios, { now, facts }).output("datauristring");
++  const uri = buildReportDoc(inputs, scenarios, { now, facts, messkonzept }).output("datauristring");
+   return Buffer.from(uri.split(",")[1], "base64").toString("latin1");
+ }
+ 
+@@ -70,9 +72,32 @@ describe("buildReportDoc", () => {
+     expect(raw).toContain("energie-teilen.de");
+   });
+ 
+-  // The report must not claim a deliverable it does not produce.
+-  it("does not claim to contain a Messkonzept it never renders", () => {
+-    expect(renderText()).not.toContain("Messkonzept");
++  // The metering section is derived, not asserted: without the connection
++  // situation the report says so rather than printing a plausible concept.
++  it("reports the metering concept as not determinable when nothing decides it", () => {
++    const raw = renderText();
++    expect(raw).toContain("Messkonzept und Umsetzungspfad");
++    expect(raw).toContain("Nicht bestimmbar");
++    expect(raw).not.toContain("Summenz");
++  });
++
++  it("renders the meter inventory once the connection situation is given", () => {
++    const raw = renderText(DEFAULTS, FIXED_NOW, QUALIFIED, {
++      gridConnection: "single_connection",
++    });
++    expect(raw).toContain("Summenz");
++    expect(raw).toContain("Erzeugungsz");
++    expect(raw).toContain("Kritischer Pfad");
++  });
++
++  it("keeps the network operator's approval as the last word", () => {
++    for (const raw of [
++      renderText(),
++      renderText(DEFAULTS, FIXED_NOW, QUALIFIED, { gridConnection: "public_grid" }),
++    ]) {
++      expect(raw).toContain("Netzbetreiber");
++      expect(raw).toContain("geblich");
++    }
+   });
+ 
+   // P0.3 — the report must say which of the three models it computes.
+@@ -135,6 +160,16 @@ describe("buildReportDoc", () => {
+     expect(buildReportDoc(DEFAULTS, scenarios, { now: FIXED_NOW }).getNumberOfPages()).toBe(3);
+   });
+ 
++  it("stays within four pages with the full metering section rendered", () => {
++    const pages = buildReportDoc(DEFAULTS, scenarios, {
++      now: FIXED_NOW,
++      facts: QUALIFIED,
++      messkonzept: { gridConnection: "single_connection", storage: "planned", commercialUnits: 2 },
++    }).getNumberOfPages();
++    expect(pages).toBeLessThanOrEqual(4);
++    expect(pages).toBeGreaterThanOrEqual(3);
++  });
++
+   it("is byte-identical for the same inputs and the same clock", () => {
+     expect(renderText().length).toBe(renderText().length);
+   });
+diff --git a/client/src/lib/report-pdf.ts b/client/src/lib/report-pdf.ts
+index a32bf33..75f6a55 100644
+--- a/client/src/lib/report-pdf.ts
++++ b/client/src/lib/report-pdf.ts
+@@ -21,6 +21,19 @@ import {
+   intakeChecklistFor,
+   type QualificationFacts,
+ } from "../../../shared/eligibility";
++import {
++  criticalPath,
++  deriveMesskonzept,
++  type GridConnection,
++  type Storage,
++} from "../../../shared/messkonzept";
++
++/** The metering answers the qualification questions do not cover. */
++export type MesskonzeptAnswers = {
++  gridConnection?: GridConnection;
++  storage?: Storage;
++  commercialUnits?: number;
++};
+ 
+ export type ScenarioBundle = {
+   konservativ: MieterstromResult; realistisch: MieterstromResult; optimistisch: MieterstromResult;
+@@ -121,7 +134,7 @@ function drawChart(doc: jsPDF, s: ScenarioBundle, x: number, y: number, w: numbe
+ export function buildReportDoc(
+   inputs: MieterstromInputs,
+   scenarios: ScenarioBundle,
+-  options?: { now?: Date; facts?: QualificationFacts },
++  options?: { now?: Date; facts?: QualificationFacts; messkonzept?: MesskonzeptAnswers },
+ ): jsPDF {
+   // Every output is versioned: model, assumption set, date, jurisdiction,
+   // currency and the scenario the narrative refers to. `now` is injectable so
+@@ -262,6 +275,84 @@ export function buildReportDoc(
+     y += 10;
+   }
+ 
++  // ── Messkonzept und Umsetzungspfad ──────────────────────────────────────
++  // Derived from the same constellation the verdict used. Reported as an
++  // engineering proposal: the network operator's approval is authoritative,
++  // and the section says so rather than implying the concept is settled.
++  const konzept = deriveMesskonzept({
++    units: Math.max(1, Math.round(inputs.anzahlWohneinheiten)),
++    kwp: inputs.kwp,
++    gridConnection: options?.messkonzept?.gridConnection,
++    buildingScope: options?.facts?.buildingScope,
++    ownerConstellation: options?.facts?.ownerConstellation,
++    generationStatus: options?.facts?.generationStatus,
++    metering: options?.facts?.metering,
++    storage: options?.messkonzept?.storage,
++    commercialUnits: options?.messkonzept?.commercialUnits,
++  });
++
++  if (y + 150 > pageH - 60) { doc.addPage(); y = 104; }
++  doc.setFont("helvetica", "bold").setFontSize(13).setTextColor(BRAND.ink).text("Messkonzept und Umsetzungspfad", margin, y); y += 14;
++  doc.setFont("helvetica", "bold").setFontSize(9.5).setTextColor(BRAND.green).text(konzept.variantLabel, margin, y); y += 13;
++  doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(BRAND.muted);
++  (doc.splitTextToSize(konzept.rationale, pageW - margin * 2) as string[]).forEach((ln) => {
++    doc.text(ln, margin, y); y += 11;
++  });
++  y += 8;
++
++  if (konzept.meters.length > 0) {
++    autoTable(doc, {
++      startY: y, margin: { left: margin, right: margin },
++      head: [["Messeinrichtung", "Anzahl", "Eigenschaft", "Zweck"]],
++      body: konzept.meters.map((m) => [
++        m.label,
++        String(m.count),
++        [m.bidirectional ? "Zweirichtung" : null, m.intervalMetering ? "15-Minuten-Werte" : null]
++          .filter(Boolean)
++          .join(", ") || "Standard",
++        m.purpose,
++      ]),
++      foot: [["Gesamt", String(konzept.meterCount), "", ""]],
++      styles: { fontSize: 8.5, cellPadding: 4 },
++      headStyles: { fillColor: BRAND.green, textColor: "#ffffff", fontStyle: "bold" },
++      footStyles: { fillColor: BRAND.panel, textColor: BRAND.ink, fontStyle: "bold" },
++      columnStyles: { 1: { halign: "right", cellWidth: 44 }, 2: { cellWidth: 96 } },
++      alternateRowStyles: { fillColor: BRAND.panel },
++    });
++    // @ts-expect-error autotable augments doc at runtime
++    y = doc.lastAutoTable.finalY + 18;
++  }
++
++  const blocking = criticalPath(konzept);
++  if (blocking.length > 0) {
++    if (y + 30 + blocking.length * 12 > pageH - 60) { doc.addPage(); y = 104; }
++    doc.setFont("helvetica", "bold").setFontSize(11).setTextColor(BRAND.ink);
++    doc.text("Kritischer Pfad", margin, y); y += 14;
++    doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(BRAND.muted);
++    blocking.forEach((t, i) => {
++      const lines = doc.splitTextToSize(`${i + 1}.  ${t.title}  (${t.owner})`, pageW - margin * 2) as string[];
++      lines.forEach((ln) => { doc.text(ln, margin, y); y += 11; });
++    });
++    y += 8;
++  }
++
++  if (konzept.warnings.length > 0) {
++    if (y + 30 + konzept.warnings.length * 22 > pageH - 60) { doc.addPage(); y = 104; }
++    doc.setFont("helvetica", "normal").setFontSize(8.5).setTextColor(BRAND.brown);
++    konzept.warnings.forEach((w) => {
++      const lines = doc.splitTextToSize(`\u2022  ${w.message}`, pageW - margin * 2) as string[];
++      lines.forEach((ln) => { doc.text(ln, margin, y); y += 11; });
++      y += 2;
++    });
++    y += 6;
++  }
++
++  doc.setFont("helvetica", "normal").setFontSize(8).setTextColor(BRAND.muted);
++  (doc.splitTextToSize(konzept.disclaimer, pageW - margin * 2) as string[]).forEach((ln) => {
++    doc.text(ln, margin, y); y += 10;
++  });
++  y += 16;
++
+   // ── Herkunft der Annahmen ───────────────────────────────────────────────
+   // The section that stops this report from selling placeholders as facts.
+   // Start here only if there is real room; autoTable flows the rest itself.
+@@ -336,9 +427,18 @@ export function buildReportDoc(
+ export function downloadReportPdf(
+   inputs: MieterstromInputs,
+   scenarios: ScenarioBundle,
+-  options?: { facts?: QualificationFacts; filename?: string; now?: Date },
++  options?: {
++    facts?: QualificationFacts;
++    messkonzept?: MesskonzeptAnswers;
++    filename?: string;
++    now?: Date;
++  },
+ ): void {
+-  buildReportDoc(inputs, scenarios, { now: options?.now, facts: options?.facts }).save(
++  buildReportDoc(inputs, scenarios, {
++    now: options?.now,
++    facts: options?.facts,
++    messkonzept: options?.messkonzept,
++  }).save(
+     options?.filename ?? "energie-teilen-wirtschaftlichkeitsbericht.pdf",
+   );
+ }
+diff --git a/client/src/pages/Home.tsx b/client/src/pages/Home.tsx
+index fa54ae3..b7609e2 100644
+--- a/client/src/pages/Home.tsx
++++ b/client/src/pages/Home.tsx
+@@ -2,6 +2,8 @@ import { type ScenarioBundle } from "@/lib/report-pdf";
+ import { SensitivityTornado } from "@/components/SensitivityTornado";
+ import { BreakEvenPanel } from "@/components/BreakEvenPanel";
+ import { EligibilityPanel } from "@/components/EligibilityPanel";
++import { MesskonzeptPanel, type MesskonzeptAnswers } from "@/components/MesskonzeptPanel";
++import { AllocationPanel } from "@/components/AllocationPanel";
+ import type { QualificationFacts } from "../../../shared/eligibility";
+ import { evaluateEligibility } from "../../../shared/eligibility";
+ import { track } from "@/lib/analytics";
+@@ -467,17 +469,22 @@ function SliderField({
+ }
+ 
+ const FACTS_STORAGE_KEY = "et:rechner:facts:v1";
++const MESSKONZEPT_STORAGE_KEY = "et:rechner:messkonzept:v1";
+ 
+ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void }) {
+   const [inputs, setInputs] = useState<MieterstromInputs>(DEFAULTS);
+   // Qualification answers live here, not in the panel, so the downloaded PDF
+   // carries exactly the same verdict the visitor just read on screen.
+   const [facts, setFacts] = useState<QualificationFacts>({});
++  // The metering answers the qualification questions do not cover.
++  const [messkonzeptAnswers, setMesskonzeptAnswers] = useState<MesskonzeptAnswers>({});
+ 
+   useEffect(() => {
+     try {
+       const raw = localStorage.getItem(FACTS_STORAGE_KEY);
+       if (raw) setFacts(JSON.parse(raw) as QualificationFacts);
++      const rawMk = localStorage.getItem(MESSKONZEPT_STORAGE_KEY);
++      if (rawMk) setMesskonzeptAnswers(JSON.parse(rawMk) as MesskonzeptAnswers);
+     } catch {
+       // ignore
+     }
+@@ -490,6 +497,14 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
+       // ignore
+     }
+   }, [facts]);
++
++  useEffect(() => {
++    try {
++      localStorage.setItem(MESSKONZEPT_STORAGE_KEY, JSON.stringify(messkonzeptAnswers));
++    } catch {
++      // ignore
++    }
++  }, [messkonzeptAnswers]);
+   const [, startTransition] = useTransition();
+ 
+   // Hydrate from localStorage on first mount (returning visitor sees last scenario)
+@@ -653,11 +668,27 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
+           onProceedToPilot={onProceedToPilot}
+         />
+ 
++        {/*
++          Buildability, after the verdict: which meters, which roles, which
++          blocking step. The engine reports "not determinable" rather than
++          drawing a concept the connection situation does not support.
++        */}
++        <MesskonzeptPanel
++          inputs={inputs}
++          facts={facts}
++          answers={messkonzeptAnswers}
++          onAnswersChange={setMesskonzeptAnswers}
++        />
++
++        {/* What the metering is for: the split, and what it is worth. */}
++        <AllocationPanel inputs={inputs} />
++
+         <LeadCaptureBand
+           inputs={inputs}
+           result={baseScenario}
+           facts={facts}
+           scenarios={{ konservativ: conservativeScenario, realistisch: baseScenario, optimistisch: optimisticScenario }}
++          messkonzept={messkonzeptAnswers}
+           onProceedToPilot={onProceedToPilot}
+         />
+       </div>
+@@ -670,12 +701,14 @@ function LeadCaptureBand({
+   result,
+   facts,
+   scenarios,
++  messkonzept,
+   onProceedToPilot,
+ }: {
+   inputs: MieterstromInputs;
+   result: MieterstromResult;
+   facts: QualificationFacts;
+   scenarios: ScenarioBundle;
++  messkonzept: MesskonzeptAnswers;
+   onProceedToPilot: () => void;
+ }) {
+   const [email, setEmail] = useState("");
+@@ -710,7 +743,7 @@ function LeadCaptureBand({
+       });
+       try {
+         const { downloadReportPdf } = await import("@/lib/report-pdf");
+-        downloadReportPdf(inputs, scenarios, { facts });
++        downloadReportPdf(inputs, scenarios, { facts, messkonzept });
+       } catch (err) { console.error("PDF generation failed", err); }
+       if (res.persisted === "server") {
+         toast.success(
+diff --git a/server/api-v1.ts b/server/api-v1.ts
+index cd11d50..ece4646 100644
+--- a/server/api-v1.ts
++++ b/server/api-v1.ts
+@@ -21,10 +21,23 @@ import {
+   type ApiV1Error,
+   type ApiV1ErrorCode,
+   type CalculateResponse,
++  type AllocationResponse,
+   type EligibilityResponse,
++  type MesskonzeptResponse,
+   type MetaResponse,
+   type ProvenanceEntry,
++  AllocationRequestSchema,
++  MesskonzeptRequestSchema,
+ } from "../shared/api-contract.js";
++import {
++  AllocationError,
++  allocate,
++  compareKeys,
++  KEY_LABEL_DE,
++  type AllocationKey,
++  type AllocationResult,
++} from "../shared/allocation.js";
++import { criticalPath, deriveMesskonzept } from "../shared/messkonzept.js";
+ import {
+   ASSUMPTION_SET,
+   MODEL_VERSION,
+@@ -203,6 +216,33 @@ function buildWarnings(
+   return warnings;
+ }
+ 
++/**
++ * Which key placed the most energy with participants, and by how much.
++ *
++ * Comparative, not advisory: it reports the computed difference between the
++ * best and worst key on this data. It does not state which key may be agreed
++ * in a given constellation.
++ */
++function recommendKey(runs: Record<AllocationKey, AllocationResult>) {
++  const entries = Object.entries(runs) as [AllocationKey, AllocationResult][];
++  if (entries.length < 2) return null;
++
++  const sorted = [...entries].sort(
++    (a, b) => b[1].totals.allocatedKwh - a[1].totals.allocatedKwh,
++  );
++  const [bestKey, best] = sorted[0];
++  const [worstKey, worst] = sorted[sorted.length - 1];
++
++  return {
++    key: bestKey,
++    keyLabel: KEY_LABEL_DE[bestKey],
++    additionalSelfConsumptionKwh: best.totals.allocatedKwh - worst.totals.allocatedKwh,
++    additionalSelfConsumptionPoints:
++      (best.totals.selfConsumptionRate - worst.totals.selfConsumptionRate) * 100,
++    comparedTo: worstKey,
++  };
++}
++
+ // ============================================================================
+ // MOUNT
+ // ============================================================================
+@@ -258,7 +298,13 @@ export function mountApiV1(
+           citation: formatCitation(m),
+         };
+       }),
+-      endpoints: [`${API_PREFIX}/meta`, `${API_PREFIX}/calculate`, `${API_PREFIX}/eligibility`],
++      endpoints: [
++        `${API_PREFIX}/meta`,
++        `${API_PREFIX}/calculate`,
++        `${API_PREFIX}/eligibility`,
++        `${API_PREFIX}/messkonzept`,
++        `${API_PREFIX}/allocation`,
++      ],
+     };
+ 
+     res.setHeader("Cache-Control", "no-store");
+@@ -342,4 +388,77 @@ export function mountApiV1(
+     res.setHeader("Cache-Control", "no-store");
+     return res.status(200).json(body);
+   });
++
++  // --------------------------------------------------------------------------
++  // POST /api/v1/messkonzept — meter inventory, market roles, critical path
++  // --------------------------------------------------------------------------
++  app.post(`${API_PREFIX}/messkonzept`, deps.limiter, requireKey, (req: Request, res: Response) => {
++    const parsed = MesskonzeptRequestSchema.safeParse(req.body);
++    if (!parsed.success) {
++      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++    }
++
++    const now = new Date();
++    const result = deriveMesskonzept(parsed.data.constellation);
++
++    const body: MesskonzeptResponse = {
++      ok: true,
++      reference: parsed.data.reference ?? null,
++      model: stamp(now),
++      variant: result.variant,
++      variantLabel: result.variantLabel,
++      rationale: result.rationale,
++      meters: result.meters,
++      meterCount: result.meterCount,
++      roles: result.roles,
++      tasks: result.tasks,
++      criticalPath: criticalPath(result),
++      warnings: result.warnings,
++      missingInputs: result.missingInputs,
++      confidence: result.confidence,
++      disclaimer: result.disclaimer,
++    };
++
++    res.setHeader("Cache-Control", "no-store");
++    return res.status(200).json(body);
++  });
++
++  // --------------------------------------------------------------------------
++  // POST /api/v1/allocation — interval-level Aufteilungsschlüssel
++  // --------------------------------------------------------------------------
++  app.post(`${API_PREFIX}/allocation`, deps.limiter, requireKey, (req: Request, res: Response) => {
++    const parsed = AllocationRequestSchema.safeParse(req.body);
++    if (!parsed.success) {
++      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++    }
++
++    const { key, generationKwh, participants, includeSeries } = parsed.data;
++    const options = { includeSeries };
++
++    let runs: Partial<Record<AllocationKey, AllocationResult>>;
++    try {
++      runs = key
++        ? { [key]: allocate({ key, generationKwh, participants }, options) }
++        : compareKeys({ generationKwh, participants }, options);
++    } catch (err) {
++      // A shape the schema cannot express — mismatched series lengths, shares
++      // over 100 %. Reported as the caller's input error, with its code.
++      if (err instanceof AllocationError) {
++        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
++      }
++      throw err;
++    }
++
++    const body: AllocationResponse = {
++      ok: true,
++      reference: parsed.data.reference ?? null,
++      model: stamp(new Date()),
++      key: key ?? null,
++      runs: runs as Record<AllocationKey, AllocationResult>,
++      recommendation: key ? null : recommendKey(runs as Record<AllocationKey, AllocationResult>),
++    };
++
++    res.setHeader("Cache-Control", "no-store");
++    return res.status(200).json(body);
++  });
+ }
+diff --git a/shared/allocation.ts b/shared/allocation.ts
+new file mode 100644
+index 0000000..082341a
+--- /dev/null
++++ b/shared/allocation.ts
+@@ -0,0 +1,487 @@
++/**
++ * shared/allocation.ts
++ *
++ * Aufteilungsschlüssel: distributes generated energy across participants over
++ * fifteen-minute intervals.
++ *
++ * A metering concept says which values get measured. This says what happens to
++ * them. Every participation model that involves more than one offtaker needs a
++ * rule for splitting each interval's generation, and that rule has to hold two
++ * properties at once: no participant may be allocated more than they actually
++ * consumed in that interval, and no kilowatt-hour may be allocated twice.
++ * Everything not allocated is fed into the grid.
++ *
++ * The engine is exact. Allocation plus feed-in equals generation in every
++ * interval, by construction rather than by rounding, and the invariant is
++ * pinned by test.
++ *
++ * Three keys are implemented, and the difference between them is money:
++ *
++ *   - static      — fixed shares. Simple to agree, leaves energy unused when a
++ *                   participant's share exceeds their demand in an interval.
++ *   - dynamic     — pro rata by actual consumption in the interval. Every
++ *                   participant gets the same coverage ratio.
++ *   - cascading   — fixed shares, then the unused remainder is redistributed
++ *                   pro rata among participants who still have unmet demand,
++ *                   repeatedly, until nothing more can be placed. Maximises
++ *                   self-consumption while keeping the agreed shares as the
++ *                   first claim.
++ *
++ * The engine computes. It does not assert which key is legally permissible in
++ * a given constellation; that is stated in the disclaimer and left to review.
++ */
++
++import { z } from "zod";
++
++// ============================================================================
++// TIME BASE
++// ============================================================================
++
++/** Settlement resolution for the German market. */
++export const INTERVAL_MINUTES = 15;
++export const INTERVALS_PER_HOUR = 60 / INTERVAL_MINUTES;
++export const INTERVALS_PER_DAY = 24 * INTERVALS_PER_HOUR;
++
++/** Bounded so a single request cannot be turned into an unbounded computation. */
++export const MAX_INTERVALS = 35_040; // one non-leap year at 15 minutes
++export const MAX_PARTICIPANTS = 500;
++
++// ============================================================================
++// INPUT
++// ============================================================================
++
++export const AllocationKeySchema = z.enum(["static", "dynamic", "cascading"]);
++export type AllocationKey = z.infer<typeof AllocationKeySchema>;
++
++export const KEY_LABEL_DE: Record<AllocationKey, string> = {
++  static: "Statischer Schlüssel (feste Anteile)",
++  dynamic: "Dynamischer Schlüssel (verbrauchsanteilig je Viertelstunde)",
++  cascading: "Statischer Schlüssel mit Nachverteilung des Rests",
++};
++
++export const KEY_DESCRIPTION_DE: Record<AllocationKey, string> = {
++  static:
++    "Jeder Teilnehmer erhält in jeder Viertelstunde höchstens seinen festen Anteil an der Erzeugung. Was ein Teilnehmer nicht abnimmt, verfällt für die Zuordnung und wird eingespeist.",
++  dynamic:
++    "Die Erzeugung wird in jeder Viertelstunde im Verhältnis der tatsächlichen Verbräuche verteilt. Alle Teilnehmer erreichen denselben Deckungsgrad.",
++  cascading:
++    "Zunächst gilt der feste Anteil. Der davon nicht genutzte Rest wird anschließend verbrauchsanteilig unter den Teilnehmern mit offenem Bedarf weiterverteilt, bis nichts mehr zugeordnet werden kann.",
++};
++
++export const ParticipantSchema = z.object({
++  /** Stable identifier supplied by the caller. Echoed in the result. */
++  id: z.string().min(1).max(64),
++  label: z.string().min(1).max(120).optional(),
++  /**
++   * Fixed share for the static and cascading keys, as a fraction of generation.
++   * Ignored by the dynamic key. Shares across all participants must not exceed
++   * 1; a shortfall is permitted and is reported.
++   */
++  share: z.number().min(0).max(1).optional(),
++  /** Consumption per interval in kWh. Length must match the generation series. */
++  consumptionKwh: z.array(z.number().min(0)),
++});
++export type Participant = z.infer<typeof ParticipantSchema>;
++
++export const AllocationInputSchema = z.object({
++  key: AllocationKeySchema,
++  /** Generation per interval in kWh, at the plant's generation meter. */
++  generationKwh: z.array(z.number().min(0)).min(1).max(MAX_INTERVALS),
++  participants: z.array(ParticipantSchema).min(1).max(MAX_PARTICIPANTS),
++});
++export type AllocationInput = z.infer<typeof AllocationInputSchema>;
++
++// ============================================================================
++// OUTPUT
++// ============================================================================
++
++export type ParticipantAllocation = {
++  id: string;
++  label: string | null;
++  /** Agreed share, or null for a key that does not use one. */
++  share: number | null;
++  consumptionKwh: number;
++  /** Energy from the shared plant. Never exceeds consumption. */
++  allocatedKwh: number;
++  /** Consumption the plant did not cover; drawn from the grid. */
++  gridDrawKwh: number;
++  /** allocated / consumption. Null when the participant consumed nothing. */
++  coverageRate: number | null;
++  /** Per-interval allocation, present only when requested. */
++  series: number[] | null;
++};
++
++export type AllocationTotals = {
++  generationKwh: number;
++  consumptionKwh: number;
++  allocatedKwh: number;
++  /** Generation that found no participant with unmet demand. */
++  feedInKwh: number;
++  gridDrawKwh: number;
++  /** allocated / generation — the share of output that stayed in the group. */
++  selfConsumptionRate: number;
++  /** allocated / consumption — the share of demand the plant covered. */
++  autarkyRate: number;
++  intervals: number;
++  intervalMinutes: number;
++};
++
++export type AllocationResult = {
++  key: AllocationKey;
++  keyLabel: string;
++  keyDescription: string;
++  participants: ParticipantAllocation[];
++  totals: AllocationTotals;
++  /** Per-interval totals, present only when requested. */
++  generationSeries: number[] | null;
++  feedInSeries: number[] | null;
++  warnings: { code: string; message: string }[];
++  disclaimer: string;
++};
++
++export const ALLOCATION_DISCLAIMER_DE =
++  "Rechnerische Zuordnung auf Basis der übergebenen Messwerte. Welcher Aufteilungsschlüssel im konkreten Fall vereinbart und dem Netzbetreiber gemeldet werden kann, ist gesondert zu prüfen.";
++
++export const ILLUSTRATIVE_PROFILE_DISCLAIMER_DE =
++  "Beispielprofil zur Veranschaulichung des Verfahrens. Es handelt sich nicht um Messwerte; für eine belastbare Zuordnung sind Lastgänge der Messstellen erforderlich.";
++
++// ============================================================================
++// ERRORS
++// ============================================================================
++
++export class AllocationError extends Error {
++  readonly code: string;
++  constructor(code: string, message: string) {
++    super(message);
++    this.name = "AllocationError";
++    this.code = code;
++  }
++}
++
++/** Shares may under-run (the remainder is simply fed in) but never over-run. */
++export const SHARE_SUM_TOLERANCE = 1e-9;
++
++// ============================================================================
++// ENGINE
++// ============================================================================
++
++function zeros(n: number): number[] {
++  return new Array<number>(n).fill(0);
++}
++
++/**
++ * Distribute one interval's generation.
++ *
++ * Returns per-participant allocation for that interval. Guarantees:
++ *   - allocation[i] <= demand[i]
++ *   - sum(allocation) <= generation
++ * Both are enforced structurally, not by clamping after the fact.
++ */
++function allocateInterval(
++  key: AllocationKey,
++  generation: number,
++  demand: number[],
++  shares: number[],
++): number[] {
++  const n = demand.length;
++  const out = zeros(n);
++  if (generation <= 0) return out;
++
++  if (key === "dynamic") {
++    const totalDemand = demand.reduce((s, d) => s + d, 0);
++    if (totalDemand <= 0) return out;
++    if (generation >= totalDemand) {
++      for (let i = 0; i < n; i++) out[i] = demand[i];
++      return out;
++    }
++    for (let i = 0; i < n; i++) out[i] = (generation * demand[i]) / totalDemand;
++    return out;
++  }
++
++  // static and cascading both start from the agreed shares.
++  for (let i = 0; i < n; i++) {
++    out[i] = Math.min(demand[i], generation * shares[i]);
++  }
++  if (key === "static") return out;
++
++  // Cascading: place the remainder among participants who still have demand,
++  // pro rata to what they are still short of, until nothing moves. Each pass
++  // strictly reduces either the remainder or the number of unsatisfied
++  // participants, so the loop terminates; the bound is a guard, not the logic.
++  let placed = out.reduce((s, v) => s + v, 0);
++  let remainder = generation - placed;
++
++  for (let pass = 0; pass < n + 1 && remainder > 1e-12; pass++) {
++    const unmet: number[] = zeros(n);
++    let unmetTotal = 0;
++    for (let i = 0; i < n; i++) {
++      const gap = demand[i] - out[i];
++      if (gap > 1e-12) {
++        unmet[i] = gap;
++        unmetTotal += gap;
++      }
++    }
++    if (unmetTotal <= 0) break;
++
++    const toPlace = Math.min(remainder, unmetTotal);
++    for (let i = 0; i < n; i++) {
++      if (unmet[i] <= 0) continue;
++      out[i] += (toPlace * unmet[i]) / unmetTotal;
++    }
++    remainder -= toPlace;
++  }
++
++  return out;
++}
++
++function validate(input: AllocationInput): { shares: number[]; warnings: { code: string; message: string }[] } {
++  const warnings: { code: string; message: string }[] = [];
++  const intervals = input.generationKwh.length;
++
++  for (const p of input.participants) {
++    if (p.consumptionKwh.length !== intervals) {
++      throw new AllocationError(
++        "series_length_mismatch",
++        `Teilnehmer "${p.id}": ${p.consumptionKwh.length} Messwerte, erwartet ${intervals} passend zur Erzeugungsreihe.`,
++      );
++    }
++  }
++
++  const ids = new Set<string>();
++  for (const p of input.participants) {
++    if (ids.has(p.id)) {
++      throw new AllocationError("duplicate_participant", `Teilnehmer-ID "${p.id}" kommt mehrfach vor.`);
++    }
++    ids.add(p.id);
++  }
++
++  const usesShares = input.key === "static" || input.key === "cascading";
++  const declared = input.participants.filter((p) => p.share !== undefined).length;
++
++  let shares: number[];
++  if (!usesShares) {
++    shares = input.participants.map(() => 0);
++  } else if (declared === 0) {
++    // No shares given: an equal split is the only neutral reading, and it is
++    // reported so the caller can see it was not their choice.
++    const equal = 1 / input.participants.length;
++    shares = input.participants.map(() => equal);
++    warnings.push({
++      code: "shares_defaulted_equal",
++      message: `Keine Anteile übergeben. Es wurde gleichmäßig auf ${input.participants.length} Teilnehmer verteilt (je ${(equal * 100).toFixed(2)} %).`,
++    });
++  } else {
++    if (declared !== input.participants.length) {
++      throw new AllocationError(
++        "partial_shares",
++        "Anteile müssen für alle Teilnehmer oder für keinen angegeben werden.",
++      );
++    }
++    shares = input.participants.map((p) => p.share ?? 0);
++    const sum = shares.reduce((s, v) => s + v, 0);
++    if (sum > 1 + SHARE_SUM_TOLERANCE) {
++      throw new AllocationError(
++        "shares_exceed_one",
++        `Die Summe der Anteile beträgt ${(sum * 100).toFixed(2)} % und überschreitet 100 %.`,
++      );
++    }
++    if (sum < 1 - 1e-6) {
++      warnings.push({
++        code: "shares_below_one",
++        message: `Die Anteile summieren sich auf ${(sum * 100).toFixed(2)} %. Der nicht zugeteilte Rest wird eingespeist.`,
++      });
++    }
++  }
++
++  return { shares, warnings };
++}
++
++export type AllocationOptions = {
++  /** Return the per-interval series as well as the totals. */
++  includeSeries?: boolean;
++};
++
++/**
++ * Run the allocation.
++ *
++ * Deterministic. Feed-in is derived as generation minus what was allocated, so
++ * the energy balance closes exactly rather than approximately.
++ */
++export function allocate(input: AllocationInput, options: AllocationOptions = {}): AllocationResult {
++  const { shares, warnings } = validate(input);
++  const intervals = input.generationKwh.length;
++  const n = input.participants.length;
++
++  const allocatedTotals = zeros(n);
++  const series: number[][] = options.includeSeries ? input.participants.map(() => zeros(intervals)) : [];
++  const feedInSeries = options.includeSeries ? zeros(intervals) : null;
++
++  let totalGeneration = 0;
++  let totalAllocated = 0;
++
++  const demand = zeros(n);
++
++  for (let t = 0; t < intervals; t++) {
++    const generation = input.generationKwh[t];
++    for (let i = 0; i < n; i++) demand[i] = input.participants[i].consumptionKwh[t];
++
++    const step = allocateInterval(input.key, generation, demand, shares);
++
++    let stepTotal = 0;
++    for (let i = 0; i < n; i++) {
++      allocatedTotals[i] += step[i];
++      stepTotal += step[i];
++      if (options.includeSeries) series[i][t] = step[i];
++    }
++
++    totalGeneration += generation;
++    totalAllocated += stepTotal;
++    if (feedInSeries) feedInSeries[t] = generation - stepTotal;
++  }
++
++  const participants: ParticipantAllocation[] = input.participants.map((p, i) => {
++    const consumption = p.consumptionKwh.reduce((s, v) => s + v, 0);
++    const allocated = allocatedTotals[i];
++    return {
++      id: p.id,
++      label: p.label ?? null,
++      share: input.key === "dynamic" ? null : shares[i],
++      consumptionKwh: consumption,
++      allocatedKwh: allocated,
++      gridDrawKwh: consumption - allocated,
++      coverageRate: consumption > 0 ? allocated / consumption : null,
++      series: options.includeSeries ? series[i] : null,
++    };
++  });
++
++  const totalConsumption = participants.reduce((s, p) => s + p.consumptionKwh, 0);
++
++  if (input.key === "static") {
++    const unusedShare = participants.filter((p) => p.share !== null && p.coverageRate !== null && p.coverageRate >= 0.999);
++    if (unusedShare.length > 0 && totalGeneration - totalAllocated > 0) {
++      warnings.push({
++        code: "static_key_leaves_energy",
++        message: `${unusedShare.length} Teilnehmer sind vollständig gedeckt, während ${(totalGeneration - totalAllocated).toFixed(1)} kWh eingespeist werden. Ein Schlüssel mit Nachverteilung würde die Eigennutzung erhöhen.`,
++      });
++    }
++  }
++
++  if (totalGeneration <= 0) {
++    warnings.push({
++      code: "no_generation",
++      message: "Die übergebene Erzeugungsreihe enthält ausschließlich Nullwerte.",
++    });
++  }
++
++  return {
++    key: input.key,
++    keyLabel: KEY_LABEL_DE[input.key],
++    keyDescription: KEY_DESCRIPTION_DE[input.key],
++    participants,
++    totals: {
++      generationKwh: totalGeneration,
++      consumptionKwh: totalConsumption,
++      allocatedKwh: totalAllocated,
++      feedInKwh: totalGeneration - totalAllocated,
++      gridDrawKwh: totalConsumption - totalAllocated,
++      selfConsumptionRate: totalGeneration > 0 ? totalAllocated / totalGeneration : 0,
++      autarkyRate: totalConsumption > 0 ? totalAllocated / totalConsumption : 0,
++      intervals,
++      intervalMinutes: INTERVAL_MINUTES,
++    },
++    generationSeries: options.includeSeries ? [...input.generationKwh] : null,
++    feedInSeries,
++    warnings,
++    disclaimer: ALLOCATION_DISCLAIMER_DE,
++  };
++}
++
++/**
++ * Run every key against the same data.
++ *
++ * The comparison is the point: the difference in self-consumption between a
++ * static and a cascading key is a number a customer can act on, and it can only
++ * be produced by computing both.
++ */
++export function compareKeys(
++  input: Omit<AllocationInput, "key">,
++  options: AllocationOptions = {},
++): Record<AllocationKey, AllocationResult> {
++  return {
++    static: allocate({ ...input, key: "static" }, options),
++    dynamic: allocate({ ...input, key: "dynamic" }, options),
++    cascading: allocate({ ...input, key: "cascading" }, options),
++  };
++}
++
++// ============================================================================
++// ILLUSTRATIVE PROFILES
++// ============================================================================
++
++/**
++ * A deterministic day profile for demonstrating the mechanism.
++ *
++ * Explicitly not measurement: every consumer of this is required to carry
++ * ILLUSTRATIVE_PROFILE_DISCLAIMER_DE. It exists so the allocation can be shown
++ * working before a customer has supplied a single meter reading.
++ *
++ * Generation follows a clipped cosine centred on solar noon; household demand
++ * follows a fixed two-peak shape. No randomness — the same arguments always
++ * produce the same series.
++ */
++export function illustrativeShares(participants: number): number[] {
++  // Agreed shares in practice follow ownership or floor area, which is not the
++  // same ordering as consumption. The mismatch is deliberate: with shares that
++  // happen to track demand, every key produces the same answer and the choice
++  // looks like it does not matter.
++  const raw = Array.from({ length: participants }, (_, i) => 1 + ((i % 4) - 1.5) * 0.3);
++  const sum = raw.reduce((s, v) => s + v, 0);
++  return raw.map((v) => v / sum);
++}
++
++export function illustrativeDayProfile(options: {
++  kwp: number;
++  /** Daily consumption per participant in kWh. */
++  dailyConsumptionKwh: number;
++  participants: number;
++  /** Peak-sun equivalent hours for the modelled day. */
++  peakSunHours?: number;
++}): { generationKwh: number[]; consumptionKwh: number[][] } {
++  const { kwp, dailyConsumptionKwh, participants } = options;
++  const peakSunHours = options.peakSunHours ?? 3.5;
++
++  // Generation: raised cosine over a 12-hour window centred at interval 48.
++  const raw = zeros(INTERVALS_PER_DAY);
++  const halfWindow = 6 * INTERVALS_PER_HOUR;
++  for (let t = 0; t < INTERVALS_PER_DAY; t++) {
++    const offset = t - INTERVALS_PER_DAY / 2;
++    if (Math.abs(offset) >= halfWindow) continue;
++    raw[t] = 0.5 * (1 + Math.cos((Math.PI * offset) / halfWindow));
++  }
++  const rawSum = raw.reduce((s, v) => s + v, 0);
++  const dailyYield = kwp * peakSunHours;
++  const generationKwh = raw.map((v) => (rawSum > 0 ? (v / rawSum) * dailyYield : 0));
++
++  // Demand: a fixed residential shape, morning and evening peaks over a base
++  // load. Each participant's shape is shifted by a fixed, index-derived offset
++  // so the profiles differ from one another — without that the allocation keys
++  // would be indistinguishable, which would misrepresent what they do.
++  const consumptionKwh: number[][] = [];
++  for (let p = 0; p < participants; p++) {
++    const shiftHours = ((p % 5) - 2) * 0.75;
++    const scale = 1 + ((p % 3) - 1) * 0.2;
++    const shape = zeros(INTERVALS_PER_DAY);
++    for (let t = 0; t < INTERVALS_PER_DAY; t++) {
++      const hour = t / INTERVALS_PER_HOUR - shiftHours;
++      const base = 0.35;
++      const morning = 0.9 * Math.exp(-Math.pow(hour - 7.5, 2) / 2.5);
++      const evening = 1.3 * Math.exp(-Math.pow(hour - 19.5, 2) / 4.0);
++      shape[t] = base + morning + evening;
++    }
++    const shapeSum = shape.reduce((s, v) => s + v, 0);
++    const total = dailyConsumptionKwh * scale;
++    consumptionKwh.push(shape.map((v) => (shapeSum > 0 ? (v / shapeSum) * total : 0)));
++  }
++
++  return { generationKwh, consumptionKwh };
++}
+diff --git a/shared/api-contract.ts b/shared/api-contract.ts
+index 464589e..e91842b 100644
+--- a/shared/api-contract.ts
++++ b/shared/api-contract.ts
+@@ -24,6 +24,8 @@
+ import { z } from "zod";
+ import { MieterstromInputsSchema } from "./schema.js";
+ import { QualificationFactsSchema, EligibilityVerdictSchema } from "./eligibility.js";
++import { MesskonzeptInputSchema, MesskonzeptVariantSchema } from "./messkonzept.js";
++import { AllocationKeySchema, ParticipantSchema } from "./allocation.js";
+ 
+ /** Bumped only for a breaking change to request or response shape. */
+ export const API_VERSION = "1.0.0";
+@@ -228,3 +230,131 @@ export const MetaResponseSchema = z.object({
+   endpoints: z.array(z.string()),
+ });
+ export type MetaResponse = z.infer<typeof MetaResponseSchema>;
++
++// ============================================================================
++// MESSKONZEPT
++// ============================================================================
++
++export const MesskonzeptRequestSchema = z.object({
++  constellation: MesskonzeptInputSchema,
++  reference: z.string().max(120).optional(),
++});
++export type MesskonzeptRequest = z.infer<typeof MesskonzeptRequestSchema>;
++
++export const MeterSpecSchema = z.object({
++  code: z.string(),
++  label: z.string(),
++  count: z.number().int().nonnegative(),
++  bidirectional: z.boolean(),
++  intervalMetering: z.boolean(),
++  purpose: z.string(),
++});
++
++export const MarketRoleSchema = z.object({
++  code: z.string(),
++  label: z.string(),
++  filledBy: z.string(),
++  responsibility: z.string(),
++});
++
++export const MesskonzeptTaskSchema = z.object({
++  code: z.string(),
++  title: z.string(),
++  owner: z.string(),
++  blocking: z.boolean(),
++});
++
++export const MesskonzeptResponseSchema = z.object({
++  ok: z.literal(true),
++  reference: z.string().nullable(),
++  model: ApiModelStampSchema,
++  variant: MesskonzeptVariantSchema,
++  variantLabel: z.string(),
++  rationale: z.string(),
++  meters: z.array(MeterSpecSchema),
++  meterCount: z.number().int().nonnegative(),
++  roles: z.array(MarketRoleSchema),
++  tasks: z.array(MesskonzeptTaskSchema),
++  /** Blocking tasks only, in order. */
++  criticalPath: z.array(MesskonzeptTaskSchema),
++  warnings: z.array(z.object({ code: z.string(), message: z.string() })),
++  missingInputs: z.array(z.string()),
++  confidence: z.enum(["high", "medium", "insufficient_data"]),
++  /** The network operator's approval is authoritative; this is a proposal. */
++  disclaimer: z.string(),
++});
++export type MesskonzeptResponse = z.infer<typeof MesskonzeptResponseSchema>;
++
++// ============================================================================
++// ALLOCATION
++// ============================================================================
++
++export const AllocationRequestSchema = z.object({
++  /** Omit to run all three keys and return the comparison. */
++  key: AllocationKeySchema.optional(),
++  generationKwh: z.array(z.number().min(0)).min(1).max(35_040),
++  participants: z.array(ParticipantSchema).min(1).max(500),
++  /** Return per-interval series as well as totals. Off by default. */
++  includeSeries: z.boolean().optional().default(false),
++  reference: z.string().max(120).optional(),
++});
++export type AllocationRequest = z.infer<typeof AllocationRequestSchema>;
++
++export const ParticipantAllocationSchema = z.object({
++  id: z.string(),
++  label: z.string().nullable(),
++  share: z.number().nullable(),
++  consumptionKwh: z.number(),
++  allocatedKwh: z.number(),
++  gridDrawKwh: z.number(),
++  coverageRate: z.number().nullable(),
++  series: z.array(z.number()).nullable(),
++});
++
++export const AllocationTotalsSchema = z.object({
++  generationKwh: z.number(),
++  consumptionKwh: z.number(),
++  allocatedKwh: z.number(),
++  feedInKwh: z.number(),
++  gridDrawKwh: z.number(),
++  selfConsumptionRate: z.number(),
++  autarkyRate: z.number(),
++  intervals: z.number().int(),
++  intervalMinutes: z.number().int(),
++});
++
++export const AllocationRunSchema = z.object({
++  key: AllocationKeySchema,
++  keyLabel: z.string(),
++  keyDescription: z.string(),
++  participants: z.array(ParticipantAllocationSchema),
++  totals: AllocationTotalsSchema,
++  generationSeries: z.array(z.number()).nullable(),
++  feedInSeries: z.array(z.number()).nullable(),
++  warnings: z.array(z.object({ code: z.string(), message: z.string() })),
++  disclaimer: z.string(),
++});
++
++export const AllocationResponseSchema = z.object({
++  ok: z.literal(true),
++  reference: z.string().nullable(),
++  model: ApiModelStampSchema,
++  /** The requested key, or null when all three were run. */
++  key: AllocationKeySchema.nullable(),
++  /** Keyed by allocation key. One entry for a single run, three for a comparison. */
++  runs: z.record(AllocationKeySchema, AllocationRunSchema),
++  /**
++   * Which key placed the most energy with participants, and how much more than
++   * the worst. Present only for a comparison.
++   */
++  recommendation: z
++    .object({
++      key: AllocationKeySchema,
++      keyLabel: z.string(),
++      additionalSelfConsumptionKwh: z.number(),
++      additionalSelfConsumptionPoints: z.number(),
++      comparedTo: AllocationKeySchema,
++    })
++    .nullable(),
++});
++export type AllocationResponse = z.infer<typeof AllocationResponseSchema>;
+diff --git a/shared/messkonzept.ts b/shared/messkonzept.ts
+new file mode 100644
+index 0000000..d9e2a90
+--- /dev/null
++++ b/shared/messkonzept.ts
+@@ -0,0 +1,497 @@
++/**
++ * shared/messkonzept.ts
++ *
++ * Metering-concept generator.
++ *
++ * Economics decide whether a project is worth doing; the metering concept
++ * decides whether it can be built. It determines how many meters are needed,
++ * who operates them, which market roles must be filled, and which of those are
++ * on the critical path. Getting it wrong is the most common reason a
++ * financially sound constellation never goes into operation.
++ *
++ * This module derives that concept deterministically from the constellation.
++ * Same rules every time, no inference, and an explicit "not determinable"
++ * verdict when the inputs do not decide it.
++ *
++ * Scope: it produces an engineering proposal — meter inventory, market roles
++ * and the ordered task list. It does not assert legal admissibility, and it
++ * does not replace the Netzbetreiber's own Messkonzept approval, which is
++ * always the last word.
++ */
++
++import { z } from "zod";
++import {
++  BuildingScopeSchema,
++  GenerationStatusSchema,
++  MeteringStatusSchema,
++  OwnerConstellationSchema,
++  type BuildingScope,
++} from "./eligibility.js";
++
++// ============================================================================
++// INPUT
++// ============================================================================
++
++export const StorageSchema = z.enum(["none", "planned", "existing"]);
++export type Storage = z.infer<typeof StorageSchema>;
++
++export const GridConnectionSchema = z.enum([
++  /** One Hausanschluss serves every unit — the summation case. */
++  "single_connection",
++  /** Each unit has its own Hausanschluss / Netzanschlusspunkt. */
++  "per_unit_connection",
++  /** Participants sit on the public grid at different connection points. */
++  "public_grid",
++]);
++export type GridConnection = z.infer<typeof GridConnectionSchema>;
++
++export const MesskonzeptInputSchema = z.object({
++  units: z.number().int().positive().max(2000),
++  kwp: z.number().positive().max(5000),
++  gridConnection: GridConnectionSchema.optional(),
++  buildingScope: BuildingScopeSchema.optional(),
++  ownerConstellation: OwnerConstellationSchema.optional(),
++  generationStatus: GenerationStatusSchema.optional(),
++  metering: MeteringStatusSchema.optional(),
++  storage: StorageSchema.optional(),
++  /** Commercial units change the tariff and metering obligations. */
++  commercialUnits: z.number().int().nonnegative().max(2000).optional(),
++});
++export type MesskonzeptInput = z.infer<typeof MesskonzeptInputSchema>;
++
++// ============================================================================
++// OUTPUT
++// ============================================================================
++
++export const MesskonzeptVariantSchema = z.enum([
++  /** Summenzählermodell: one bidirectional meter at the connection point. */
++  "summenzaehler",
++  /** Every unit metered individually at its own connection point. */
++  "einzelzaehler",
++  /** Participants on the public grid, each with interval metering. */
++  "viertelstunden_bilanzierung",
++  "not_determinable",
++]);
++export type MesskonzeptVariant = z.infer<typeof MesskonzeptVariantSchema>;
++
++export const VARIANT_LABEL_DE: Record<MesskonzeptVariant, string> = {
++  summenzaehler: "Summenzählermodell",
++  einzelzaehler: "Einzelzählermodell",
++  viertelstunden_bilanzierung: "Viertelstundenbilanzierung über das öffentliche Netz",
++  not_determinable: "Nicht bestimmbar",
++};
++
++export type MeterSpec = {
++  code: string;
++  label: string;
++  /** How many of this meter the concept needs. */
++  count: number;
++  bidirectional: boolean;
++  /** Requires Zählerstandsgangmessung / 15-minute values. */
++  intervalMetering: boolean;
++  purpose: string;
++};
++
++export type MarketRole = {
++  code: string;
++  label: string;
++  /** Who typically fills it in this constellation. */
++  filledBy: string;
++  responsibility: string;
++};
++
++export type MesskonzeptTask = {
++  code: string;
++  title: string;
++  owner: string;
++  /** Nothing downstream can proceed until this is done. */
++  blocking: boolean;
++};
++
++export type MesskonzeptResult = {
++  variant: MesskonzeptVariant;
++  variantLabel: string;
++  rationale: string;
++  meters: MeterSpec[];
++  /** Total physical meters, derived from the inventory. */
++  meterCount: number;
++  roles: MarketRole[];
++  tasks: MesskonzeptTask[];
++  warnings: { code: string; message: string }[];
++  /** What the caller still has to supply for a firmer answer. */
++  missingInputs: string[];
++  confidence: "high" | "medium" | "insufficient_data";
++  disclaimer: string;
++};
++
++export const MESSKONZEPT_DISCLAIMER_DE =
++  "Vorschlag für die technische Ausgestaltung. Das Messkonzept ist mit dem zuständigen Netzbetreiber und Messstellenbetreiber abzustimmen; deren Freigabe ist maßgeblich.";
++
++// ============================================================================
++// DERIVATION
++// ============================================================================
++
++/**
++ * Infer the grid-connection situation when it was not supplied.
++ *
++ * Only the unambiguous case is inferred: participants spread across the public
++ * grid cannot be behind one Hausanschluss. Everything else stays unknown, so
++ * the result reports lower confidence rather than assuming the common case.
++ */
++function inferGridConnection(input: MesskonzeptInput): GridConnection | null {
++  if (input.gridConnection) return input.gridConnection;
++  if (input.buildingScope === "across_grid") return "public_grid";
++  return null;
++}
++
++function selectVariant(
++  input: MesskonzeptInput,
++  grid: GridConnection | null,
++): { variant: MesskonzeptVariant; rationale: string } {
++  if (grid === "public_grid") {
++    return {
++      variant: "viertelstunden_bilanzierung",
++      rationale:
++        "Die Beteiligten liegen an unterschiedlichen Netzanschlusspunkten. Eine Summenbildung hinter einem Hausanschluss ist damit ausgeschlossen; die Zuordnung erfolgt rechnerisch über viertelstündliche Messwerte.",
++    };
++  }
++
++  if (grid === "per_unit_connection") {
++    return {
++      variant: "einzelzaehler",
++      rationale:
++        "Jede Einheit verfügt über einen eigenen Netzanschluss. Eine gemeinsame Summenzählung entfällt; jede Entnahmestelle wird einzeln gemessen.",
++    };
++  }
++
++  if (grid === "single_connection") {
++    return {
++      variant: "summenzaehler",
++      rationale:
++        "Alle Einheiten liegen hinter einem gemeinsamen Hausanschluss. Der Netzbezug wird an einem Zweirichtungszähler am Netzanschlusspunkt gemessen, die Einheiten über Unterzähler dahinter.",
++    };
++  }
++
++  return {
++    variant: "not_determinable",
++    rationale:
++      "Ohne Angabe zur Netzanschlusssituation lässt sich das Messkonzept nicht festlegen: die Wahl zwischen Summen- und Einzelzählung hängt genau daran.",
++  };
++}
++
++function buildMeters(
++  input: MesskonzeptInput,
++  variant: MesskonzeptVariant,
++): MeterSpec[] {
++  const meters: MeterSpec[] = [];
++  const needsInterval = variant === "viertelstunden_bilanzierung";
++
++  if (variant === "not_determinable") return meters;
++
++  // Generation is always metered separately: the plant's output has to be
++  // known independently of what any unit consumes.
++  meters.push({
++    code: "erzeugungszaehler",
++    label: "Erzeugungszähler",
++    count: 1,
++    bidirectional: false,
++    intervalMetering: needsInterval,
++    purpose: "Erfasst die Gesamterzeugung der Anlage, getrennt vom Verbrauch.",
++  });
++
++  if (variant === "summenzaehler") {
++    meters.push({
++      code: "summenzaehler",
++      label: "Zweirichtungszähler am Netzanschlusspunkt",
++      count: 1,
++      bidirectional: true,
++      intervalMetering: false,
++      purpose: "Misst Netzbezug und Überschusseinspeisung der gesamten Liegenschaft.",
++    });
++    meters.push({
++      code: "unterzaehler",
++      label: "Unterzähler je Einheit",
++      count: input.units,
++      bidirectional: false,
++      intervalMetering: false,
++      purpose: "Erfasst den Verbrauch jeder Einheit hinter dem Summenzähler.",
++    });
++  }
++
++  if (variant === "einzelzaehler") {
++    meters.push({
++      code: "entnahmezaehler",
++      label: "Entnahmezähler je Einheit",
++      count: input.units,
++      bidirectional: false,
++      intervalMetering: false,
++      purpose: "Jede Einheit wird an ihrem eigenen Netzanschlusspunkt gemessen.",
++    });
++  }
++
++  if (variant === "viertelstunden_bilanzierung") {
++    meters.push({
++      code: "teilnehmerzaehler",
++      label: "Zähler je Teilnehmer mit Zählerstandsgangmessung",
++      count: input.units,
++      bidirectional: false,
++      intervalMetering: true,
++      purpose:
++        "Viertelstündliche Messwerte je Teilnehmer als Grundlage der rechnerischen Zuordnung.",
++    });
++  }
++
++  if (input.storage === "planned" || input.storage === "existing") {
++    meters.push({
++      code: "speicherzaehler",
++      label: "Speicherzähler",
++      count: 1,
++      bidirectional: true,
++      intervalMetering: needsInterval,
++      purpose:
++        "Trennt Ein- und Ausspeicherung, damit gespeicherter Strom nicht doppelt zugeordnet wird.",
++    });
++  }
++
++  return meters;
++}
++
++function buildRoles(input: MesskonzeptInput, variant: MesskonzeptVariant): MarketRole[] {
++  if (variant === "not_determinable") return [];
++
++  const operatorDefault =
++    input.ownerConstellation === "weg"
++      ? "Eigentümergemeinschaft oder ein von ihr beauftragter Dienstleister"
++      : input.ownerConstellation === "multiple_owners"
++        ? "Gesondert zu vereinbaren — mehrere Eigentümer"
++        : "Eigentümer oder ein beauftragter Dienstleister";
++
++  const roles: MarketRole[] = [
++    {
++      code: "anlagenbetreiber",
++      label: "Anlagenbetreiber",
++      filledBy: operatorDefault,
++      responsibility: "Betreibt die Erzeugungsanlage und trägt das wirtschaftliche Risiko.",
++    },
++    {
++      code: "lieferant",
++      label: "Lieferant",
++      filledBy: "Anlagenbetreiber oder ein beauftragter Energiedienstleister",
++      responsibility:
++        "Beliefert die Teilnehmer, rechnet ab und erfüllt die Lieferantenpflichten.",
++    },
++    {
++      code: "msb",
++      label: "Messstellenbetreiber",
++      filledBy: "Grundzuständiger MSB, sofern kein wettbewerblicher MSB beauftragt wird",
++      responsibility: "Baut, betreibt und liest die Messeinrichtungen.",
++    },
++    {
++      code: "vnb",
++      label: "Verteilnetzbetreiber",
++      filledBy: "Örtlicher Netzbetreiber",
++      responsibility: "Genehmigt das Messkonzept und den Netzanschluss.",
++    },
++  ];
++
++  if (variant === "viertelstunden_bilanzierung") {
++    roles.push({
++      code: "bkv",
++      label: "Bilanzkreisverantwortlicher",
++      filledBy: "Lieferant oder beauftragter Dienstleister",
++      responsibility:
++        "Führt den Bilanzkreis und verantwortet die viertelstündliche Bilanzierung.",
++    });
++    roles.push({
++      code: "direktvermarkter",
++      label: "Direktvermarkter",
++      filledBy: "Zu beauftragen",
++      responsibility: "Vermarktet den nicht zugeordneten Überschuss.",
++    });
++  }
++
++  return roles;
++}
++
++function buildTasks(
++  input: MesskonzeptInput,
++  variant: MesskonzeptVariant,
++  meters: MeterSpec[],
++): MesskonzeptTask[] {
++  if (variant === "not_determinable") {
++    return [
++      {
++        code: "clarify_grid_connection",
++        title:
++          "Netzanschlusssituation klären: ein gemeinsamer Hausanschluss, je Einheit ein Anschluss, oder Beteiligte im öffentlichen Netz.",
++        owner: "Eigentümer / Verwaltung",
++        blocking: true,
++      },
++    ];
++  }
++
++  const intervalMeters = meters.filter((m) => m.intervalMetering).reduce((s, m) => s + m.count, 0);
++
++  const tasks: MesskonzeptTask[] = [
++    {
++      code: "messkonzept_submit",
++      title: "Messkonzept beim Netzbetreiber einreichen und freigeben lassen.",
++      owner: "Anlagenbetreiber",
++      blocking: true,
++    },
++    {
++      code: "msb_appoint",
++      title:
++        intervalMeters > 0
++          ? `Messstellenbetreiber beauftragen — ${intervalMeters} Messpunkte benötigen Zählerstandsgangmessung.`
++          : "Messstellenbetreiber beauftragen und Einbautermine abstimmen.",
++      owner: "Anlagenbetreiber",
++      blocking: true,
++    },
++    {
++      code: "marktrollen_register",
++      title: "Marktrollen registrieren und in der Marktkommunikation anmelden.",
++      owner: "Lieferant",
++      blocking: true,
++    },
++    {
++      code: "contracts",
++      title:
++        variant === "viertelstunden_bilanzierung"
++          ? "Je Teilnehmer zwei Verträge schließen: Liefervertrag und Vertrag zur gemeinsamen Nutzung mit Aufteilungsschlüssel."
++          : "Lieferverträge mit den Teilnehmern schließen.",
++      owner: "Lieferant",
++      blocking: true,
++    },
++    {
++      code: "abrechnung",
++      title: "Abrechnungsprozess aufsetzen: Ablesung, Zuordnung, Rechnungsstellung.",
++      owner: "Lieferant",
++      blocking: false,
++    },
++  ];
++
++  if (input.ownerConstellation === "weg") {
++    tasks.unshift({
++      code: "weg_beschluss",
++      title: "Beschluss der Eigentümergemeinschaft herbeiführen.",
++      owner: "Verwaltung",
++      blocking: true,
++    });
++  }
++
++  if (input.storage !== undefined && input.storage !== "none") {
++    tasks.push({
++      code: "speicher_messkonzept",
++      title: "Speicher im Messkonzept abbilden, damit Ein- und Ausspeicherung getrennt erfasst werden.",
++      owner: "Anlagenbetreiber",
++      blocking: false,
++    });
++  }
++
++  return tasks;
++}
++
++function buildWarnings(
++  input: MesskonzeptInput,
++  variant: MesskonzeptVariant,
++  meters: MeterSpec[],
++): { code: string; message: string }[] {
++  const warnings: { code: string; message: string }[] = [];
++
++  const intervalMeters = meters.filter((m) => m.intervalMetering).reduce((s, m) => s + m.count, 0);
++  if (intervalMeters > 0) {
++    warnings.push({
++      code: "interval_metering_required",
++      message: `${intervalMeters} Messpunkte benötigen viertelstündliche Messwerte. Die Verfügbarkeit intelligenter Messsysteme ist beim zuständigen Messstellenbetreiber vorab zu klären; sie ist in der Praxis der häufigste Terminrisikofaktor.`,
++    });
++  }
++
++  if (input.metering === "unclear") {
++    warnings.push({
++      code: "metering_unclear",
++      message:
++        "Das bestehende Zählerkonzept ist ungeklärt. Vor jeder Kostenschätzung ist die vorhandene Zählerstruktur aufzunehmen.",
++    });
++  }
++
++  if (input.generationStatus === "existing") {
++    warnings.push({
++      code: "existing_plant_rewiring",
++      message:
++        "Bei einer Bestandsanlage ist zu prüfen, ob die bestehende Vergütungsform und Verschaltung den Wechsel in dieses Modell zulassen.",
++    });
++  }
++
++  if ((input.commercialUnits ?? 0) > 0) {
++    warnings.push({
++      code: "commercial_units",
++      message: `${input.commercialUnits} gewerbliche Einheiten: abweichende Abrechnungs- und ggf. Messpflichten sind gesondert zu prüfen.`,
++    });
++  }
++
++  if (variant === "summenzaehler" && input.units > 100) {
++    warnings.push({
++      code: "large_submetering",
++      message: `${input.units} Unterzähler bedeuten erheblichen Mess- und Abrechnungsaufwand. Ein wettbewerblicher Messstellenbetreiber ist hier meist wirtschaftlicher als der grundzuständige.`,
++    });
++  }
++
++  return warnings;
++}
++
++const INPUT_LABELS: Record<string, string> = {
++  gridConnection: "Netzanschlusssituation",
++  buildingScope: "Räumlicher Zuschnitt",
++  ownerConstellation: "Eigentümerkonstellation",
++  generationStatus: "Status der Erzeugungsanlage",
++  metering: "Bestehendes Zählerkonzept",
++  storage: "Speicher",
++};
++
++function missingInputsOf(input: MesskonzeptInput): string[] {
++  return Object.keys(INPUT_LABELS)
++    .filter((k) => input[k as keyof MesskonzeptInput] === undefined)
++    .map((k) => INPUT_LABELS[k]);
++}
++
++/**
++ * Derive the metering concept.
++ *
++ * Deterministic: the same input always yields the same concept, meter
++ * inventory, roles and tasks.
++ */
++export function deriveMesskonzept(input: MesskonzeptInput): MesskonzeptResult {
++  const grid = inferGridConnection(input);
++  const { variant, rationale } = selectVariant(input, grid);
++  const meters = buildMeters(input, variant);
++  const missingInputs = missingInputsOf(input);
++
++  const confidence: MesskonzeptResult["confidence"] =
++    variant === "not_determinable"
++      ? "insufficient_data"
++      : missingInputs.length > 2
++        ? "medium"
++        : "high";
++
++  return {
++    variant,
++    variantLabel: VARIANT_LABEL_DE[variant],
++    rationale,
++    meters,
++    meterCount: meters.reduce((s, m) => s + m.count, 0),
++    roles: buildRoles(input, variant),
++    tasks: buildTasks(input, variant, meters),
++    warnings: buildWarnings(input, variant, meters),
++    missingInputs,
++    confidence,
++    disclaimer: MESSKONZEPT_DISCLAIMER_DE,
++  };
++}
++
++/** Blocking tasks only, in order — the critical path to operation. */
++export function criticalPath(result: MesskonzeptResult): MesskonzeptTask[] {
++  return result.tasks.filter((t) => t.blocking);
++}
++
++export type { BuildingScope };
+-- 
+2.43.0
+
