@@ -26,6 +26,7 @@ import { z } from "zod";
 import type { MieterstromInputs, MieterstromKpis, PilotOfferCode } from "./schema.js";
 import { PILOT_OFFER_FULFILLMENT } from "./pilot-order.js";
 import { modelledByCalculator } from "./legal-models.js";
+import { regimeWarning } from "./tariffs.js";
 
 // ============================================================================
 // VERDICT
@@ -262,6 +263,23 @@ function factFindings(facts: QualificationFacts | undefined): Finding[] {
     });
   }
 
+  // The 20-year model assumes a fixed feed-in tariff for the whole term, and
+  // that regime is being withdrawn for new plants. A plant that is only planned
+  // will almost certainly be commissioned after the change, so the projection
+  // it is about to produce is structurally optimistic on the feed-in side.
+  if (s.generationStatus === "planned") {
+    const w = regimeWarning();
+    // "info", not "review": this applies to EVERY planned plant, so escalating
+    // the verdict on it would make REQUIRES_REVIEW meaningless. It is a caveat
+    // about model accuracy, not a question about whether the project can go
+    // ahead — and it surfaces as the main risk instead.
+    f.push({
+      code: "feed_in_regime_change",
+      severity: "info",
+      message: `${w.headline}. ${w.detail}`,
+    });
+  }
+
   if (s.metering === "unclear") {
     f.push({
       code: "metering_unclear",
@@ -369,6 +387,8 @@ function mainRiskLine(findings: Finding[], input: EligibilityInput): string {
   if (blocker) return blocker.message;
   const review = findings.find((f) => f.severity === "review");
   if (review) return review.message;
+  const info = findings.find((f) => f.severity === "info");
+  if (info) return info.message;
   if (input.economics.eigenverbrauchsquote > 0.6) {
     return "Die angenommene Eigenverbrauchsquote ist der empfindlichste Punkt: ohne Lastgang bleibt sie eine Schätzung, und sie trägt das Ergebnis.";
   }

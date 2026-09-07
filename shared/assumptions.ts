@@ -86,7 +86,10 @@ export function isPresentableAsFact(meta: AssumptionMeta): boolean {
 export const MODEL_VERSION = "1.0.0";
 
 /** Bump whenever a default value or its provenance changes. */
-export const ASSUMPTION_SET = "de-mieterstrom-2026-09";
+// Bumped when the regulated defaults were corrected against their published
+// sources on 2026-09-06. Two reports carrying different assumption sets are not
+// comparable, which is the entire point of stamping it.
+export const ASSUMPTION_SET = "de-mieterstrom-2026-09.2";
 
 export const JURISDICTION = "DE" as const;
 export const CURRENCY = "EUR" as const;
@@ -181,25 +184,27 @@ export const MIETERSTROM_ASSUMPTIONS: Record<MieterstromAssumptionKey, Assumptio
     reference: null,
     asOf: null,
     verified: false,
-    note: "Der Mieterstrompreis ist gesetzlich nach oben begrenzt (Anteil des örtlichen Grundversorgungstarifs). Diese Obergrenze ist im Modell NICHT abgebildet und projektspezifisch zu prüfen.",
+    note: "Der Mieterstrompreis ist gesetzlich auf 90 % des örtlichen Grundversorgungstarifs begrenzt. Diese Obergrenze ist im Modell NICHT abgebildet: ohne den örtlichen Grundversorgungstarif lässt sie sich nicht prüfen.",
   },
   mieterstromZuschlagCtPerKwh: {
     label: "Mieterstromzuschlag",
     unit: "ct/kWh",
     source: "OFFICIAL_SOURCE",
-    reference: null,
-    asOf: null,
+    reference:
+      "EEG-Mieterstromzuschlag, Sätze 2026 nach Anlagengröße gestaffelt (Rechtsgrundlage und Quelle im Tarifregister, shared/tariffs.ts)",
+    asOf: "2026-09-06",
     verified: false,
-    note: "Gesetzlich geregelter, degressiver Zuschlag. Der hinterlegte Wert ist NICHT gegen die aktuelle amtliche Veröffentlichung verifiziert und vor jeder Verwendung zu prüfen.",
+    note: "Nach Anlagengröße gestaffelt und rund 1 % monatlich degressiv. Maßgeblich ist das Inbetriebnahmedatum. Vor Verwendung gegen die amtliche Veröffentlichung prüfen.",
   },
   einspeiseverguetungCtPerKwh: {
     label: "Einspeisevergütung",
     unit: "ct/kWh",
     source: "OFFICIAL_SOURCE",
-    reference: null,
-    asOf: null,
+    reference:
+      "EEG-Fördersätze für Teileinspeisung, gültig 01.08.2026–31.01.2027 (Rechtsgrundlage und Quelle im Tarifregister, shared/tariffs.ts)",
+    asOf: "2026-09-06",
     verified: false,
-    note: "Abhängig von Anlagengröße und Inbetriebnahmedatum, degressiv. Der hinterlegte Wert ist NICHT gegen die aktuelle amtliche Veröffentlichung verifiziert.",
+    note: "Nach Anlagengröße gestaffelt, halbjährlich degressiv. WICHTIG: Der Regierungsentwurf zum EEG 2027 schafft die feste Einspeisevergütung für Neuanlagen ab — für spätere Inbetriebnahmen ist eine feste Vergütung über 20 Jahre nicht mehr unterstellbar.",
   },
   investitionEurPerKwp: {
     label: "Investition",
@@ -277,12 +282,13 @@ export const IMPLICIT_ASSUMPTIONS: Record<string, AssumptionMeta & { value: stri
   co2Faktor: {
     label: "CO2-Faktor Strommix",
     unit: "t/MWh",
-    value: "0,38",
+    value: "0,344",
     source: "OFFICIAL_SOURCE",
-    reference: null,
-    asOf: null,
-    verified: false,
-    note: "Faktor für den deutschen Strommix; NICHT gegen die aktuelle amtliche Veröffentlichung verifiziert. Der Wert sinkt über die Zeit — die CO2-Einsparung ist daher tendenziell zu hoch ausgewiesen.",
+    reference:
+      "Umweltbundesamt, CO2-Emissionen pro Kilowattstunde Strom 2025 (344 g/kWh), veröffentlicht 23.03.2026",
+    asOf: "2026-09-06",
+    verified: true,
+    note: "Der Faktor sinkt jährlich (2024: 353 g/kWh). Eine über 20 Jahre konstante Fortschreibung überschätzt die Einsparung tendenziell.",
   },
   benchmarkIrrBand: {
     label: "Benchmark-Bandbreite IRR",

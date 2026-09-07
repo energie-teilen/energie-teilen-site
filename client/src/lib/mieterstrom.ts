@@ -7,6 +7,7 @@
  */
 
 import type { MieterstromInputs } from "../../../shared/schema";
+import { CO2_FACTOR, FEED_IN_TARIFF, MIETERSTROM_ZUSCHLAG, lookupRate } from "../../../shared/tariffs";
 
 export type MieterstromYear = {
   jahr: number;
@@ -35,8 +36,10 @@ export const DEFAULTS: MieterstromInputs = {
   anzahlWohneinheiten: 12,
   eigenverbrauchsquote: 0.45,
   strompreisMieterCtPerKwh: 32,
-  mieterstromZuschlagCtPerKwh: 2.5,
-  einspeiseverguetungCtPerKwh: 7.86,
+  mieterstromZuschlagCtPerKwh: lookupRate(MIETERSTROM_ZUSCHLAG, 30) ?? 2.36,
+  // Banded by plant size; 7,86 was a scalar guess that overstated feed-in
+  // revenue for every plant in the 10-40 kWp band. See shared/tariffs.ts.
+  einspeiseverguetungCtPerKwh: lookupRate(FEED_IN_TARIFF, 30) ?? 6.66,
   investitionEurPerKwp: 1400,
   betriebskostenEurPerKwpJahr: 20,
   laufzeitJahre: 20,
@@ -45,7 +48,11 @@ export const DEFAULTS: MieterstromInputs = {
   spezifischerErtragKwhPerKwp: 950,
 };
 
-export const CO2_FACTOR_DE_T_PER_MWH = 0.38;
+/**
+ * Umweltbundesamt figure for 2025 (344 g/kWh). The previous 0,38 overstated
+ * the headline environmental number by roughly 10 %.
+ */
+export const CO2_FACTOR_DE_T_PER_MWH = CO2_FACTOR.tPerMwh;
 
 export const round2 = (n: number): number => Math.round(n * 100) / 100;
 

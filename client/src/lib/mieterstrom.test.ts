@@ -10,6 +10,19 @@ import {
 /**
  * Reference KPIs for the DEFAULTS case were derived from an INDEPENDENT
  * reimplementation of the model (not a copy of the function under test).
+ *
+ * Re-derived 2026-09-06 after the regulated defaults were corrected against
+ * their published sources (see shared/tariffs.ts):
+ *   Einspeisevergütung  7,86 → 6,66 ct/kWh  (BNetzA band 10–40 kWp)
+ *   Mieterstromzuschlag 2,50 → 2,36 ct/kWh  (§ 21 Abs. 3 EEG 2023, same band)
+ *   CO2-Faktor          0,38 → 0,344 t/MWh  (Umweltbundesamt, 2025)
+ *
+ * The engine math is unchanged; only its inputs were wrong. The correction
+ * moves the headline default case by:
+ *   NPV   22.151,81 → 19.463,26 €   (−12,1 %)
+ *   IRR        9,56 → 8,94 %
+ *   CO2       92,98 → 84,17 t       (−9,5 %)
+ * The site had been overstating its own default scenario by roughly a tenth.
  */
 describe("calculateMieterstrom — DEFAULTS base case", () => {
   const r = calculateMieterstrom(DEFAULTS);
@@ -18,22 +31,22 @@ describe("calculateMieterstrom — DEFAULTS base case", () => {
     expect(r.kpis.investitionEur).toBe(42000);
   });
 
-  it("NPV matches the independent reference (€22,151.81)", () => {
-    expect(r.kpis.npvEur).toBeCloseTo(22151.81, 1);
+  it("NPV matches the independent reference (€19,463.26)", () => {
+    expect(r.kpis.npvEur).toBeCloseTo(19463.26, 1);
     expect(r.kpis.npvEur).toBeGreaterThan(0);
   });
 
   it("IRR matches a hand-computed reference within 0.1%", () => {
     expect(r.kpis.irrPct).not.toBeNull();
-    expect(r.kpis.irrPct as number).toBeCloseTo(9.56, 1);
+    expect(r.kpis.irrPct as number).toBeCloseTo(8.94, 1);
   });
 
-  it("amortisation interpolates to ~8.57 years", () => {
-    expect(r.kpis.amortisationsdauerJahre).toBeCloseTo(8.57, 1);
+  it("amortisation interpolates to ~8.95 years", () => {
+    expect(r.kpis.amortisationsdauerJahre).toBeCloseTo(8.95, 1);
   });
 
-  it("CO2 saving matches reference (~92.98 t)", () => {
-    expect(r.kpis.co2EinsparungT).toBeCloseTo(92.98, 1);
+  it("CO2 saving matches reference (~84.17 t)", () => {
+    expect(r.kpis.co2EinsparungT).toBeCloseTo(84.17, 1);
   });
 
   it("produces one row per Laufzeitjahr, numbered 1..N", () => {

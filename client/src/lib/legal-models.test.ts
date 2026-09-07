@@ -98,8 +98,14 @@ describe("the citation gate", () => {
 
 const SCAN_DIRS = ["client/src", "shared", "server", "api"];
 const SCAN_FILES = ["client/index.html"];
+/**
+ * Statutory citations may live in exactly two registers and the legal pages.
+ * A register stores them as DATA behind a gate that renders them only once
+ * verified; everywhere else they would be uncontrolled copy.
+ */
+const REGISTERS = ["shared/legal-models.ts", "shared/tariffs.ts"];
 const ALLOWED = [
-  "shared/legal-models.ts", // the register itself
+  ...REGISTERS,
   "client/src/pages/legal/", // Impressum / Datenschutz / AGB legitimately cite law
 ];
 const CITATION_PATTERN = /§\s*\d+[a-z]?\s*(EnWG|EEG|BGB|MsbG)|§§/;
@@ -119,6 +125,11 @@ function collect(dir: string, acc: string[] = []): string[] {
 }
 
 describe("no hard-coded statutory citations outside the register", () => {
+  // Pinned so a third register cannot be added quietly to dodge the guard.
+  it("permits exactly two registers", () => {
+    expect(REGISTERS).toEqual(["shared/legal-models.ts", "shared/tariffs.ts"]);
+  });
+
   it("scans a meaningful number of files", () => {
     const files = [...SCAN_DIRS.flatMap((d) => collect(d)), ...SCAN_FILES];
     expect(files.length).toBeGreaterThan(50);
