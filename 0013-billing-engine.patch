@@ -1,0 +1,1371 @@
+From c1791e8740dffeff556d2d6c7134c14e31401d5d Mon Sep 17 00:00:00 2001
+From: energie-teilen <noreply@energie-teilen.de>
+Date: Mon, 7 Sep 2026 20:49:32 +0000
+Subject: [PATCH] feat(engine): annual statement engine with exact cent
+ reconciliation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+shared/billing.ts turns measured quantities into per-participant
+statements. It closes the chain the previous two engines started: the
+metering concept says how it is measured, the allocation says who took
+which kilowatt-hour, this says what each of them pays.
+
+Money is integer cents end to end, and every total is the sum of the
+amounts above it rather than an independent recomputation — a statement
+whose line items do not add up to its total is worthless however good
+the physics behind it was. reconcile() re-checks those identities from
+the produced result alone, so a caller can assert the statement adds up
+without trusting the code that made it; the API returns it in the
+response.
+
+Also computed: the standing charge prorated by day (with the convention
+stated rather than applied silently), instalments netted off into a
+balance that goes negative for a credit, each participant's shared
+share, and the difference against full basic supply. Without the local
+basic-supply price both that difference and the working-price
+comparison are reported as undecidable rather than filled in with a
+plausible number. The VAT rate carries its own unverified provenance.
+
+- POST /api/v1/billing, listed in /api/v1/meta.
+- BillingPreview inside the allocation panel: one household's year,
+  where entering the single number only the visitor has — the local
+  basic-supply price — turns the comparison from undecidable into a
+  figure, and shows the cap comparison alongside it.
+
+38 new tests; 348 total. Typecheck, tests and build clean.
+---
+ client/src/components/AllocationPanel.tsx |   4 +
+ client/src/components/BillingPreview.tsx  | 259 ++++++++++++
+ client/src/lib/api-v1.test.ts             |  45 +++
+ client/src/lib/billing.test.ts            | 326 +++++++++++++++
+ server/api-v1.ts                          |  47 +++
+ shared/api-contract.ts                    |  82 ++++
+ shared/billing.ts                         | 464 ++++++++++++++++++++++
+ 7 files changed, 1227 insertions(+)
+ create mode 100644 client/src/components/BillingPreview.tsx
+ create mode 100644 client/src/lib/billing.test.ts
+ create mode 100644 shared/billing.ts
+
+diff --git a/client/src/components/AllocationPanel.tsx b/client/src/components/AllocationPanel.tsx
+index 5ed4210..654c9d0 100644
+--- a/client/src/components/AllocationPanel.tsx
++++ b/client/src/components/AllocationPanel.tsx
+@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
+ import { Info, Split } from "lucide-react";
+ import { track } from "@/lib/analytics";
+ import { AllocationDayChart } from "@/components/AllocationDayChart";
++import { BillingPreview } from "@/components/BillingPreview";
+ import {
+   ILLUSTRATIVE_PROFILE_DISCLAIMER_DE,
+   KEY_DESCRIPTION_DE,
+@@ -199,6 +200,9 @@ export function AllocationPanel({ inputs }: { inputs: MieterstromInputs }) {
+ 
+         <AllocationDayChart run={run} />
+ 
++        {/* The chain closes here: measured, allocated, billed. */}
++        <BillingPreview inputs={inputs} run={run} />
++
+         {/* Per-participant outcome */}
+         <div className="rounded-[20px] border border-border/60 bg-background/70 p-5">
+           <div className="flex items-baseline justify-between gap-4">
+diff --git a/client/src/components/BillingPreview.tsx b/client/src/components/BillingPreview.tsx
+new file mode 100644
+index 0000000..c258660
+--- /dev/null
++++ b/client/src/components/BillingPreview.tsx
+@@ -0,0 +1,259 @@
++import { useMemo, useState } from "react";
++import { Receipt } from "lucide-react";
++import {
++  billPeriod,
++  formatEur,
++  reconcile,
++  type BillingResult,
++} from "../../../shared/billing";
++import type { AllocationResult } from "../../../shared/allocation";
++import type { MieterstromInputs } from "../../../shared/schema";
++
++/**
++ * BillingPreview
++ *
++ * What the allocation is worth to one household over a year.
++ *
++ * The chain is the point: the metering concept says how it is measured, the
++ * allocation says who took which kilowatt-hour, and this says what they pay
++ * for it. Same engines the API runs.
++ *
++ * The saving against basic supply needs the local basic-supply price, which
++ * only the visitor has. Until it is entered the comparison is shown as
++ * undecidable rather than filled in with a plausible number.
++ */
++
++/** One illustrative day scaled to a year. Stated, never applied silently. */
++const ANNUALISATION_NOTE_DE =
++  "Jahreswerte sind der Beispieltag hochgerechnet (× 365). Für eine belastbare Abrechnung treten die gemessenen Jahresmengen an diese Stelle.";
++
++const PERIOD = { from: "2026-01-01", to: "2027-01-01" };
++const DAYS_PER_YEAR = 365;
++
++function Row({
++  label,
++  value,
++  strong,
++  muted,
++}: {
++  label: React.ReactNode;
++  value: React.ReactNode;
++  strong?: boolean;
++  muted?: boolean;
++}) {
++  return (
++    <div
++      className={`flex items-baseline justify-between gap-4 ${
++        strong ? "border-t border-border/60 pt-2.5" : ""
++      }`}
++    >
++      <span className={`text-sm leading-6 ${muted ? "text-muted-foreground" : "text-foreground/90"}`}>
++        {label}
++      </span>
++      <span
++        className={`shrink-0 tabular-nums ${
++          strong ? "font-display text-base font-semibold text-foreground" : "text-sm text-foreground"
++        }`}
++      >
++        {value}
++      </span>
++    </div>
++  );
++}
++
++export function BillingPreview({
++  inputs,
++  run,
++}: {
++  inputs: MieterstromInputs;
++  run: AllocationResult;
++}) {
++  // The visitor's own numbers. Empty means unknown, and unknown is reported.
++  const [reststrom, setReststrom] = useState<string>("");
++  const [grundversorgung, setGrundversorgung] = useState<string>("");
++
++  const reststromCt = reststrom === "" ? inputs.strompreisMieterCtPerKwh : Number(reststrom);
++  const grundversorgungCt = grundversorgung === "" ? undefined : Number(grundversorgung);
++
++  const result: BillingResult | null = useMemo(() => {
++    const first = run.participants[0];
++    if (!first) return null;
++    if (!Number.isFinite(reststromCt) || reststromCt < 0) return null;
++    if (grundversorgungCt !== undefined && (!Number.isFinite(grundversorgungCt) || grundversorgungCt < 0)) {
++      return null;
++    }
++
++    try {
++      return billPeriod({
++        period: PERIOD,
++        tariff: {
++          mieterstromCtPerKwh: inputs.strompreisMieterCtPerKwh,
++          reststromCtPerKwh: reststromCt,
++          grundpreisEurPerYear: 120,
++          grundversorgungCtPerKwh: grundversorgungCt,
++        },
++        participants: [
++          {
++            id: first.id,
++            label: first.label ?? undefined,
++            allocatedKwh: first.allocatedKwh * DAYS_PER_YEAR,
++            gridDrawKwh: first.gridDrawKwh * DAYS_PER_YEAR,
++          },
++        ],
++      });
++    } catch {
++      return null;
++    }
++  }, [run, inputs.strompreisMieterCtPerKwh, reststromCt, grundversorgungCt]);
++
++  if (!result) return null;
++
++  const s = result.statements[0];
++  const balanced = reconcile(result).ok;
++  const saving = s.savingVsGrundversorgungCents;
++
++  return (
++    <div className="rounded-[20px] border border-border/60 bg-background/70 p-5">
++      <p className="flex items-center gap-2 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
++        <Receipt className="h-3.5 w-3.5" />
++        Abrechnungsvorschau · {s.label ?? s.id} · ein Jahr
++      </p>
++
++      <div className="mt-4 grid gap-5 lg:grid-cols-2">
++        {/* The statement itself */}
++        <div className="space-y-2.5">
++          {s.lines.map((l) => (
++            <Row
++              key={l.code}
++              label={
++                <>
++                  {l.label}
++                  <span className="text-muted-foreground">
++                    {" "}
++                    · {l.quantity.toLocaleString("de-DE", { maximumFractionDigits: 0 })} {l.unit}
++                    {l.unit === "kWh"
++                      ? ` × ${l.unitPriceCt.toLocaleString("de-DE", { maximumFractionDigits: 2 })} ct`
++                      : ""}
++                  </span>
++                </>
++              }
++              value={formatEur(l.netCents)}
++            />
++          ))}
++          <Row label="Netto" value={formatEur(s.netCents)} muted />
++          <Row
++            label={`Umsatzsteuer ${(result.vatRate * 100).toLocaleString("de-DE")} %`}
++            value={formatEur(s.vatCents)}
++            muted
++          />
++          <Row label="Gesamtbetrag brutto" value={formatEur(s.grossCents)} strong />
++          {balanced ? (
++            <p className="pt-1 text-[0.68rem] text-muted-foreground">
++              Positionen und Summe stimmen auf den Cent überein — geprüft aus dem Ergebnis heraus.
++            </p>
++          ) : null}
++        </div>
++
++        {/* The two numbers only the visitor has */}
++        <div className="space-y-4">
++          <div className="grid items-end gap-3 sm:grid-cols-2">
++            <label className="block space-y-1.5">
++              <span className="text-[0.7rem] font-medium uppercase tracking-[0.14em] text-muted-foreground">
++                Reststrompreis
++              </span>
++              <span className="relative block">
++                <input
++                  type="number"
++                  min={0}
++                  step={0.1}
++                  value={reststrom}
++                  placeholder={inputs.strompreisMieterCtPerKwh.toFixed(1)}
++                  onChange={(e) => setReststrom(e.target.value)}
++                  className="w-full rounded-xl border border-border/70 bg-background px-3 py-2 pr-16 text-sm text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
++                />
++                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
++                  ct/kWh
++                </span>
++              </span>
++            </label>
++
++            <label className="block space-y-1.5">
++              <span className="text-[0.7rem] font-medium uppercase tracking-[0.14em] text-muted-foreground">
++                Grundversorgung
++              </span>
++              <span className="relative block">
++                <input
++                  type="number"
++                  min={0}
++                  step={0.1}
++                  value={grundversorgung}
++                  placeholder="unbekannt"
++                  onChange={(e) => setGrundversorgung(e.target.value)}
++                  className="w-full rounded-xl border border-border/70 bg-background px-3 py-2 pr-16 text-sm text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
++                />
++                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
++                  ct/kWh
++                </span>
++              </span>
++            </label>
++          </div>
++
++          {saving === null ? (
++            <div className="rounded-2xl border border-border/60 bg-card/70 p-4">
++              <p className="text-sm leading-6 text-foreground/90">
++                Ersparnis gegenüber der Grundversorgung:{" "}
++                <span className="font-medium">nicht bestimmbar</span>
++              </p>
++              <p className="mt-1.5 text-xs leading-6 text-muted-foreground">
++                Dafür fehlt der örtliche Grundversorgungstarif. Ein Wert genügt — er wird nicht
++                geschätzt, weil er je Netzgebiet unterschiedlich ist.
++              </p>
++            </div>
++          ) : (
++            <div
++              className={`rounded-2xl border p-4 ${
++                saving >= 0
++                  ? "border-primary/30 bg-primary/6"
++                  : "border-amber-500/30 bg-amber-500/6"
++              }`}
++            >
++              <p className="text-[0.7rem] font-medium uppercase tracking-[0.14em] text-muted-foreground">
++                {saving >= 0 ? "Ersparnis je Haushalt und Jahr" : "Mehrkosten je Haushalt und Jahr"}
++              </p>
++              <p className="mt-1 font-display text-2xl font-semibold tracking-[-0.02em] text-foreground">
++                {formatEur(Math.abs(saving))}
++              </p>
++              {result.priceCap.capCtPerKwh !== null ? (
++                <p className="mt-2 text-xs leading-6 text-muted-foreground">
++                  Vergleichswert für den Arbeitspreis aus diesem Tarif:{" "}
++                  {result.priceCap.capCtPerKwh.toLocaleString("de-DE", {
++                    maximumFractionDigits: 2,
++                  })}{" "}
++                  ct/kWh — angesetzt sind{" "}
++                  {inputs.strompreisMieterCtPerKwh.toLocaleString("de-DE", {
++                    maximumFractionDigits: 2,
++                  })}{" "}
++                  ct/kWh.
++                </p>
++              ) : null}
++            </div>
++          )}
++
++          {result.warnings
++            .filter((w) => w.code === "price_over_cap")
++            .map((w) => (
++              <p key={w.code} className="text-xs leading-6 text-amber-700">
++                {w.message}
++              </p>
++            ))}
++        </div>
++      </div>
++
++      <p className="mt-4 text-[0.68rem] leading-6 text-muted-foreground">
++        {ANNUALISATION_NOTE_DE} {result.conventions.join(" ")} {result.disclaimer}
++      </p>
++    </div>
++  );
++}
++
++export default BillingPreview;
+diff --git a/client/src/lib/api-v1.test.ts b/client/src/lib/api-v1.test.ts
+index cc8d6c6..741594a 100644
+--- a/client/src/lib/api-v1.test.ts
++++ b/client/src/lib/api-v1.test.ts
+@@ -12,6 +12,8 @@ import {
+   AllocationResponseSchema,
+   MesskonzeptRequestSchema,
+   MesskonzeptResponseSchema,
++  BillingRequestSchema,
++  BillingResponseSchema,
+ } from "../../../shared/api-contract";
+ import {
+   extractApiKey,
+@@ -231,3 +233,46 @@ describe("allocation contract", () => {
+     expect(AllocationResponseSchema.shape.recommendation.safeParse(null).success).toBe(true);
+   });
+ });
++
++describe("billing contract", () => {
++  const base = {
++    period: { from: "2026-01-01", to: "2027-01-01" },
++    tariff: { mieterstromCtPerKwh: 28, reststromCtPerKwh: 34, grundpreisEurPerYear: 120 },
++    participants: [{ id: "we-1", allocatedKwh: 1200, gridDrawKwh: 1800 }],
++  };
++
++  it("accepts a period, a tariff and at least one participant", () => {
++    expect(BillingRequestSchema.safeParse(base).success).toBe(true);
++    expect(BillingRequestSchema.safeParse({ ...base, participants: [] }).success).toBe(false);
++  });
++
++  it("rejects a reversed period rather than billing backwards", () => {
++    expect(
++      BillingRequestSchema.safeParse({
++        ...base,
++        period: { from: "2027-01-01", to: "2026-01-01" },
++      }).success,
++    ).toBe(false);
++  });
++
++  it("treats the basic-supply reference as optional", () => {
++    expect(
++      BillingRequestSchema.safeParse({
++        ...base,
++        tariff: { ...base.tariff, grundversorgungCtPerKwh: 36 },
++      }).success,
++    ).toBe(true);
++  });
++
++  it("returns the reconciliation alongside the statements", () => {
++    expect(BillingResponseSchema.shape.reconciliation).toBeDefined();
++    expect(BillingResponseSchema.shape.conventions).toBeDefined();
++    expect(BillingResponseSchema.shape.disclaimer).toBeDefined();
++  });
++
++  it("keeps every money field an integer count of cents", () => {
++    const totals = BillingResponseSchema.shape.totals;
++    expect(totals.shape.grossCents.safeParse(1234).success).toBe(true);
++    expect(totals.shape.grossCents.safeParse(12.34).success).toBe(false);
++  });
++});
+diff --git a/client/src/lib/billing.test.ts b/client/src/lib/billing.test.ts
+new file mode 100644
+index 0000000..cc83837
+--- /dev/null
++++ b/client/src/lib/billing.test.ts
+@@ -0,0 +1,326 @@
++import { describe, it, expect } from "vitest";
++import {
++  BILLING_DISCLAIMER_DE,
++  BillingError,
++  BillingInputSchema,
++  PRORATION_CONVENTION_DE,
++  VAT_STANDARD_RATE,
++  billPeriod,
++  daysInPeriod,
++  formatEur,
++  reconcile,
++  roundCents,
++  type BillingInput,
++  type Tariff,
++} from "../../../shared/billing";
++import { allocate, illustrativeDayProfile, illustrativeShares } from "../../../shared/allocation";
++
++const YEAR = { from: "2026-01-01", to: "2027-01-01" };
++
++const TARIFF: Tariff = {
++  mieterstromCtPerKwh: 28,
++  reststromCtPerKwh: 34,
++  grundpreisEurPerYear: 120,
++};
++
++function build(over: Partial<BillingInput> = {}): BillingInput {
++  return {
++    period: YEAR,
++    tariff: TARIFF,
++    participants: [
++      { id: "we-1", allocatedKwh: 1200, gridDrawKwh: 1800 },
++      { id: "we-2", allocatedKwh: 900, gridDrawKwh: 2100 },
++    ],
++    ...over,
++  };
++}
++
++describe("money handling", () => {
++  it("rounds half away from zero, so a credit and a charge round alike", () => {
++    expect(roundCents(0.5)).toBe(1);
++    expect(roundCents(-0.5)).toBe(-1);
++    expect(roundCents(1.5)).toBe(2);
++    expect(roundCents(-1.5)).toBe(-2);
++    expect(roundCents(2.4)).toBe(2);
++  });
++
++  it("formats cents as German euro amounts", () => {
++    expect(formatEur(123456)).toBe("1.234,56 €");
++    expect(formatEur(-500)).toBe("-5,00 €");
++    expect(formatEur(0)).toBe("0,00 €");
++  });
++});
++
++describe("period", () => {
++  it("counts days from the start date up to but not including the end", () => {
++    expect(daysInPeriod({ from: "2026-01-01", to: "2027-01-01" })).toBe(365);
++    expect(daysInPeriod({ from: "2024-01-01", to: "2025-01-01" })).toBe(366);
++    expect(daysInPeriod({ from: "2026-03-01", to: "2026-04-01" })).toBe(31);
++  });
++
++  it("rejects a reversed period at the schema boundary", () => {
++    expect(
++      BillingInputSchema.safeParse(build({ period: { from: "2027-01-01", to: "2026-01-01" } })).success,
++    ).toBe(false);
++  });
++
++  it("rejects a malformed date", () => {
++    expect(BillingInputSchema.safeParse(build({ period: { from: "01.01.2026", to: "2027-01-01" } })).success).toBe(
++      false,
++    );
++  });
++});
++
++describe("statement arithmetic", () => {
++  it("prices each energy stream at its own working price", () => {
++    const r = billPeriod(build());
++    const s = r.statements[0];
++    const byCode = Object.fromEntries(s.lines.map((l) => [l.code, l]));
++    expect(byCode.mieterstrom.netCents).toBe(1200 * 28);
++    expect(byCode.reststrom.netCents).toBe(1800 * 34);
++  });
++
++  it("prorates the standing charge across the days of the period", () => {
++    const full = billPeriod(build());
++    expect(full.statements[0].lines.find((l) => l.code === "grundpreis")!.netCents).toBe(12000);
++
++    const half = billPeriod(build({ period: { from: "2026-01-01", to: "2026-07-01" } }));
++    // 181 days of 365 at 120,00 EUR/year.
++    expect(half.statements[0].lines.find((l) => l.code === "grundpreis")!.netCents).toBe(
++      Math.round((12000 * 181) / 365),
++    );
++  });
++
++  it("states the proration convention rather than applying it silently", () => {
++    expect(billPeriod(build()).conventions).toContain(PRORATION_CONVENTION_DE);
++  });
++
++  it("makes the net total the sum of its own lines", () => {
++    const s = billPeriod(build()).statements[0];
++    expect(s.netCents).toBe(s.lines.reduce((acc, l) => acc + l.netCents, 0));
++  });
++
++  it("adds VAT at the standard rate by default", () => {
++    const r = billPeriod(build());
++    expect(r.vatRate).toBe(VAT_STANDARD_RATE);
++    const s = r.statements[0];
++    expect(s.vatCents).toBe(Math.round(s.netCents * VAT_STANDARD_RATE));
++    expect(s.grossCents).toBe(s.netCents + s.vatCents);
++  });
++
++  it("honours an explicit VAT rate", () => {
++    const r = billPeriod(build({ vatRate: 0.07 }));
++    expect(r.statements[0].vatCents).toBe(Math.round(r.statements[0].netCents * 0.07));
++  });
++
++  it("nets instalments off against the gross amount", () => {
++    const r = billPeriod(
++      build({
++        participants: [{ id: "we-1", allocatedKwh: 1200, gridDrawKwh: 1800, prepaidEur: 1000 }],
++      }),
++    );
++    const s = r.statements[0];
++    expect(s.prepaidCents).toBe(100_000);
++    expect(s.balanceCents).toBe(s.grossCents - 100_000);
++  });
++
++  it("reports a credit as a negative balance rather than as zero", () => {
++    const r = billPeriod(
++      build({ participants: [{ id: "we-1", allocatedKwh: 100, gridDrawKwh: 0, prepaidEur: 900 }] }),
++    );
++    expect(r.statements[0].balanceCents).toBeLessThan(0);
++    expect(r.warnings.map((w) => w.code)).toContain("refunds_due");
++  });
++
++  it("omits a line rather than printing a zero one", () => {
++    const r = billPeriod(build({ participants: [{ id: "we-1", allocatedKwh: 0, gridDrawKwh: 500 }] }));
++    expect(r.statements[0].lines.map((l) => l.code)).not.toContain("mieterstrom");
++    expect(r.warnings.map((w) => w.code)).toContain("participants_without_allocation");
++  });
++
++  it("reports the shared share of each participant's consumption", () => {
++    const s = billPeriod(build()).statements[0];
++    expect(s.consumptionKwh).toBe(3000);
++    expect(s.sharedShare).toBeCloseTo(1200 / 3000, 12);
++  });
++
++  it("reports no shared share for a participant who consumed nothing", () => {
++    const r = billPeriod(build({ participants: [{ id: "we-1", allocatedKwh: 0, gridDrawKwh: 0 }] }));
++    expect(r.statements[0].sharedShare).toBeNull();
++  });
++});
++
++describe("reconciliation", () => {
++  it("holds for the base case", () => {
++    expect(reconcile(billPeriod(build())).ok).toBe(true);
++  });
++
++  it("holds across many participants with awkward quantities", () => {
++    const participants = Array.from({ length: 137 }, (_, i) => ({
++      id: `we-${i}`,
++      allocatedKwh: 137.137 + i * 3.3333,
++      gridDrawKwh: 991.777 - i * 1.111,
++      prepaidEur: i % 4 === 0 ? 333.33 : undefined,
++    }));
++    const r = billPeriod(build({ participants }));
++    const check = reconcile(r);
++    expect(check.failures).toEqual([]);
++    expect(check.ok).toBe(true);
++  });
++
++  it("holds for a part-year period", () => {
++    expect(reconcile(billPeriod(build({ period: { from: "2026-04-15", to: "2026-09-30" } }))).ok).toBe(
++      true,
++    );
++  });
++
++  it("makes the period total the sum of the statements, with no residual", () => {
++    const r = billPeriod(build());
++    expect(r.totals.grossCents).toBe(r.statements.reduce((s, x) => s + x.grossCents, 0));
++    expect(r.totals.balanceCents).toBe(r.totals.grossCents - r.totals.prepaidCents);
++  });
++});
++
++describe("comparison against basic supply", () => {
++  it("reports the comparison as unknown without the reference tariff", () => {
++    const r = billPeriod(build());
++    expect(r.statements[0].savingVsGrundversorgungCents).toBeNull();
++    expect(r.totals.savingVsGrundversorgungCents).toBeNull();
++    expect(r.priceCap.status).toBe("unknown");
++    expect(r.warnings.map((w) => w.code)).toContain("price_cap_unchecked");
++    expect(r.missingData).toContain("Örtlicher Grundversorgungstarif");
++  });
++
++  it("computes the saving when the reference tariff is supplied", () => {
++    const r = billPeriod(
++      build({ tariff: { ...TARIFF, grundversorgungCtPerKwh: 36 } }),
++    );
++    const s = r.statements[0];
++    expect(s.savingVsGrundversorgungCents).not.toBeNull();
++    // Shared energy at 28 instead of 36 is the whole of the difference here.
++    expect(s.savingVsGrundversorgungCents!).toBeGreaterThan(0);
++    expect(r.totals.savingVsGrundversorgungCents).toBe(
++      r.statements.reduce((acc, x) => acc + (x.savingVsGrundversorgungCents ?? 0), 0),
++    );
++  });
++
++  it("reports a negative saving rather than hiding it", () => {
++    const r = billPeriod(
++      build({
++        tariff: { ...TARIFF, mieterstromCtPerKwh: 40, grundversorgungCtPerKwh: 30 },
++      }),
++    );
++    expect(r.statements[0].savingVsGrundversorgungCents!).toBeLessThan(0);
++  });
++
++  it("flags a working price above the comparison value", () => {
++    const r = billPeriod(
++      build({ tariff: { ...TARIFF, mieterstromCtPerKwh: 34, grundversorgungCtPerKwh: 36 } }),
++    );
++    expect(r.priceCap.status).toBe("over_cap");
++    expect(r.warnings.map((w) => w.code)).toContain("price_over_cap");
++  });
++
++  it("uses the basic-supply standing charge when one is given", () => {
++    const cheap = billPeriod(
++      build({
++        tariff: { ...TARIFF, grundversorgungCtPerKwh: 36, grundversorgungGrundpreisEurPerYear: 60 },
++      }),
++    );
++    const same = billPeriod(build({ tariff: { ...TARIFF, grundversorgungCtPerKwh: 36 } }));
++    expect(cheap.statements[0].savingVsGrundversorgungCents!).toBeLessThan(
++      same.statements[0].savingVsGrundversorgungCents!,
++    );
++  });
++});
++
++describe("data completeness and discipline", () => {
++  it("names the fields a statement would normally carry but does not have", () => {
++    const r = billPeriod(build());
++    expect(r.missingData).toContain("Zählernummer je Teilnehmer");
++    expect(r.missingData).toContain("Geleistete Abschlagszahlungen");
++  });
++
++  it("stops naming a field once it is supplied for anyone", () => {
++    const r = billPeriod(
++      build({
++        participants: [
++          { id: "we-1", allocatedKwh: 100, gridDrawKwh: 100, meterNumber: "1ESY0000" },
++          { id: "we-2", allocatedKwh: 100, gridDrawKwh: 100 },
++        ],
++      }),
++    );
++    expect(r.missingData).not.toContain("Zählernummer je Teilnehmer");
++    expect(r.statements[0].meterNumber).toBe("1ESY0000");
++    expect(r.statements[1].meterNumber).toBeNull();
++  });
++
++  it("flags the VAT rate as unverified rather than presenting it as established", () => {
++    expect(billPeriod(build()).warnings.map((w) => w.code)).toContain("vat_rate_unverified");
++  });
++
++  it("carries the disclaimer, and it claims no legal effect", () => {
++    const r = billPeriod(build());
++    expect(r.disclaimer).toBe(BILLING_DISCLAIMER_DE);
++    expect(BILLING_DISCLAIMER_DE).toMatch(/ersetzt weder/);
++  });
++
++  it("rejects duplicate participants", () => {
++    expect(() =>
++      billPeriod(
++        build({
++          participants: [
++            { id: "we-1", allocatedKwh: 1, gridDrawKwh: 1 },
++            { id: "we-1", allocatedKwh: 1, gridDrawKwh: 1 },
++          ],
++        }),
++      ),
++    ).toThrow(BillingError);
++  });
++
++  it("rejects negative quantities at the schema boundary", () => {
++    expect(
++      BillingInputSchema.safeParse(
++        build({ participants: [{ id: "a", allocatedKwh: -1, gridDrawKwh: 0 }] }),
++      ).success,
++    ).toBe(false);
++  });
++
++  it("is deterministic", () => {
++    expect(billPeriod(build())).toEqual(billPeriod(build()));
++  });
++});
++
++// The three engines have to compose: what the allocation says a participant
++// took is exactly what the statement charges them for.
++describe("composition with the allocation engine", () => {
++  it("bills precisely what the allocation allocated", () => {
++    const participants = 8;
++    const profile = illustrativeDayProfile({ kwp: 20, dailyConsumptionKwh: 8, participants });
++    const shares = illustrativeShares(participants);
++    const allocation = allocate({
++      key: "cascading",
++      generationKwh: profile.generationKwh,
++      participants: profile.consumptionKwh.map((c, i) => ({
++        id: `we-${i + 1}`,
++        share: shares[i],
++        consumptionKwh: c,
++      })),
++    });
++
++    const bill = billPeriod({
++      period: { from: "2026-06-01", to: "2026-06-02" },
++      tariff: { ...TARIFF, grundversorgungCtPerKwh: 36 },
++      participants: allocation.participants.map((p) => ({
++        id: p.id,
++        allocatedKwh: p.allocatedKwh,
++        gridDrawKwh: p.gridDrawKwh,
++      })),
++    });
++
++    expect(bill.totals.allocatedKwh).toBeCloseTo(allocation.totals.allocatedKwh, 9);
++    expect(bill.totals.consumptionKwh).toBeCloseTo(allocation.totals.consumptionKwh, 9);
++    expect(reconcile(bill).ok).toBe(true);
++    expect(bill.totals.savingVsGrundversorgungCents!).toBeGreaterThan(0);
++  });
++});
+diff --git a/server/api-v1.ts b/server/api-v1.ts
+index ece4646..8c046d9 100644
+--- a/server/api-v1.ts
++++ b/server/api-v1.ts
+@@ -27,8 +27,11 @@ import {
+   type MetaResponse,
+   type ProvenanceEntry,
+   AllocationRequestSchema,
++  BillingRequestSchema,
+   MesskonzeptRequestSchema,
++  type BillingResponse,
+ } from "../shared/api-contract.js";
++import { BillingError, billPeriod, reconcile } from "../shared/billing.js";
+ import {
+   AllocationError,
+   allocate,
+@@ -304,6 +307,7 @@ export function mountApiV1(
+         `${API_PREFIX}/eligibility`,
+         `${API_PREFIX}/messkonzept`,
+         `${API_PREFIX}/allocation`,
++        `${API_PREFIX}/billing`,
+       ],
+     };
+ 
+@@ -461,4 +465,47 @@ export function mountApiV1(
+     res.setHeader("Cache-Control", "no-store");
+     return res.status(200).json(body);
+   });
++
++  // --------------------------------------------------------------------------
++  // POST /api/v1/billing — annual statements from measured quantities
++  // --------------------------------------------------------------------------
++  app.post(`${API_PREFIX}/billing`, deps.limiter, requireKey, (req: Request, res: Response) => {
++    const parsed = BillingRequestSchema.safeParse(req.body);
++    if (!parsed.success) {
++      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++    }
++
++    const { reference, ...input } = parsed.data;
++
++    let result: ReturnType<typeof billPeriod>;
++    try {
++      result = billPeriod(input);
++    } catch (err) {
++      if (err instanceof BillingError) {
++        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
++      }
++      throw err;
++    }
++
++    const body: BillingResponse = {
++      ok: true,
++      reference: reference ?? null,
++      model: stamp(new Date()),
++      period: result.period,
++      days: result.days,
++      vatRate: result.vatRate,
++      statements: result.statements,
++      totals: result.totals,
++      priceCap: result.priceCap,
++      // Re-checked from the produced result, not assumed from the code path.
++      reconciliation: reconcile(result),
++      missingData: result.missingData,
++      warnings: result.warnings,
++      conventions: result.conventions,
++      disclaimer: result.disclaimer,
++    };
++
++    res.setHeader("Cache-Control", "no-store");
++    return res.status(200).json(body);
++  });
+ }
+diff --git a/shared/api-contract.ts b/shared/api-contract.ts
+index e91842b..cf3c37e 100644
+--- a/shared/api-contract.ts
++++ b/shared/api-contract.ts
+@@ -26,6 +26,11 @@ import { MieterstromInputsSchema } from "./schema.js";
+ import { QualificationFactsSchema, EligibilityVerdictSchema } from "./eligibility.js";
+ import { MesskonzeptInputSchema, MesskonzeptVariantSchema } from "./messkonzept.js";
+ import { AllocationKeySchema, ParticipantSchema } from "./allocation.js";
++import {
++  BillingParticipantSchema,
++  BillingPeriodSchema,
++  TariffSchema,
++} from "./billing.js";
+ 
+ /** Bumped only for a breaking change to request or response shape. */
+ export const API_VERSION = "1.0.0";
+@@ -358,3 +363,80 @@ export const AllocationResponseSchema = z.object({
+     .nullable(),
+ });
+ export type AllocationResponse = z.infer<typeof AllocationResponseSchema>;
++
++// ============================================================================
++// BILLING
++// ============================================================================
++
++export const BillingRequestSchema = z.object({
++  period: BillingPeriodSchema,
++  tariff: TariffSchema,
++  participants: z.array(BillingParticipantSchema).min(1).max(2000),
++  vatRate: z.number().min(0).max(1).optional(),
++  reference: z.string().max(120).optional(),
++});
++export type BillingRequest = z.infer<typeof BillingRequestSchema>;
++
++export const StatementLineSchema = z.object({
++  code: z.string(),
++  label: z.string(),
++  quantity: z.number(),
++  unit: z.string(),
++  unitPriceCt: z.number(),
++  netCents: z.number().int(),
++});
++
++export const ParticipantStatementSchema = z.object({
++  id: z.string(),
++  label: z.string().nullable(),
++  unitLabel: z.string().nullable(),
++  meterNumber: z.string().nullable(),
++  lines: z.array(StatementLineSchema),
++  netCents: z.number().int(),
++  vatCents: z.number().int(),
++  grossCents: z.number().int(),
++  prepaidCents: z.number().int(),
++  balanceCents: z.number().int(),
++  consumptionKwh: z.number(),
++  sharedShare: z.number().nullable(),
++  savingVsGrundversorgungCents: z.number().int().nullable(),
++});
++
++export const BillingResponseSchema = z.object({
++  ok: z.literal(true),
++  reference: z.string().nullable(),
++  model: ApiModelStampSchema,
++  period: BillingPeriodSchema,
++  days: z.number().int(),
++  vatRate: z.number(),
++  statements: z.array(ParticipantStatementSchema),
++  totals: z.object({
++    participants: z.number().int(),
++    allocatedKwh: z.number(),
++    gridDrawKwh: z.number(),
++    consumptionKwh: z.number(),
++    netCents: z.number().int(),
++    vatCents: z.number().int(),
++    grossCents: z.number().int(),
++    prepaidCents: z.number().int(),
++    balanceCents: z.number().int(),
++    savingVsGrundversorgungCents: z.number().int().nullable(),
++  }),
++  priceCap: z.object({
++    status: z.enum(["ok", "over_cap", "unknown"]),
++    capCtPerKwh: z.number().nullable(),
++  }),
++  /**
++   * The identities the engine guarantees, re-checked from the response itself
++   * so an integrator can assert the statement adds up without trusting us.
++   */
++  reconciliation: z.object({
++    ok: z.boolean(),
++    failures: z.array(z.object({ code: z.string(), detail: z.string() })),
++  }),
++  missingData: z.array(z.string()),
++  warnings: z.array(z.object({ code: z.string(), message: z.string() })),
++  conventions: z.array(z.string()),
++  disclaimer: z.string(),
++});
++export type BillingResponse = z.infer<typeof BillingResponseSchema>;
+diff --git a/shared/billing.ts b/shared/billing.ts
+new file mode 100644
+index 0000000..7de90c5
+--- /dev/null
++++ b/shared/billing.ts
+@@ -0,0 +1,464 @@
++/**
++ * shared/billing.ts
++ *
++ * Annual statement engine.
++ *
++ * The metering concept decides how a project can be built; the allocation
++ * decides who gets which kilowatt-hour. This decides what each participant
++ * actually pays — and unlike the other two, it has to be done again every
++ * year, for every unit, for as long as the plant runs. It is the part of the
++ * work that never ends, which is why it is worth automating properly.
++ *
++ * Money is handled in integer cents from end to end. Floating-point euros
++ * drift, and a statement whose line items do not sum to its total is worthless
++ * however good the physics behind it was. Every total here is the sum of the
++ * items above it, computed as a sum rather than recomputed independently.
++ *
++ * The engine states amounts. It does not assert which items a statement is
++ * required to contain, and it does not decide whether a tariff is permissible;
++ * it reports a cap comparison when the reference tariff is supplied and
++ * reports the comparison as undecidable when it is not.
++ */
++
++import { z } from "zod";
++import { priceCapCheck } from "./tariffs.js";
++
++// ============================================================================
++// MONEY
++// ============================================================================
++
++/**
++ * Round half away from zero, the convention German invoices use.
++ *
++ * JavaScript's Math.round rounds half UP, so it treats -0.5 and 0.5
++ * asymmetrically — a credit and a charge of the same size would round by
++ * different amounts.
++ */
++export function roundCents(value: number): number {
++  return value < 0 ? -Math.round(-value) : Math.round(value);
++}
++
++export function centsToEur(cents: number): number {
++  return cents / 100;
++}
++
++export function formatEur(cents: number): string {
++  return `${(cents / 100).toLocaleString("de-DE", {
++    minimumFractionDigits: 2,
++    maximumFractionDigits: 2,
++  })} €`;
++}
++
++// ============================================================================
++// INPUT
++// ============================================================================
++
++/** German standard VAT rate. Recorded with its own provenance, like every rate. */
++export const VAT_STANDARD_RATE = 0.19;
++export const VAT_SOURCE = {
++  label: "Umsatzsteuer-Regelsatz",
++  reference: null as string | null,
++  asOf: null as string | null,
++  verified: false,
++};
++
++/**
++ * How the standing charge is spread over a part-year period.
++ *
++ * Stated rather than assumed silently: a different convention changes the
++ * amount, so the result carries this string.
++ */
++export const PRORATION_CONVENTION_DE =
++  "Der Grundpreis wird taggenau anteilig berechnet (Tage im Zeitraum / 365).";
++const DAYS_PER_YEAR = 365;
++
++export const TariffSchema = z.object({
++  /** Working price for energy from the shared plant, ct/kWh net. */
++  mieterstromCtPerKwh: z.number().min(0).max(200),
++  /** Working price for the residual grid supply, ct/kWh net. */
++  reststromCtPerKwh: z.number().min(0).max(200),
++  /** Standing charge, EUR net per year. */
++  grundpreisEurPerYear: z.number().min(0).max(10_000),
++  /**
++   * Local basic-supply working price, ct/kWh. Supplied, the engine reports the
++   * cap comparison and the saving; omitted, it reports both as undecidable
++   * rather than comparing against an invented reference.
++   */
++  grundversorgungCtPerKwh: z.number().min(0).max(200).optional(),
++  /** Basic-supply standing charge, EUR net per year, for the same comparison. */
++  grundversorgungGrundpreisEurPerYear: z.number().min(0).max(10_000).optional(),
++});
++export type Tariff = z.infer<typeof TariffSchema>;
++
++const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Datum im Format JJJJ-MM-TT erwartet.");
++
++export const BillingPeriodSchema = z
++  .object({ from: IsoDate, to: IsoDate })
++  .refine((p) => p.from < p.to, { message: "Der Zeitraum muss mit dem Beginn anfangen." });
++export type BillingPeriod = z.infer<typeof BillingPeriodSchema>;
++
++export const BillingParticipantSchema = z.object({
++  id: z.string().min(1).max(64),
++  label: z.string().min(1).max(120).optional(),
++  /** Energy taken from the shared plant in the period, kWh. */
++  allocatedKwh: z.number().min(0).max(10_000_000),
++  /** Energy taken from the grid in the period, kWh. */
++  gridDrawKwh: z.number().min(0).max(10_000_000),
++  /** Instalments already paid, EUR gross. */
++  prepaidEur: z.number().min(0).max(1_000_000).optional(),
++  /** Meter identifier, carried through to the statement when supplied. */
++  meterNumber: z.string().max(64).optional(),
++  /** Unit designation, carried through when supplied. */
++  unitLabel: z.string().max(120).optional(),
++});
++export type BillingParticipant = z.infer<typeof BillingParticipantSchema>;
++
++export const BillingInputSchema = z.object({
++  period: BillingPeriodSchema,
++  tariff: TariffSchema,
++  participants: z.array(BillingParticipantSchema).min(1).max(2000),
++  /** Defaults to the standard rate. */
++  vatRate: z.number().min(0).max(1).optional(),
++});
++export type BillingInput = z.infer<typeof BillingInputSchema>;
++
++// ============================================================================
++// OUTPUT
++// ============================================================================
++
++export type StatementLine = {
++  code: string;
++  label: string;
++  /** kWh, or days for the standing charge. */
++  quantity: number;
++  unit: string;
++  /** ct/kWh, or ct/day. */
++  unitPriceCt: number;
++  /** Net amount in cents. The statement total is the sum of these. */
++  netCents: number;
++};
++
++export type ParticipantStatement = {
++  id: string;
++  label: string | null;
++  unitLabel: string | null;
++  meterNumber: string | null;
++  lines: StatementLine[];
++  netCents: number;
++  vatCents: number;
++  grossCents: number;
++  prepaidCents: number;
++  /** Positive: still owed. Negative: to be refunded. */
++  balanceCents: number;
++  consumptionKwh: number;
++  /** Share of consumption covered by the shared plant. Null if nothing used. */
++  sharedShare: number | null;
++  /**
++   * Gross difference against full basic supply for the same consumption.
++   * Positive means cheaper. Null when the reference tariff was not supplied.
++   */
++  savingVsGrundversorgungCents: number | null;
++};
++
++export type BillingTotals = {
++  participants: number;
++  allocatedKwh: number;
++  gridDrawKwh: number;
++  consumptionKwh: number;
++  netCents: number;
++  vatCents: number;
++  grossCents: number;
++  prepaidCents: number;
++  balanceCents: number;
++  savingVsGrundversorgungCents: number | null;
++};
++
++export type BillingResult = {
++  period: BillingPeriod;
++  days: number;
++  vatRate: number;
++  statements: ParticipantStatement[];
++  totals: BillingTotals;
++  /** Cap comparison for the tenant working price, or an explicit unknown. */
++  priceCap: { status: "ok" | "over_cap" | "unknown"; capCtPerKwh: number | null };
++  /** Fields absent from the input that a statement would normally carry. */
++  missingData: string[];
++  warnings: { code: string; message: string }[];
++  conventions: string[];
++  disclaimer: string;
++};
++
++export const BILLING_DISCLAIMER_DE =
++  "Rechnerische Abrechnung auf Basis der übergebenen Mengen und Preise. Sie ersetzt weder die Rechnungsstellung des Lieferanten noch deren fachliche Prüfung.";
++
++// ============================================================================
++// ENGINE
++// ============================================================================
++
++export class BillingError extends Error {
++  readonly code: string;
++  constructor(code: string, message: string) {
++    super(message);
++    this.name = "BillingError";
++    this.code = code;
++  }
++}
++
++const MS_PER_DAY = 86_400_000;
++
++/** Inclusive of the start date, exclusive of the end date. */
++export function daysInPeriod(period: BillingPeriod): number {
++  const from = Date.parse(`${period.from}T00:00:00Z`);
++  const to = Date.parse(`${period.to}T00:00:00Z`);
++  if (!Number.isFinite(from) || !Number.isFinite(to)) {
++    throw new BillingError("invalid_period", "Der Abrechnungszeitraum ist kein gültiges Datum.");
++  }
++  return Math.round((to - from) / MS_PER_DAY);
++}
++
++/** Net cents for an energy quantity at a ct/kWh price. */
++function energyCents(kwh: number, ctPerKwh: number): number {
++  return roundCents(kwh * ctPerKwh);
++}
++
++/** Net cents of the standing charge for the period, prorated by day. */
++function standingChargeCents(grundpreisEurPerYear: number, days: number): number {
++  return roundCents((grundpreisEurPerYear * 100 * days) / DAYS_PER_YEAR);
++}
++
++function statementFor(
++  p: BillingParticipant,
++  tariff: Tariff,
++  days: number,
++  vatRate: number,
++): ParticipantStatement {
++  const lines: StatementLine[] = [];
++
++  if (p.allocatedKwh > 0) {
++    lines.push({
++      code: "mieterstrom",
++      label: "Strom aus der Gemeinschaftsanlage",
++      quantity: p.allocatedKwh,
++      unit: "kWh",
++      unitPriceCt: tariff.mieterstromCtPerKwh,
++      netCents: energyCents(p.allocatedKwh, tariff.mieterstromCtPerKwh),
++    });
++  }
++
++  if (p.gridDrawKwh > 0) {
++    lines.push({
++      code: "reststrom",
++      label: "Reststrombezug aus dem Netz",
++      quantity: p.gridDrawKwh,
++      unit: "kWh",
++      unitPriceCt: tariff.reststromCtPerKwh,
++      netCents: energyCents(p.gridDrawKwh, tariff.reststromCtPerKwh),
++    });
++  }
++
++  const standing = standingChargeCents(tariff.grundpreisEurPerYear, days);
++  if (standing !== 0) {
++    lines.push({
++      code: "grundpreis",
++      label: "Grundpreis",
++      quantity: days,
++      unit: "Tage",
++      // Reported at day resolution so the line reconciles with its own amount.
++      unitPriceCt: days > 0 ? Math.round((standing / days) * 100) / 100 : 0,
++      netCents: standing,
++    });
++  }
++
++  // The total IS the sum of the lines. Recomputing it independently is how a
++  // statement ends up disagreeing with itself by a cent.
++  const netCents = lines.reduce((s, l) => s + l.netCents, 0);
++  const vatCents = roundCents(netCents * vatRate);
++  const grossCents = netCents + vatCents;
++  const prepaidCents = roundCents((p.prepaidEur ?? 0) * 100);
++
++  const consumptionKwh = p.allocatedKwh + p.gridDrawKwh;
++
++  let savingVsGrundversorgungCents: number | null = null;
++  if (tariff.grundversorgungCtPerKwh !== undefined) {
++    const refEnergy = energyCents(consumptionKwh, tariff.grundversorgungCtPerKwh);
++    const refStanding = standingChargeCents(
++      tariff.grundversorgungGrundpreisEurPerYear ?? tariff.grundpreisEurPerYear,
++      days,
++    );
++    const refNet = refEnergy + refStanding;
++    const refGross = refNet + roundCents(refNet * vatRate);
++    savingVsGrundversorgungCents = refGross - grossCents;
++  }
++
++  return {
++    id: p.id,
++    label: p.label ?? null,
++    unitLabel: p.unitLabel ?? null,
++    meterNumber: p.meterNumber ?? null,
++    lines,
++    netCents,
++    vatCents,
++    grossCents,
++    prepaidCents,
++    balanceCents: grossCents - prepaidCents,
++    consumptionKwh,
++    sharedShare: consumptionKwh > 0 ? p.allocatedKwh / consumptionKwh : null,
++    savingVsGrundversorgungCents,
++  };
++}
++
++const OPTIONAL_FIELD_LABELS: { key: string; label: string }[] = [
++  { key: "meterNumber", label: "Zählernummer je Teilnehmer" },
++  { key: "unitLabel", label: "Bezeichnung der Einheit" },
++  { key: "prepaidEur", label: "Geleistete Abschlagszahlungen" },
++];
++
++/**
++ * Produce the statements for one period.
++ *
++ * Deterministic and exact: every total is a sum of the amounts above it, so
++ * the statements reconcile to the period total with no residual.
++ */
++export function billPeriod(input: BillingInput): BillingResult {
++  const days = daysInPeriod(input.period);
++  if (days <= 0) {
++    throw new BillingError("empty_period", "Der Abrechnungszeitraum umfasst keine Tage.");
++  }
++
++  const ids = new Set<string>();
++  for (const p of input.participants) {
++    if (ids.has(p.id)) {
++      throw new BillingError("duplicate_participant", `Teilnehmer-ID "${p.id}" kommt mehrfach vor.`);
++    }
++    ids.add(p.id);
++  }
++
++  const vatRate = input.vatRate ?? VAT_STANDARD_RATE;
++  const statements = input.participants.map((p) => statementFor(p, input.tariff, days, vatRate));
++
++  const sum = (pick: (s: ParticipantStatement) => number) =>
++    statements.reduce((acc, s) => acc + pick(s), 0);
++
++  const savingsKnown = statements.every((s) => s.savingVsGrundversorgungCents !== null);
++
++  const totals: BillingTotals = {
++    participants: statements.length,
++    allocatedKwh: input.participants.reduce((s, p) => s + p.allocatedKwh, 0),
++    gridDrawKwh: input.participants.reduce((s, p) => s + p.gridDrawKwh, 0),
++    consumptionKwh: sum((s) => s.consumptionKwh),
++    netCents: sum((s) => s.netCents),
++    vatCents: sum((s) => s.vatCents),
++    grossCents: sum((s) => s.grossCents),
++    prepaidCents: sum((s) => s.prepaidCents),
++    balanceCents: sum((s) => s.balanceCents),
++    savingVsGrundversorgungCents: savingsKnown
++      ? sum((s) => s.savingVsGrundversorgungCents ?? 0)
++      : null,
++  };
++
++  const missingData: string[] = [];
++  for (const field of OPTIONAL_FIELD_LABELS) {
++    const anyPresent = input.participants.some(
++      (p) => (p as unknown as Record<string, unknown>)[field.key] !== undefined,
++    );
++    if (!anyPresent) missingData.push(field.label);
++  }
++  if (input.tariff.grundversorgungCtPerKwh === undefined) {
++    missingData.push("Örtlicher Grundversorgungstarif");
++  }
++
++  const warnings: { code: string; message: string }[] = [];
++
++  const cap = priceCapCheck(input.tariff.mieterstromCtPerKwh, input.tariff.grundversorgungCtPerKwh);
++  if (cap.status === "over_cap" && cap.capCtPerKwh !== null) {
++    warnings.push({
++      code: "price_over_cap",
++      message: `Der Arbeitspreis von ${input.tariff.mieterstromCtPerKwh.toLocaleString("de-DE")} ct/kWh liegt über dem Vergleichswert von ${cap.capCtPerKwh.toLocaleString("de-DE")} ct/kWh, der sich aus dem übergebenen Grundversorgungstarif ergibt.`,
++    });
++  }
++  if (cap.status === "unknown") {
++    warnings.push({
++      code: "price_cap_unchecked",
++      message:
++        "Ohne den örtlichen Grundversorgungstarif lässt sich der Vergleichswert für den Arbeitspreis nicht bilden.",
++    });
++  }
++
++  const noAllocation = statements.filter((s) => s.consumptionKwh > 0 && s.lines.every((l) => l.code !== "mieterstrom"));
++  if (noAllocation.length > 0) {
++    warnings.push({
++      code: "participants_without_allocation",
++      message: `${noAllocation.length} Teilnehmer haben im Zeitraum keinen Strom aus der Anlage bezogen und werden vollständig über den Reststrom abgerechnet.`,
++    });
++  }
++
++  const refunds = statements.filter((s) => s.balanceCents < 0).length;
++  if (refunds > 0) {
++    warnings.push({
++      code: "refunds_due",
++      message: `${refunds} Teilnehmer haben ein Guthaben aus zu hohen Abschlägen.`,
++    });
++  }
++
++  if (!VAT_SOURCE.verified) {
++    warnings.push({
++      code: "vat_rate_unverified",
++      message: `Der angesetzte Umsatzsteuersatz von ${(vatRate * 100).toLocaleString("de-DE")} % ist nicht gegen eine benannte Quelle geprüft und projektspezifisch zu bestätigen.`,
++    });
++  }
++
++  return {
++    period: input.period,
++    days,
++    vatRate,
++    statements,
++    totals,
++    priceCap: cap,
++    missingData,
++    warnings,
++    conventions: [PRORATION_CONVENTION_DE],
++    disclaimer: BILLING_DISCLAIMER_DE,
++  };
++}
++
++/**
++ * Independent reconciliation of a result.
++ *
++ * Recomputes the identities the engine is supposed to guarantee, from the
++ * output alone. It exists so a caller — or a test — can assert the statement
++ * adds up without trusting the code that produced it.
++ */
++export function reconcile(result: BillingResult): {
++  ok: boolean;
++  failures: { code: string; detail: string }[];
++} {
++  const failures: { code: string; detail: string }[] = [];
++
++  for (const s of result.statements) {
++    const lineSum = s.lines.reduce((acc, l) => acc + l.netCents, 0);
++    if (lineSum !== s.netCents) {
++      failures.push({
++        code: "statement_lines_do_not_sum",
++        detail: `${s.id}: Positionen ${lineSum}, ausgewiesen ${s.netCents}`,
++      });
++    }
++    if (s.netCents + s.vatCents !== s.grossCents) {
++      failures.push({ code: "gross_mismatch", detail: `${s.id}` });
++    }
++    if (s.grossCents - s.prepaidCents !== s.balanceCents) {
++      failures.push({ code: "balance_mismatch", detail: `${s.id}` });
++    }
++  }
++
++  const sum = (pick: (s: ParticipantStatement) => number) =>
++    result.statements.reduce((acc, s) => acc + pick(s), 0);
++
++  if (sum((s) => s.netCents) !== result.totals.netCents) {
++    failures.push({ code: "totals_net_mismatch", detail: "Summe der Teilnehmer" });
++  }
++  if (sum((s) => s.grossCents) !== result.totals.grossCents) {
++    failures.push({ code: "totals_gross_mismatch", detail: "Summe der Teilnehmer" });
++  }
++
++  return { ok: failures.length === 0, failures };
++}
+-- 
+2.43.0
+
