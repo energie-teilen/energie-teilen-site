@@ -32,15 +32,21 @@
  */
 
 import { z } from "zod";
+import { INTERVALS_NORMAL_DAY, INTERVAL_MINUTES as MARKET_INTERVAL_MINUTES } from "./market-time.js";
 
 // ============================================================================
 // TIME BASE
 // ============================================================================
 
-/** Settlement resolution for the German market. */
-export const INTERVAL_MINUTES = 15;
+/**
+ * Settlement resolution, taken from the market time base so there is one
+ * source of truth. INTERVALS_PER_DAY is the ORDINARY day only: two days a
+ * year have 92 and 100 intervals, and anything that needs the real count for
+ * a specific date asks shared/market-time.ts for that day's grid.
+ */
+export const INTERVAL_MINUTES = MARKET_INTERVAL_MINUTES;
 export const INTERVALS_PER_HOUR = 60 / INTERVAL_MINUTES;
-export const INTERVALS_PER_DAY = 24 * INTERVALS_PER_HOUR;
+export const INTERVALS_PER_DAY = INTERVALS_NORMAL_DAY;
 
 /** Bounded so a single request cannot be turned into an unbounded computation. */
 export const MAX_INTERVALS = 35_040; // one non-leap year at 15 minutes
@@ -446,15 +452,22 @@ export function illustrativeDayProfile(options: {
   participants: number;
   /** Peak-sun equivalent hours for the modelled day. */
   peakSunHours?: number;
+  /**
+   * Length of the day being modelled. Pass the real count from
+   * shared/market-time.ts when the day is a clock-change day: on those the
+   * profile must be 92 or 100 values long, not 96.
+   */
+  intervals?: number;
 }): { generationKwh: number[]; consumptionKwh: number[][] } {
   const { kwp, dailyConsumptionKwh, participants } = options;
   const peakSunHours = options.peakSunHours ?? 3.5;
+  const n = options.intervals ?? INTERVALS_PER_DAY;
 
-  // Generation: raised cosine over a 12-hour window centred at interval 48.
-  const raw = zeros(INTERVALS_PER_DAY);
+  // Generation: raised cosine over a 12-hour window centred on solar noon.
+  const raw = zeros(n);
   const halfWindow = 6 * INTERVALS_PER_HOUR;
-  for (let t = 0; t < INTERVALS_PER_DAY; t++) {
-    const offset = t - INTERVALS_PER_DAY / 2;
+  for (let t = 0; t < n; t++) {
+    const offset = t - n / 2;
     if (Math.abs(offset) >= halfWindow) continue;
     raw[t] = 0.5 * (1 + Math.cos((Math.PI * offset) / halfWindow));
   }
@@ -470,8 +483,8 @@ export function illustrativeDayProfile(options: {
   for (let p = 0; p < participants; p++) {
     const shiftHours = ((p % 5) - 2) * 0.75;
     const scale = 1 + ((p % 3) - 1) * 0.2;
-    const shape = zeros(INTERVALS_PER_DAY);
-    for (let t = 0; t < INTERVALS_PER_DAY; t++) {
+    const shape = zeros(n);
+    for (let t = 0; t < n; t++) {
       const hour = t / INTERVALS_PER_HOUR - shiftHours;
       const base = 0.35;
       const morning = 0.9 * Math.exp(-Math.pow(hour - 7.5, 2) / 2.5);

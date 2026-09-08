@@ -28,9 +28,25 @@ import {
   type ProvenanceEntry,
   AllocationRequestSchema,
   BillingRequestSchema,
+  IdentifierCheckRequestSchema,
+  MAKO_PREFIX,
+  MarketGridRequestSchema,
   MesskonzeptRequestSchema,
+  MsconsRequestSchema,
   type BillingResponse,
+  type IdentifierCheckResponse,
+  type MarketGridResponse,
+  type MsconsResponse,
 } from "../shared/api-contract.js";
+import {
+  MarketTimeError,
+  dayGrid,
+  edifact303,
+  rangeGrid,
+} from "../shared/market-time.js";
+import { CHECK_DIGIT_ALGORITHMS, validateMessageIdentifiers } from "../shared/market-ids.js";
+import { MsconsError, buildMscons } from "../shared/mscons.js";
+import { verifyInterchange } from "../shared/edifact.js";
 import { BillingError, billPeriod, reconcile } from "../shared/billing.js";
 import {
   AllocationError,
@@ -308,6 +324,9 @@ export function mountApiV1(
         `${API_PREFIX}/messkonzept`,
         `${API_PREFIX}/allocation`,
         `${API_PREFIX}/billing`,
+        `${MAKO_PREFIX}/grid`,
+        `${MAKO_PREFIX}/identifiers`,
+        `${MAKO_PREFIX}/mscons`,
       ],
     };
 
@@ -503,6 +522,144 @@ export function mountApiV1(
       warnings: result.warnings,
       conventions: result.conventions,
       disclaimer: result.disclaimer,
+    };
+
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json(body);
+  });
+
+  // --------------------------------------------------------------------------
+  // GET /api/v1/mako/grid — the real quarter-hour grid of a day or range
+  // --------------------------------------------------------------------------
+  app.get(`${MAKO_PREFIX}/grid`, deps.limiter, requireKey, (req: Request, res: Response) => {
+    const parsed = MarketGridRequestSchema.safeParse(req.query);
+    if (!parsed.success) {
+      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+    }
+
+    try {
+      const q = parsed.data;
+      const grid =
+        q.date !== undefined
+          ? (() => {
+              const g = dayGrid(q.date);
+              return {
+                from: g.date,
+                to: g.date,
+                intervals: g.intervals,
+                days: [{ date: g.date, intervals: g.intervals, kind: g.kind }],
+                startsUtcMs: g.startsUtcMs,
+              };
+            })()
+          : (() => {
+              const r = rangeGrid(q.from!, q.to!);
+              return {
+                from: r.from,
+                to: r.to,
+                intervals: r.intervals,
+                days: r.days.map((d) => ({ date: d.date, intervals: d.intervals, kind: d.kind })),
+                startsUtcMs: r.startsUtcMs,
+              };
+            })();
+
+      const body: MarketGridResponse = {
+        ok: true,
+        model: stamp(new Date()),
+        timezone: "Europe/Berlin",
+        from: grid.from,
+        to: grid.to,
+        intervals: grid.intervals,
+        days: grid.days,
+        dstDays: grid.days
+          .filter((d) => d.kind !== "normal")
+          .map((d) => ({ date: d.date, intervals: d.intervals })),
+        firstIntervalStart: edifact303(grid.startsUtcMs[0]),
+        lastIntervalStart: edifact303(grid.startsUtcMs[grid.startsUtcMs.length - 1]),
+      };
+
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(200).json(body);
+    } catch (err) {
+      if (err instanceof MarketTimeError) {
+        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+      }
+      throw err;
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // POST /api/v1/mako/identifiers — check before anything is sent
+  // --------------------------------------------------------------------------
+  app.post(`${MAKO_PREFIX}/identifiers`, deps.limiter, requireKey, (req: Request, res: Response) => {
+    const parsed = IdentifierCheckRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+    }
+
+    const result = validateMessageIdentifiers(parsed.data);
+    const body: IdentifierCheckResponse = {
+      ok: true,
+      model: stamp(new Date()),
+      valid: result.ok,
+      results: result.results,
+      problems: result.problems,
+      algorithms: Object.values(CHECK_DIGIT_ALGORITHMS).map((a) => ({
+        id: a.id,
+        name: a.name,
+        appliesTo: a.appliesTo,
+        verified: a.verified,
+        openQuestion: a.openQuestion ?? null,
+      })),
+    };
+
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json(body);
+  });
+
+  // --------------------------------------------------------------------------
+  // POST /api/v1/mako/mscons — build the metering-value message
+  // --------------------------------------------------------------------------
+  app.post(`${MAKO_PREFIX}/mscons`, deps.limiter, requireKey, (req: Request, res: Response) => {
+    const parsed = MsconsRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+    }
+
+    const { reference, ...input } = parsed.data;
+
+    let result: ReturnType<typeof buildMscons>;
+    try {
+      result = buildMscons(input);
+    } catch (err) {
+      // Wrong series length for a clock-change day, a malformed identifier, a
+      // duplicated Messlokation: the caller's input, with the reason named.
+      if (err instanceof MsconsError || err instanceof MarketTimeError) {
+        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+      }
+      throw err;
+    }
+
+    const body: MsconsResponse = {
+      ok: true,
+      reference: reference ?? null,
+      model: stamp(new Date()),
+      message: result.message,
+      bytes: result.bytes,
+      controlReference: result.controlReference,
+      messageReference: result.messageReference,
+      grid: result.grid,
+      totals: result.totals,
+      // Read back out of the produced message, not assumed.
+      syntax: verifyInterchange(result.message),
+      profile: {
+        id: result.profile.id,
+        messageType: result.profile.messageType,
+        directory: result.profile.directory,
+        associationCode: result.profile.associationCode,
+        verified: result.profile.verified,
+        openQuestion: result.profile.openQuestion ?? null,
+      },
+      warnings: result.warnings,
     };
 
     res.setHeader("Cache-Control", "no-store");

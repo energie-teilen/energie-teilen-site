@@ -4,6 +4,7 @@ import { BreakEvenPanel } from "@/components/BreakEvenPanel";
 import { EligibilityPanel } from "@/components/EligibilityPanel";
 import { MesskonzeptPanel, type MesskonzeptAnswers } from "@/components/MesskonzeptPanel";
 import { AllocationPanel } from "@/components/AllocationPanel";
+import { MarktkommunikationPanel } from "@/components/MarktkommunikationPanel";
 import type { QualificationFacts } from "../../../shared/eligibility";
 import { evaluateEligibility } from "../../../shared/eligibility";
 import { track } from "@/lib/analytics";
@@ -682,6 +683,9 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
 
         {/* What the metering is for: the split, and what it is worth. */}
         <AllocationPanel inputs={inputs} />
+
+        {/* Where a project stops being a spreadsheet. */}
+        <MarktkommunikationPanel inputs={inputs} />
 
         <LeadCaptureBand
           inputs={inputs}

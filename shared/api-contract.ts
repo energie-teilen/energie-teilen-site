@@ -440,3 +440,156 @@ export const BillingResponseSchema = z.object({
   disclaimer: z.string(),
 });
 export type BillingResponse = z.infer<typeof BillingResponseSchema>;
+
+// ============================================================================
+// MARKTKOMMUNIKATION
+// ============================================================================
+
+export const MAKO_PREFIX = `${API_PREFIX}/mako`;
+
+export const MarketGridRequestSchema = z
+  .object({
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  })
+  .refine((v) => (v.date !== undefined) !== (v.from !== undefined && v.to !== undefined), {
+    message: "Entweder ein Datum oder ein Zeitraum aus from und to angeben.",
+  });
+export type MarketGridRequest = z.infer<typeof MarketGridRequestSchema>;
+
+export const MarketGridResponseSchema = z.object({
+  ok: z.literal(true),
+  model: ApiModelStampSchema,
+  timezone: z.literal("Europe/Berlin"),
+  from: z.string(),
+  to: z.string(),
+  /** Real interval count. Not days x 96. */
+  intervals: z.number().int(),
+  days: z.array(
+    z.object({
+      date: z.string(),
+      intervals: z.number().int(),
+      kind: z.enum(["normal", "dst_short", "dst_long"]),
+    }),
+  ),
+  /** Days in the range that are not 96 intervals long. */
+  dstDays: z.array(z.object({ date: z.string(), intervals: z.number().int() })),
+  /** First and last interval start, as EDIFACT format 303. */
+  firstIntervalStart: z.string(),
+  lastIntervalStart: z.string(),
+});
+export type MarketGridResponse = z.infer<typeof MarketGridResponseSchema>;
+
+export const IdentifierCheckRequestSchema = z.object({
+  senderCode: z.string().max(64),
+  receiverCode: z.string().max(64),
+  malo: z.string().max(64).optional(),
+  melo: z.string().max(64).optional(),
+  balancingAreaEic: z.string().max(64).optional(),
+});
+export type IdentifierCheckRequest = z.infer<typeof IdentifierCheckRequestSchema>;
+
+export const IdValidationSchema = z.object({
+  value: z.string(),
+  format: z.enum(["ok", "invalid"]),
+  /**
+   * Never "ok" while the check-digit algorithm is unverified — the same gate
+   * the statutory citations use.
+   */
+  checkDigit: z.enum(["ok", "mismatch", "algorithm_unverified"]),
+  computed: z.string().nullable(),
+  problems: z.array(z.string()),
+});
+
+export const IdentifierCheckResponseSchema = z.object({
+  ok: z.literal(true),
+  model: ApiModelStampSchema,
+  valid: z.boolean(),
+  results: z.record(z.string(), IdValidationSchema),
+  problems: z.array(z.string()),
+  algorithms: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      appliesTo: z.string(),
+      verified: z.boolean(),
+      openQuestion: z.string().nullable(),
+    }),
+  ),
+});
+export type IdentifierCheckResponse = z.infer<typeof IdentifierCheckResponseSchema>;
+
+export const MsconsRequestSchema = z.object({
+  period: z.union([
+    z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }),
+    z.object({
+      from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    }),
+  ]),
+  sender: z.object({ code: z.string().max(64), qualifier: z.string().max(8).optional() }),
+  receiver: z.object({ code: z.string().max(64), qualifier: z.string().max(8).optional() }),
+  locations: z
+    .array(
+      z.object({
+        melo: z.string().max(64),
+        malo: z.string().max(64).optional(),
+        direction: z.enum(["consumption", "feed_in"]),
+        valuesKwh: z.array(z.number().min(0)).min(1).max(35_040),
+        statuses: z.array(z.enum(["measured", "substituted", "estimated"])).optional(),
+      }),
+    )
+    .min(1)
+    .max(200),
+  controlReference: z.string().max(14).optional(),
+  messageReference: z.string().max(14).optional(),
+  test: z.boolean().optional(),
+  reference: z.string().max(120).optional(),
+});
+export type MsconsRequest = z.infer<typeof MsconsRequestSchema>;
+
+export const MsconsResponseSchema = z.object({
+  ok: z.literal(true),
+  reference: z.string().nullable(),
+  model: ApiModelStampSchema,
+  /** The interchange, ready to hand to a transport. */
+  message: z.string(),
+  bytes: z.number().int(),
+  controlReference: z.string(),
+  messageReference: z.string(),
+  grid: z.object({
+    intervals: z.number().int(),
+    from: z.string(),
+    to: z.string(),
+    dstDays: z.array(z.object({ date: z.string(), intervals: z.number().int() })),
+  }),
+  totals: z.array(
+    z.object({
+      melo: z.string(),
+      direction: z.enum(["consumption", "feed_in"]),
+      kwh: z.number(),
+      values: z.number().int(),
+    }),
+  ),
+  /**
+   * Syntax integrity re-checked from the produced message: segment counts and
+   * control references read back out, not assumed from the code path.
+   */
+  syntax: z.object({
+    ok: z.boolean(),
+    messageCount: z.number().int(),
+    findings: z.array(z.object({ code: z.string(), message: z.string() })),
+  }),
+  /** Message type, directory and whether the segment usage is verified. */
+  profile: z.object({
+    id: z.string(),
+    messageType: z.string(),
+    directory: z.object({ version: z.string(), release: z.string(), agency: z.string() }),
+    associationCode: z.string(),
+    verified: z.boolean(),
+    openQuestion: z.string().nullable(),
+  }),
+  warnings: z.array(z.object({ code: z.string(), message: z.string() })),
+});
+export type MsconsResponse = z.infer<typeof MsconsResponseSchema>;
