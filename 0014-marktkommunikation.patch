@@ -1,0 +1,3450 @@
+From c019bd99d0bf1ca0797e6bb21bb4b41aaed06ad0 Mon Sep 17 00:00:00 2001
+From: energie-teilen <noreply@energie-teilen.de>
+Date: Mon, 7 Sep 2026 21:09:16 +0000
+Subject: [PATCH] feat(mako): market time base, market identifiers, EDIFACT
+ syntax and MSCONS
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Four layers that move quarter-hour values into the market, each with its
+own correctness claim and each tested for it.
+
+shared/market-time.ts — the German market runs on a LOCAL quarter-hour
+grid, and that grid is not 96 intervals long. The last Sunday in March
+has 92, the last Sunday in October has 100. The interval count is
+derived from the elapsed time between two local midnights rather than
+assumed, so nothing downstream can silently drop four intervals in
+spring or double-count four in autumn. A full year still totals 35 040
+because the two changes cancel, which is exactly why a year-level check
+proves nothing; a test pins that trap. The repeated October hour is
+distinguished for humans by an A/B label and on the wire by its UTC
+offset. No timezone dependency: the IANA rules come from the platform
+through Intl.
+
+shared/market-ids.ts — MaLo, MeLo, BDEW code number and EIC. Format
+rules need nobody's publication and are asserted plainly; check-digit
+algorithms are somebody else's specification, so each is registered with
+its own verified flag and a validator reports `algorithm_unverified`
+rather than "valid" until that flag is set. Same gate the statutory
+citations use.
+
+shared/edifact.ts — ISO 9735 level A. Escaping is where naive
+implementations break: an OBIS code contains the component separator, a
+UTC offset contains the element separator, and a partner name can
+contain either. Values never reach the wire unescaped, the parser
+reverses it exactly, and the round trip is tested against payloads built
+out of the reserved characters. UNT segment counts and the UNZ control
+reference are computed from content, and verifyInterchange() re-checks
+them by reading the produced message back — with tests that corrupt a
+known-good message to establish the verifier would catch a broken
+builder.
+
+shared/mscons.ts — the metering-value message, assembled on the real
+grid with identifiers validated before anything is sent. A 96-value
+series for a clock-change day is refused with the reason named, rather
+than padded or truncated. Substituted and estimated values carry their
+own qualifier, because settlement treats them differently. The segment
+profile is a published format description that changes on a release
+cycle: it is registered unverified, the interchange is marked as a test
+while it stays that way, and the result says which part is proven and
+which is not.
+
+Also: illustrativeDayProfile() takes the day's real interval count, and
+the allocation module's resolution constants now come from the market
+time base so there is one source of truth.
+
+- GET  /api/v1/mako/grid
+- POST /api/v1/mako/identifiers
+- POST /api/v1/mako/mscons
+- MarktkommunikationPanel: pick any of the three kinds of day, see the
+  interval count, the labels around the transition, the generated
+  message and its independent syntax check.
+
+137 new tests; 485 total. Typecheck, tests and build clean.
+---
+ .../components/MarktkommunikationPanel.tsx    | 295 +++++++++++
+ client/src/lib/edifact.test.ts                | 257 +++++++++
+ client/src/lib/market-ids.test.ts             | 202 +++++++
+ client/src/lib/market-time.test.ts            | 232 +++++++++
+ client/src/lib/mscons.test.ts                 | 344 ++++++++++++
+ client/src/pages/Home.tsx                     |   4 +
+ server/api-v1.ts                              | 157 ++++++
+ shared/allocation.ts                          |  31 +-
+ shared/api-contract.ts                        | 153 ++++++
+ shared/edifact.ts                             | 491 ++++++++++++++++++
+ shared/market-ids.ts                          | 307 +++++++++++
+ shared/market-time.ts                         | 332 ++++++++++++
+ shared/mscons.ts                              | 411 +++++++++++++++
+ 13 files changed, 3207 insertions(+), 9 deletions(-)
+ create mode 100644 client/src/components/MarktkommunikationPanel.tsx
+ create mode 100644 client/src/lib/edifact.test.ts
+ create mode 100644 client/src/lib/market-ids.test.ts
+ create mode 100644 client/src/lib/market-time.test.ts
+ create mode 100644 client/src/lib/mscons.test.ts
+ create mode 100644 shared/edifact.ts
+ create mode 100644 shared/market-ids.ts
+ create mode 100644 shared/market-time.ts
+ create mode 100644 shared/mscons.ts
+
+diff --git a/client/src/components/MarktkommunikationPanel.tsx b/client/src/components/MarktkommunikationPanel.tsx
+new file mode 100644
+index 0000000..c3a2f8c
+--- /dev/null
++++ b/client/src/components/MarktkommunikationPanel.tsx
+@@ -0,0 +1,295 @@
++import { useMemo, useState } from "react";
++import { AlertTriangle, CheckCircle2, Network } from "lucide-react";
++import { buildMscons, MSCONS_PROFILE, type MsconsResult } from "../../../shared/mscons";
++import { verifyInterchange } from "../../../shared/edifact";
++import { dayGrid, intervalLabel } from "../../../shared/market-time";
++import {
++  deriveEan13CheckDigit,
++  deriveMaloCheckDigit,
++} from "../../../shared/market-ids";
++import {
++  allocate,
++  illustrativeDayProfile,
++  illustrativeShares,
++} from "../../../shared/allocation";
++import type { MieterstromInputs } from "../../../shared/schema";
++
++/**
++ * MarktkommunikationPanel
++ *
++ * The message a Lieferant actually has to send.
++ *
++ * Everything above this point is a calculation. This is the boundary where a
++ * project stops being a spreadsheet: quarter-hour values have to leave the
++ * building as MSCONS, addressed with valid market identifiers, on the real
++ * local grid — and that grid is not 96 intervals long twice a year.
++ *
++ * The panel lets that day be selected, because the two clock-change days are
++ * exactly where an implementation is worth judging. The message is generated
++ * from the visitor's own constellation, its syntax is verified by reading the
++ * produced message back, and the result says plainly which parts are proven
++ * and which are not.
++ */
++
++const DAY_OPTIONS: { date: string; label: string; note: string }[] = [
++  { date: "2026-06-15", label: "Normaler Tag", note: "96 Viertelstunden" },
++  { date: "2026-03-29", label: "Zeitumstellung März", note: "92 Viertelstunden" },
++  { date: "2026-10-25", label: "Zeitumstellung Oktober", note: "100 Viertelstunden" },
++];
++
++/** Placeholder market participants, formed so their check digits are consistent. */
++const DEMO_SENDER = "999999999999" + deriveEan13CheckDigit("999999999999");
++const DEMO_RECEIVER = "888888888888" + deriveEan13CheckDigit("888888888888");
++const DEMO_MALO = "5012345678" + deriveMaloCheckDigit("5012345678");
++const DEMO_MELO = "DE" + "0".repeat(25) + "12345A";
++
++const KIND_NOTE: Record<string, string> = {
++  normal: "Ein gewöhnlicher Tag.",
++  dst_short:
++    "An diesem Tag wird die Uhr vorgestellt: die Stunde von 02:00 bis 03:00 gibt es nicht, der Tag hat 92 Viertelstunden.",
++  dst_long:
++    "An diesem Tag wird die Uhr zurückgestellt: die Stunde von 02:00 bis 03:00 kommt zweimal vor, der Tag hat 100 Viertelstunden.",
++};
++
++function Stat({ label, value, tone }: { label: string; value: string; tone?: "good" | "warn" }) {
++  return (
++    <div className="rounded-2xl border border-border/60 bg-background/70 px-4 py-3">
++      <p className="text-[0.66rem] font-medium uppercase tracking-[0.14em] text-muted-foreground">
++        {label}
++      </p>
++      <p
++        className={`mt-1 font-display text-lg font-semibold tabular-nums ${
++          tone === "warn" ? "text-amber-700" : tone === "good" ? "text-primary" : "text-foreground"
++        }`}
++      >
++        {value}
++      </p>
++    </div>
++  );
++}
++
++export function MarktkommunikationPanel({ inputs }: { inputs: MieterstromInputs }) {
++  const [date, setDate] = useState(DAY_OPTIONS[2].date);
++
++  const built = useMemo((): { result: MsconsResult; error: null } | { result: null; error: string } => {
++    try {
++      const grid = dayGrid(date);
++      const participants = Math.max(2, Math.min(12, Math.round(inputs.anzahlWohneinheiten)));
++
++      // The values on the wire are the ones the allocation engine produced,
++      // on this day's real grid. Nothing is reshaped in between.
++      const profile = illustrativeDayProfile({
++        kwp: inputs.kwp,
++        dailyConsumptionKwh: 8,
++        participants,
++        intervals: grid.intervals,
++      });
++      const shares = illustrativeShares(participants);
++      const allocation = allocate(
++        {
++          key: "cascading",
++          generationKwh: profile.generationKwh,
++          participants: profile.consumptionKwh.map((c, i) => ({
++            id: `we-${i + 1}`,
++            share: shares[i],
++            consumptionKwh: c,
++          })),
++        },
++        { includeSeries: true },
++      );
++
++      return {
++        result: buildMscons({
++          period: { date },
++          sender: { code: DEMO_SENDER },
++          receiver: { code: DEMO_RECEIVER },
++          locations: [
++            {
++              melo: DEMO_MELO,
++              malo: DEMO_MALO,
++              direction: "consumption",
++              valuesKwh: allocation.participants[0].series ?? [],
++            },
++          ],
++          preparedAtMs: Date.parse("2026-09-07T10:00:00Z"),
++        }),
++        error: null,
++      };
++    } catch (err) {
++      return { result: null, error: err instanceof Error ? err.message : "Unbekannter Fehler." };
++    }
++  }, [date, inputs.kwp, inputs.anzahlWohneinheiten]);
++
++  const grid = useMemo(() => dayGrid(date), [date]);
++  const syntax = useMemo(
++    () => (built.result ? verifyInterchange(built.result.message) : null),
++    [built.result],
++  );
++
++  // The stretch of labels around the clock change is the part worth showing.
++  const labelWindow = useMemo(() => {
++    const start = grid.kind === "normal" ? 0 : 4;
++    return Array.from({ length: 12 }, (_, i) => intervalLabel(grid, start + i));
++  }, [grid]);
++
++  const excerpt = built.result
++    ? built.result.message.split("'").slice(0, 14).join("'") + "'"
++    : "";
++
++  return (
++    <div className="rounded-[28px] border border-border/70 bg-card p-6 sm:p-8">
++      <div className="space-y-6">
++        <div className="flex items-start gap-4">
++          <Network className="mt-0.5 h-6 w-6 shrink-0 text-primary" />
++          <div className="min-w-0 flex-1 space-y-2">
++            <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-primary">
++              Marktkommunikation
++            </p>
++            <h3 className="font-display text-xl font-semibold tracking-[-0.02em] text-foreground">
++              Die Nachricht, die tatsächlich das Haus verlässt
++            </h3>
++            <p className="text-sm leading-7 text-muted-foreground">
++              Viertelstundenwerte müssen als MSCONS an Netzbetreiber, Messstellenbetreiber
++              und Bilanzkreisverantwortlichen gehen — mit gültigen Marktidentifikatoren und
++              auf dem echten lokalen Zeitraster. Zweimal im Jahr hat ein Tag nicht 96
++              Viertelstunden. Genau dort entscheidet sich, ob eine Umsetzung trägt.
++            </p>
++          </div>
++        </div>
++
++        {/* Day selection: the clock-change days are the interesting ones. */}
++        <div className="grid gap-2.5 sm:grid-cols-3">
++          {DAY_OPTIONS.map((o) => {
++            const active = date === o.date;
++            return (
++              <button
++                key={o.date}
++                type="button"
++                onClick={() => setDate(o.date)}
++                aria-pressed={active}
++                className={`rounded-2xl border p-4 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 ${
++                  active
++                    ? "border-primary/50 bg-primary/8"
++                    : "border-border/70 bg-background/60 hover:border-border"
++                }`}
++              >
++                <span className="block text-sm font-medium text-foreground">{o.label}</span>
++                <span className="mt-0.5 block text-xs text-muted-foreground">{o.date}</span>
++                <span className="mt-2 block font-display text-base font-semibold text-foreground">
++                  {o.note}
++                </span>
++              </button>
++            );
++          })}
++        </div>
++
++        <p className="text-sm leading-7 text-foreground/90">{KIND_NOTE[grid.kind]}</p>
++
++        {/* The wall-clock labels around the transition. */}
++        <div className="rounded-[20px] border border-border/60 bg-background/70 p-5">
++          <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
++            Viertelstunden um die Umstellung
++          </p>
++          <div className="mt-3 flex flex-wrap gap-1.5">
++            {labelWindow.map((l, i) => (
++              <span
++                key={`${l}-${i}`}
++                className={`rounded-lg border px-2 py-1 font-mono text-xs tabular-nums ${
++                  l.endsWith("A") || l.endsWith("B")
++                    ? "border-amber-500/40 bg-amber-500/10 text-amber-700"
++                    : "border-border/60 bg-card text-foreground/80"
++                }`}
++              >
++                {l}
++              </span>
++            ))}
++          </div>
++          {grid.kind === "dst_long" ? (
++            <p className="mt-3 text-xs leading-6 text-muted-foreground">
++              A und B unterscheiden den ersten vom zweiten Durchlauf derselben Stunde. Auf der
++              Leitung trennt sie der UTC-Versatz: +02 und +01 zur selben Ortszeit.
++            </p>
++          ) : null}
++          {grid.kind === "dst_short" ? (
++            <p className="mt-3 text-xs leading-6 text-muted-foreground">
++              Nach 01:45 folgt 03:00. Vier Viertelstunden entfallen — eine Reihe mit 96 Werten
++              wäre an diesem Tag falsch.
++            </p>
++          ) : null}
++        </div>
++
++        {built.result && syntax ? (
++          <>
++            <div className="grid gap-2.5 sm:grid-cols-4">
++              <Stat label="Viertelstunden" value={String(built.result.grid.intervals)} />
++              <Stat label="Mengen im Segment QTY" value={String(built.result.totals[0].values)} />
++              <Stat label="Nachrichtengröße" value={`${(built.result.bytes / 1024).toFixed(1)} kB`} />
++              <Stat
++                label="Syntaxprüfung"
++                value={syntax.ok ? "bestanden" : `${syntax.findings.length} Befunde`}
++                tone={syntax.ok ? "good" : "warn"}
++              />
++            </div>
++
++            <div className="rounded-[20px] border border-border/60 bg-background/70 p-5">
++              <div className="flex flex-wrap items-baseline justify-between gap-3">
++                <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
++                  MSCONS · {MSCONS_PROFILE.directory.version} {MSCONS_PROFILE.directory.release}{" "}
++                  {MSCONS_PROFILE.directory.agency} · {MSCONS_PROFILE.associationCode}
++                </p>
++                <p className="text-xs text-muted-foreground">Auszug — Kopf und erste Messwerte</p>
++              </div>
++              <pre className="mt-3 max-h-64 overflow-auto rounded-xl border border-border/50 bg-card p-4 font-mono text-[0.7rem] leading-6 text-foreground/85">
++                {excerpt.replace(/'/g, "'\n")}
++              </pre>
++              <p className="mt-3 text-xs leading-6 text-muted-foreground">
++                Der OBIS-Code enthält den Komponententrenner und erscheint deshalb als{" "}
++                <code className="rounded bg-muted px-1 py-0.5 font-mono">1-1?:1.29.0</code> — mit
++                Freigabezeichen. Ohne diese Maskierung zerfällt das Element, und die Nachricht
++                meldet eine andere Messgröße als gemeint.
++              </p>
++            </div>
++
++            {/* What is proven, and what is not. Kept apart on purpose. */}
++            <div className="grid gap-3 sm:grid-cols-2">
++              <div className="rounded-2xl border border-primary/25 bg-primary/5 p-4">
++                <p className="flex items-center gap-2 text-sm font-medium text-foreground">
++                  <CheckCircle2 className="h-4 w-4 text-primary" />
++                  Geprüft: Syntax
++                </p>
++                <p className="mt-1.5 text-xs leading-6 text-muted-foreground">
++                  Freigabezeichen, Segmentzählung in UNT und Kontrollreferenz in UNZ werden aus
++                  dem Inhalt berechnet und anschließend aus der erzeugten Nachricht heraus
++                  nachgeprüft — nicht aus dem Code angenommen.
++                </p>
++              </div>
++              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/6 p-4">
++                <p className="flex items-center gap-2 text-sm font-medium text-foreground">
++                  <AlertTriangle className="h-4 w-4 text-amber-600" />
++                  Offen: Profilfassung
++                </p>
++                <p className="mt-1.5 text-xs leading-6 text-muted-foreground">
++                  {MSCONS_PROFILE.openQuestion}
++                </p>
++              </div>
++            </div>
++
++            {built.result.warnings
++              .filter((w) => w.code !== "profile_unverified")
++              .map((w) => (
++                <p key={w.code} className="text-xs leading-6 text-muted-foreground">
++                  {w.message}
++                </p>
++              ))}
++          </>
++        ) : (
++          <p className="rounded-2xl border border-destructive/25 bg-destructive/6 p-4 text-sm leading-6 text-foreground/90">
++            {built.error}
++          </p>
++        )}
++      </div>
++    </div>
++  );
++}
++
++export default MarktkommunikationPanel;
+diff --git a/client/src/lib/edifact.test.ts b/client/src/lib/edifact.test.ts
+new file mode 100644
+index 0000000..78b4ed6
+--- /dev/null
++++ b/client/src/lib/edifact.test.ts
+@@ -0,0 +1,257 @@
++import { describe, it, expect } from "vitest";
++import {
++  DEFAULT_SERVICE_CHARACTERS,
++  EdifactError,
++  buildInterchange,
++  escapeValue,
++  parseInterchange,
++  readSegment,
++  serviceStringAdvice,
++  splitSegments,
++  unescapeValue,
++  verifyInterchange,
++  writeSegment,
++  type MessageBody,
++  type Segment,
++} from "../../../shared/edifact";
++
++const C = DEFAULT_SERVICE_CHARACTERS;
++
++/** Values built specifically out of the characters that break naive code. */
++const ADVERSARIAL = [
++  "plain",
++  "with+plus",
++  "with:colon",
++  "with'apostrophe",
++  "with?release",
++  "??double",
++  "+:'?all four",
++  "1-1:2.29.0",
++  "Müller & Söhne GmbH + Co. KG",
++  "ends with release?",
++  "'",
++  "?",
++  "+",
++  ":",
++];
++
++describe("service characters", () => {
++  it("announces the set it uses", () => {
++    expect(serviceStringAdvice()).toBe("UNA:+.? '");
++    expect(serviceStringAdvice()).toHaveLength(9);
++  });
++
++  // Not the EDIFACT default, which is why it has to be declared.
++  it("declares the point as the decimal mark", () => {
++    expect(C.decimal).toBe(".");
++  });
++});
++
++describe("escaping", () => {
++  it.each(ADVERSARIAL)("round-trips %j", (value) => {
++    expect(unescapeValue(escapeValue(value))).toBe(value);
++  });
++
++  it("escapes the release character first, so nothing is double-escaped", () => {
++    expect(escapeValue("?+")).toBe("???+");
++    expect(unescapeValue("???+")).toBe("?+");
++  });
++
++  it("escapes every reserved character and nothing else", () => {
++    expect(escapeValue("a+b:c'd?e")).toBe("a?+b?:c?'d??e");
++    expect(escapeValue("a.b-c/d")).toBe("a.b-c/d");
++  });
++
++  it("rejects a value ending in an unconsumed release character", () => {
++    expect(() => unescapeValue("abc?")).toThrow(EdifactError);
++  });
++});
++
++describe("segments", () => {
++  it("writes tag and elements separated correctly", () => {
++    expect(writeSegment({ tag: "UNS", elements: ["D"] })).toBe("UNS+D'");
++    expect(writeSegment({ tag: "NAD", elements: ["MS", ["123", "", "293"]] })).toBe(
++      "NAD+MS+123::293'",
++    );
++  });
++
++  it("writes an omitted component as empty rather than dropping it", () => {
++    expect(writeSegment({ tag: "BGM", elements: [["7", null, undefined, "9"]] })).toBe("BGM+7:::9'");
++  });
++
++  it("omits trailing empty elements", () => {
++    expect(writeSegment({ tag: "DTM", elements: ["a", "", null] })).toBe("DTM+a'");
++  });
++
++  it("writes numbers with the declared decimal mark", () => {
++    expect(writeSegment({ tag: "QTY", elements: [["220", 0.125, "KWH"]] })).toBe("QTY+220:0.125:KWH'");
++  });
++
++  it("refuses a non-finite number rather than writing NaN to the wire", () => {
++    expect(() => writeSegment({ tag: "QTY", elements: [["220", Number.NaN]] })).toThrow(EdifactError);
++    expect(() => writeSegment({ tag: "QTY", elements: [["220", Infinity]] })).toThrow(EdifactError);
++  });
++
++  it("refuses an invalid segment tag", () => {
++    expect(() => writeSegment({ tag: "qty", elements: [] })).toThrow(EdifactError);
++    expect(() => writeSegment({ tag: "QUANTITY", elements: [] })).toThrow(EdifactError);
++  });
++
++  // This is the failure mode: a value containing a reserved character has to
++  // survive the trip, and string concatenation does not achieve that.
++  it.each(ADVERSARIAL)("round-trips %j through a segment", (value) => {
++    const seg: Segment = { tag: "FTX", elements: [value, [value, value]] };
++    const parsed = readSegment(writeSegment(seg));
++    expect(parsed.tag).toBe("FTX");
++    expect(parsed.elements[0]).toBe(value);
++    expect(parsed.elements[1]).toEqual([value, value]);
++  });
++
++  it("keeps an OBIS code intact although it contains the component separator", () => {
++    const written = writeSegment({ tag: "PIA", elements: ["5", ["1-1:2.29.0", "SRW"]] });
++    expect(written).toBe("PIA+5+1-1?:2.29.0:SRW'");
++    expect(readSegment(written).elements[1]).toEqual(["1-1:2.29.0", "SRW"]);
++  });
++});
++
++describe("splitting", () => {
++  it("does not treat an escaped terminator as a boundary", () => {
++    const message = writeSegment({ tag: "FTX", elements: ["it's here"] }) + writeSegment({ tag: "UNS", elements: ["D"] });
++    expect(splitSegments(message)).toHaveLength(2);
++    expect(readSegment(splitSegments(message)[0]).elements[0]).toBe("it's here");
++  });
++
++  it("rejects an unterminated final segment", () => {
++    expect(() => splitSegments("UNS+D")).toThrow(EdifactError);
++  });
++
++  it("rejects a message ending in a release character", () => {
++    expect(() => splitSegments("UNS+D'FTX+abc?")).toThrow(EdifactError);
++  });
++});
++
++describe("interchange", () => {
++  const header = {
++    sender: { id: "9999999999994", qualifier: "500" },
++    receiver: { id: "8888888888888", qualifier: "500" },
++    preparedAt: { date: "260907", time: "1200" },
++    controlReference: "REF00001",
++    applicationReference: "MSCONS",
++  };
++
++  const message = (reference: string, bodySegments: number): MessageBody => ({
++    reference,
++    identifier: ["MSCONS", "D", "04B", "UN", "2.4c"],
++    segments: Array.from({ length: bodySegments }, (_, i) => ({
++      tag: "LIN" as const,
++      elements: [String(i + 1)],
++    })),
++  });
++
++  it("opens with the service string advice and UNB, and closes with UNZ", () => {
++    const out = buildInterchange(header, [message("M1", 3)]);
++    expect(out.startsWith("UNA:+.? 'UNB+")).toBe(true);
++    expect(out.endsWith("UNZ+1+REF00001'")).toBe(true);
++  });
++
++  // UNT counts UNH and UNT themselves. Off-by-one here is the single most
++  // common reason a message is rejected.
++  it("counts UNH and UNT into the UNT segment count", () => {
++    for (const bodySegments of [0, 1, 5, 400]) {
++      const out = buildInterchange(header, [message("M1", bodySegments)]);
++      expect(out).toContain(`UNT+${bodySegments + 2}+M1'`);
++    }
++  });
++
++  it("counts the messages in UNZ and repeats the control reference", () => {
++    const out = buildInterchange(header, [message("M1", 2), message("M2", 2)]);
++    expect(out).toContain("UNZ+2+REF00001'");
++    expect(verifyInterchange(out).messageCount).toBe(2);
++  });
++
++  it("refuses an interchange with no message", () => {
++    expect(() => buildInterchange(header, [])).toThrow(EdifactError);
++  });
++
++  it("refuses two messages sharing a reference", () => {
++    expect(() => buildInterchange(header, [message("M1", 1), message("M1", 1)])).toThrow(
++      /mehrfach/,
++    );
++  });
++
++  it("marks a test interchange as such", () => {
++    expect(buildInterchange({ ...header, testIndicator: true }, [message("M1", 1)])).toMatch(
++      /\+1'UNH/,
++    );
++  });
++
++  it("parses back to the segments it was built from", () => {
++    const out = buildInterchange(header, [message("M1", 4)]);
++    const parsed = parseInterchange(out);
++    expect(parsed.chars).toEqual(DEFAULT_SERVICE_CHARACTERS);
++    expect(parsed.segments.map((s) => s.tag)).toEqual([
++      "UNB", "UNH", "LIN", "LIN", "LIN", "LIN", "UNT", "UNZ",
++    ]);
++  });
++
++  it("honours service characters declared by a foreign UNA", () => {
++    const foreign = "UNA;*.! ~SEG*a;b~";
++    const parsed = parseInterchange(foreign);
++    expect(parsed.chars.component).toBe(";");
++    expect(parsed.chars.element).toBe("*");
++    expect(parsed.segments[0]).toEqual({ tag: "SEG", elements: [["a", "b"]] });
++  });
++});
++
++describe("integrity verification", () => {
++  const header = {
++    sender: { id: "9999999999994", qualifier: "500" },
++    receiver: { id: "8888888888888", qualifier: "500" },
++    preparedAt: { date: "260907", time: "1200" },
++    controlReference: "REF00001",
++  };
++  const body: MessageBody = {
++    reference: "M1",
++    identifier: ["MSCONS", "D", "04B", "UN", "2.4c"],
++    segments: [{ tag: "LIN", elements: ["1"] }, { tag: "LIN", elements: ["2"] }],
++  };
++
++  it("passes a well-formed interchange", () => {
++    const r = verifyInterchange(buildInterchange(header, [body]));
++    expect(r.findings).toEqual([]);
++    expect(r.ok).toBe(true);
++  });
++
++  // The verifier reads the produced message from the outside, so these cases
++  // establish that it would actually catch a builder that went wrong.
++  it("catches a wrong UNT segment count", () => {
++    const broken = buildInterchange(header, [body]).replace("UNT+4+M1", "UNT+9+M1");
++    const r = verifyInterchange(broken);
++    expect(r.ok).toBe(false);
++    expect(r.findings.map((f) => f.code)).toContain("unt_count_mismatch");
++  });
++
++  it("catches a UNT pointing at the wrong message", () => {
++    const broken = buildInterchange(header, [body]).replace("UNT+4+M1", "UNT+4+M2");
++    expect(verifyInterchange(broken).findings.map((f) => f.code)).toContain(
++      "unt_reference_mismatch",
++    );
++  });
++
++  it("catches a UNZ control reference that does not match UNB", () => {
++    const broken = buildInterchange(header, [body]).replace("UNZ+1+REF00001", "UNZ+1+OTHER");
++    expect(verifyInterchange(broken).findings.map((f) => f.code)).toContain(
++      "control_reference_mismatch",
++    );
++  });
++
++  it("catches a UNZ message count that does not match the content", () => {
++    const broken = buildInterchange(header, [body]).replace("UNZ+1+", "UNZ+7+");
++    expect(verifyInterchange(broken).findings.map((f) => f.code)).toContain("unz_count_mismatch");
++  });
++
++  it("catches a message that is never closed", () => {
++    const broken = buildInterchange(header, [body]).replace("UNT+4+M1'", "");
++    expect(verifyInterchange(broken).findings.map((f) => f.code)).toContain("unclosed_message");
++  });
++});
+diff --git a/client/src/lib/market-ids.test.ts b/client/src/lib/market-ids.test.ts
+new file mode 100644
+index 0000000..5d79882
+--- /dev/null
++++ b/client/src/lib/market-ids.test.ts
+@@ -0,0 +1,202 @@
++import { describe, it, expect } from "vitest";
++import {
++  BDEW_CODE_LENGTH,
++  CHECK_DIGIT_ALGORITHMS,
++  EIC_LENGTH,
++  MALO_LENGTH,
++  MELO_LENGTH,
++  deriveEan13CheckDigit,
++  deriveEicCheckCharacter,
++  deriveMaloCheckDigit,
++  validateBdewCode,
++  validateEic,
++  validateMalo,
++  validateMelo,
++  validateMessageIdentifiers,
++} from "../../../shared/market-ids";
++
++const bdew = (first12: string) => first12 + deriveEan13CheckDigit(first12);
++const malo = (first10: string) => first10 + deriveMaloCheckDigit(first10);
++const melo = "DE" + "0".repeat(25) + "12345A";
++
++describe("the verification gate", () => {
++  /*
++   * Every check-digit algorithm here implements a specification published by
++   * somebody else. Until an implementation has been checked against that
++   * publication it must not be able to say an identifier is valid — only that
++   * it computed something. This is the same gate the statutory citations use.
++   */
++  it("never reports a check digit as correct while its algorithm is unverified", () => {
++    for (const algo of Object.values(CHECK_DIGIT_ALGORITHMS)) {
++      expect(algo.verified).toBe(false);
++      expect(algo.openQuestion).toBeTruthy();
++    }
++    expect(validateMalo(malo("5012345678")).checkDigit).toBe("algorithm_unverified");
++    expect(validateBdewCode(bdew("999999999999")).checkDigit).toBe("algorithm_unverified");
++    expect(validateEic("10YDE-VE-------2").checkDigit).toBe("algorithm_unverified");
++  });
++
++  it("requires a reference and a date before an algorithm may be verified", () => {
++    for (const algo of Object.values(CHECK_DIGIT_ALGORITHMS)) {
++      if (algo.verified) {
++        expect(algo.reference).not.toBeNull();
++        expect(algo.asOf).not.toBeNull();
++      }
++    }
++  });
++
++  // Format rules need no third party, so those ARE asserted.
++  it("still asserts format, which needs nobody's publication", () => {
++    expect(validateMalo("123").format).toBe("invalid");
++    expect(validateMalo(malo("5012345678")).format).toBe("ok");
++  });
++});
++
++describe("Marktlokations-ID", () => {
++  it("is eleven digits", () => {
++    expect(MALO_LENGTH).toBe(11);
++    expect(validateMalo(malo("5012345678")).value).toHaveLength(11);
++  });
++
++  it("computes a check digit that is self-consistent", () => {
++    for (const seed of ["5012345678", "9876543210", "1111111111", "4000000000"]) {
++      const id = malo(seed);
++      expect(deriveMaloCheckDigit(id.slice(0, 10))).toBe(id[10]);
++    }
++  });
++
++  it("rejects a wrong length, non-digits and a leading zero", () => {
++    expect(validateMalo("1234567890").problems.length).toBeGreaterThan(0);
++    expect(validateMalo("5012345678A").problems.length).toBeGreaterThan(0);
++    expect(validateMalo("01234567890").problems.some((p) => p.includes("Null"))).toBe(true);
++  });
++
++  it("refuses to compute from the wrong number of digits", () => {
++    expect(() => deriveMaloCheckDigit("123")).toThrow();
++    expect(() => deriveMaloCheckDigit("12345678901")).toThrow();
++  });
++});
++
++describe("Messlokations-ID", () => {
++  it("is thirty-three uppercase alphanumerics beginning with a country code", () => {
++    expect(MELO_LENGTH).toBe(33);
++    const r = validateMelo(melo);
++    expect(r.format).toBe("ok");
++    expect(r.problems).toEqual([]);
++  });
++
++  it("names the actual length when it is wrong", () => {
++    expect(validateMelo("DE0001").problems[0]).toContain("6");
++  });
++
++  it("rejects characters outside the permitted set", () => {
++    expect(validateMelo("DE" + "-".repeat(31)).problems.length).toBeGreaterThan(0);
++  });
++
++  it("normalises case rather than rejecting it", () => {
++    expect(validateMelo(melo.toLowerCase()).format).toBe("ok");
++  });
++
++  it("reports no check digit, because the identifier has none", () => {
++    expect(validateMelo(melo).computed).toBeNull();
++  });
++});
++
++describe("BDEW-Codenummer", () => {
++  it("is thirteen digits", () => {
++    expect(BDEW_CODE_LENGTH).toBe(13);
++    expect(validateBdewCode(bdew("999999999999")).format).toBe("ok");
++  });
++
++  it("computes an EAN-13 check digit that is self-consistent", () => {
++    for (const seed of ["999999999999", "400000000000", "123456789012"]) {
++      const code = bdew(seed);
++      expect(deriveEan13CheckDigit(code.slice(0, 12))).toBe(code[12]);
++    }
++  });
++
++  it("matches the published EAN-13 example", () => {
++    // 400638133393 -> 1 is the textbook worked example for the algorithm.
++    expect(deriveEan13CheckDigit("400638133393")).toBe("1");
++  });
++
++  it("rejects anything that is not thirteen digits", () => {
++    expect(validateBdewCode("12345").format).toBe("invalid");
++    expect(validateBdewCode("999999999999X").format).toBe("invalid");
++  });
++});
++
++describe("EIC", () => {
++  it("is sixteen characters from its own alphabet", () => {
++    expect(EIC_LENGTH).toBe(16);
++    expect(validateEic("10YDE-VE-------2").format).toBe("ok");
++  });
++
++  it("computes a check character that is self-consistent", () => {
++    for (const stem of ["10YDE-VE-------", "10YDE-RWENET---", "11XDE-EXAMPLE01"]) {
++      const check = deriveEicCheckCharacter(stem);
++      if (check === "") continue;
++      const full = stem + check;
++      expect(deriveEicCheckCharacter(full.slice(0, 15))).toBe(full[15]);
++    }
++  });
++
++  it("reports a stem whose check character would be the hyphen as unusable", () => {
++    // Such a code cannot carry a valid check character and has to be reissued.
++    let found = false;
++    for (let i = 0; i < 400 && !found; i++) {
++      const stem = `10X${String(i).padStart(4, "0")}TESTSTEM`.slice(0, 15);
++      if (deriveEicCheckCharacter(stem) === "") found = true;
++    }
++    // Whether or not one turns up in this sample, the contract is that an
++    // empty result means "reissue", never "valid".
++    expect(deriveEicCheckCharacter("10YDE-VE-------")).not.toBe("-");
++  });
++
++  it("rejects a character outside the alphabet", () => {
++    expect(validateEic("10YDE_VE_______2").format).toBe("invalid");
++  });
++
++  it("rejects the wrong length", () => {
++    expect(validateEic("10YDE-VE").format).toBe("invalid");
++  });
++
++  it("normalises case", () => {
++    expect(validateEic("10yde-ve-------2").value).toBe("10YDE-VE-------2");
++  });
++});
++
++describe("message identifiers together", () => {
++  it("checks every identifier a message carries and reports each problem by field", () => {
++    const r = validateMessageIdentifiers({
++      senderCode: bdew("999999999999"),
++      receiverCode: "nope",
++      malo: malo("5012345678"),
++      melo,
++      balancingAreaEic: "10YDE-VE-------2",
++    });
++    expect(r.ok).toBe(false);
++    expect(r.problems.some((p) => p.startsWith("receiverCode:"))).toBe(true);
++    expect(r.results.senderCode.format).toBe("ok");
++    expect(r.results.malo.format).toBe("ok");
++  });
++
++  it("passes when everything is well formed", () => {
++    const r = validateMessageIdentifiers({
++      senderCode: bdew("999999999999"),
++      receiverCode: bdew("888888888888"),
++      malo: malo("5012345678"),
++      melo,
++    });
++    expect(r.problems).toEqual([]);
++    expect(r.ok).toBe(true);
++  });
++
++  it("only checks the identifiers it was given", () => {
++    const r = validateMessageIdentifiers({
++      senderCode: bdew("999999999999"),
++      receiverCode: bdew("888888888888"),
++    });
++    expect(Object.keys(r.results)).toEqual(["senderCode", "receiverCode"]);
++  });
++});
+diff --git a/client/src/lib/market-time.test.ts b/client/src/lib/market-time.test.ts
+new file mode 100644
+index 0000000..c6b6817
+--- /dev/null
++++ b/client/src/lib/market-time.test.ts
+@@ -0,0 +1,232 @@
++import { describe, it, expect } from "vitest";
++import {
++  INTERVALS_LONG_DAY,
++  INTERVALS_NORMAL_DAY,
++  INTERVALS_SHORT_DAY,
++  INTERVAL_MS,
++  MARKET_TIMEZONE,
++  MarketTimeError,
++  dayGrid,
++  edifact102,
++  edifact203,
++  edifact303,
++  intervalLabel,
++  isSummerTime,
++  localDateOf,
++  localToUtc,
++  nextLocalDate,
++  rangeGrid,
++  startOfLocalDay,
++  utcOffsetMs,
++  wallClock,
++} from "../../../shared/market-time";
++
++describe("timezone base", () => {
++  it("uses the market's reference timezone", () => {
++    expect(MARKET_TIMEZONE).toBe("Europe/Berlin");
++  });
++
++  it("reports one hour in winter and two in summer", () => {
++    expect(utcOffsetMs(Date.parse("2026-01-15T12:00:00Z"))).toBe(3_600_000);
++    expect(utcOffsetMs(Date.parse("2026-07-15T12:00:00Z"))).toBe(7_200_000);
++    expect(isSummerTime(Date.parse("2026-01-15T12:00:00Z"))).toBe(false);
++    expect(isSummerTime(Date.parse("2026-07-15T12:00:00Z"))).toBe(true);
++  });
++
++  it("switches at the instant the clocks change, not at midnight", () => {
++    // 2026-03-29 01:00 UTC is 02:00 local, the moment the clock jumps to 03:00.
++    expect(utcOffsetMs(Date.parse("2026-03-29T00:59:59Z"))).toBe(3_600_000);
++    expect(utcOffsetMs(Date.parse("2026-03-29T01:00:00Z"))).toBe(7_200_000);
++    expect(utcOffsetMs(Date.parse("2026-10-25T00:59:59Z"))).toBe(7_200_000);
++    expect(utcOffsetMs(Date.parse("2026-10-25T01:00:00Z"))).toBe(3_600_000);
++  });
++
++  it("reads the local wall clock rather than the UTC one", () => {
++    const w = wallClock(Date.parse("2026-07-15T22:30:00Z"));
++    expect(w).toMatchObject({ year: 2026, month: 7, day: 16, hour: 0, minute: 30 });
++  });
++
++  it("names the local date, which can differ from the UTC date", () => {
++    expect(localDateOf(Date.parse("2026-07-15T22:30:00Z"))).toBe("2026-07-16");
++    expect(localDateOf(Date.parse("2026-01-15T22:30:00Z"))).toBe("2026-01-15");
++  });
++
++  it("round-trips local midnight through UTC", () => {
++    for (const date of ["2026-01-01", "2026-03-29", "2026-06-15", "2026-10-25", "2026-12-31"]) {
++      expect(localDateOf(startOfLocalDay(date))).toBe(date);
++      expect(wallClock(startOfLocalDay(date)).hour).toBe(0);
++      expect(wallClock(startOfLocalDay(date)).minute).toBe(0);
++    }
++  });
++
++  it("advances across month and year ends", () => {
++    expect(nextLocalDate("2026-01-31")).toBe("2026-02-01");
++    expect(nextLocalDate("2026-12-31")).toBe("2027-01-01");
++    expect(nextLocalDate("2024-02-28")).toBe("2024-02-29");
++    expect(nextLocalDate("2026-02-28")).toBe("2026-03-01");
++  });
++
++  it("rejects a malformed date instead of guessing", () => {
++    expect(() => startOfLocalDay("29.03.2026")).toThrow(MarketTimeError);
++    expect(() => startOfLocalDay("2026-13-01")).toThrow(MarketTimeError);
++  });
++
++  // The hour skipped in spring does not exist; the conversion has to land
++  // somewhere defined rather than silently producing the previous hour.
++  it("resolves a non-existent local time to the instant the clock jumps to", () => {
++    const utc = localToUtc(2026, 3, 29, 2, 30);
++    expect(wallClock(utc).hour).toBe(3);
++  });
++});
++
++describe("day grid", () => {
++  it("gives an ordinary day 96 quarter-hours", () => {
++    const g = dayGrid("2026-06-15");
++    expect(g.intervals).toBe(INTERVALS_NORMAL_DAY);
++    expect(g.kind).toBe("normal");
++    expect(g.startsUtcMs).toHaveLength(96);
++  });
++
++  // The whole reason this module exists.
++  it("gives the spring clock-change day 92 quarter-hours", () => {
++    for (const date of ["2026-03-29", "2027-03-28", "2024-03-31", "2025-03-30"]) {
++      const g = dayGrid(date);
++      expect(g.intervals).toBe(INTERVALS_SHORT_DAY);
++      expect(g.kind).toBe("dst_short");
++    }
++  });
++
++  it("gives the autumn clock-change day 100 quarter-hours", () => {
++    for (const date of ["2026-10-25", "2027-10-31", "2024-10-27", "2025-10-26"]) {
++      const g = dayGrid(date);
++      expect(g.intervals).toBe(INTERVALS_LONG_DAY);
++      expect(g.kind).toBe("dst_long");
++    }
++  });
++
++  it("derives the interval count from the calendar rather than assuming it", () => {
++    for (const date of ["2026-03-29", "2026-06-15", "2026-10-25"]) {
++      const g = dayGrid(date);
++      expect(g.endUtcMs - g.startUtcMs).toBe(g.intervals * INTERVAL_MS);
++    }
++  });
++
++  it("spaces every interval exactly fifteen minutes apart in real time", () => {
++    for (const date of ["2026-03-29", "2026-10-25"]) {
++      const g = dayGrid(date);
++      for (let i = 1; i < g.intervals; i++) {
++        expect(g.startsUtcMs[i] - g.startsUtcMs[i - 1]).toBe(INTERVAL_MS);
++      }
++    }
++  });
++
++  it("starts and ends each day at local midnight", () => {
++    const g = dayGrid("2026-10-25");
++    expect(wallClock(g.startUtcMs).hour).toBe(0);
++    expect(wallClock(g.endUtcMs).hour).toBe(0);
++    expect(localDateOf(g.endUtcMs)).toBe("2026-10-26");
++  });
++});
++
++describe("interval labels", () => {
++  it("labels an ordinary day with plain wall-clock times", () => {
++    const g = dayGrid("2026-06-15");
++    expect(intervalLabel(g, 0)).toBe("00:00");
++    expect(intervalLabel(g, 1)).toBe("00:15");
++    expect(intervalLabel(g, 95)).toBe("23:45");
++  });
++
++  it("skips the hour that does not exist in spring", () => {
++    const g = dayGrid("2026-03-29");
++    expect(intervalLabel(g, 7)).toBe("01:45");
++    expect(intervalLabel(g, 8)).toBe("03:00");
++  });
++
++  // Two different quarter-hours read 02:15 on the long day. A human
++  // reconciling values has to be able to tell them apart.
++  it("distinguishes the repeated hour in autumn", () => {
++    const g = dayGrid("2026-10-25");
++    const labels = Array.from({ length: g.intervals }, (_, i) => intervalLabel(g, i));
++    expect(labels.filter((l) => l.startsWith("02:15"))).toEqual(["02:15A", "02:15B"]);
++    expect(new Set(labels).size).toBe(g.intervals);
++  });
++
++  // Suffixing every interval would imply the whole day is ambiguous. Only the
++  // eight quarter-hours that genuinely occur twice carry a suffix.
++  it("suffixes only the intervals that actually repeat", () => {
++    const g = dayGrid("2026-10-25");
++    const labels = Array.from({ length: g.intervals }, (_, i) => intervalLabel(g, i));
++    expect(labels.filter((l) => /[AB]$/.test(l))).toHaveLength(8);
++    expect(labels[0]).toBe("00:00");
++    expect(labels[4]).toBe("01:00");
++    expect(labels[g.intervals - 1]).toBe("23:45");
++  });
++
++  it("rejects an index outside the day", () => {
++    const g = dayGrid("2026-06-15");
++    expect(() => intervalLabel(g, 96)).toThrow(MarketTimeError);
++    expect(() => intervalLabel(g, -1)).toThrow(MarketTimeError);
++  });
++});
++
++describe("range grid", () => {
++  it("counts a normal week as seven times 96", () => {
++    expect(rangeGrid("2026-06-01", "2026-06-08").intervals).toBe(7 * 96);
++  });
++
++  it("counts the spring week four intervals short", () => {
++    const r = rangeGrid("2026-03-23", "2026-03-30");
++    expect(r.intervals).toBe(7 * 96 - 4);
++    expect(r.dstDays).toEqual([{ date: "2026-03-29", intervals: 92, kind: "dst_short" }]);
++  });
++
++  it("counts the autumn week four intervals long", () => {
++    const r = rangeGrid("2026-10-19", "2026-10-26");
++    expect(r.intervals).toBe(7 * 96 + 4);
++    expect(r.dstDays).toEqual([{ date: "2026-10-25", intervals: 100, kind: "dst_long" }]);
++  });
++
++  /*
++   * A full year still totals 35 040 because the two changes cancel. That is
++   * the trap: the annual figure looks right while two individual days are
++   * wrong, so a year-level check proves nothing and this test says so.
++   */
++  it("nets out over a full year while both days are still irregular", () => {
++    const r = rangeGrid("2026-01-01", "2027-01-01");
++    expect(r.intervals).toBe(365 * 96);
++    expect(r.dstDays.map((d) => d.intervals)).toEqual([92, 100]);
++  });
++
++  it("keeps every interval fifteen minutes apart across a clock change", () => {
++    const r = rangeGrid("2026-10-24", "2026-10-27");
++    for (let i = 1; i < r.startsUtcMs.length; i++) {
++      expect(r.startsUtcMs[i] - r.startsUtcMs[i - 1]).toBe(INTERVAL_MS);
++    }
++  });
++
++  it("rejects a reversed range", () => {
++    expect(() => rangeGrid("2026-06-08", "2026-06-01")).toThrow(MarketTimeError);
++  });
++});
++
++describe("EDIFACT date formats", () => {
++  it("writes format 303 with the offset in force at that instant", () => {
++    const g = dayGrid("2026-10-25");
++    expect(edifact303(g.startsUtcMs[0])).toBe("202610250000+02");
++    expect(edifact303(g.startsUtcMs[g.intervals - 1])).toBe("202610252345+01");
++  });
++
++  // The repeated hour is disambiguated by the offset, which is how the market
++  // tells the two 02:00 quarter-hours apart on the wire.
++  it("distinguishes the repeated hour by its offset", () => {
++    const g = dayGrid("2026-10-25");
++    const stamps = g.startsUtcMs.map(edifact303).filter((s) => s.startsWith("202610250200"));
++    expect(stamps).toEqual(["202610250200+02", "202610250200+01"]);
++  });
++
++  it("writes format 102 as the local date and 203 as local date and time", () => {
++    const utc = Date.parse("2026-07-15T22:30:00Z");
++    expect(edifact102(utc)).toBe("20260716");
++    expect(edifact203(utc)).toBe("202607160030");
++  });
++});
+diff --git a/client/src/lib/mscons.test.ts b/client/src/lib/mscons.test.ts
+new file mode 100644
+index 0000000..7fad11c
+--- /dev/null
++++ b/client/src/lib/mscons.test.ts
+@@ -0,0 +1,344 @@
++import { describe, it, expect } from "vitest";
++import {
++  MSCONS_PROFILE,
++  MSCONS_READINESS_NOTE_DE,
++  MsconsError,
++  OBIS,
++  buildMscons,
++  obisForInterval,
++  type MsconsInput,
++} from "../../../shared/mscons";
++import { parseInterchange, verifyInterchange, type DataElement } from "../../../shared/edifact";
++import { dayGrid, rangeGrid } from "../../../shared/market-time";
++import { deriveEan13CheckDigit, deriveMaloCheckDigit } from "../../../shared/market-ids";
++import { allocate, illustrativeDayProfile, illustrativeShares } from "../../../shared/allocation";
++
++const SENDER = "999999999999" + deriveEan13CheckDigit("999999999999");
++const RECEIVER = "888888888888" + deriveEan13CheckDigit("888888888888");
++const MALO = "5012345678" + deriveMaloCheckDigit("5012345678");
++const MELO = "DE" + "0".repeat(25) + "12345A";
++const PREPARED = Date.parse("2026-09-07T10:00:00Z");
++
++function flat(el: DataElement | undefined): string {
++  return el === undefined ? "" : Array.isArray(el) ? String(el[0] ?? "") : String(el ?? "");
++}
++
++function build(date: string, over: Partial<MsconsInput> = {}) {
++  const g = dayGrid(date);
++  return buildMscons({
++    period: { date },
++    sender: { code: SENDER },
++    receiver: { code: RECEIVER },
++    locations: [
++      {
++        melo: MELO,
++        malo: MALO,
++        direction: "consumption",
++        valuesKwh: Array.from({ length: g.intervals }, (_, i) => (i % 4 === 0 ? 0.25 : 0.125)),
++      },
++    ],
++    preparedAtMs: PREPARED,
++    ...over,
++  });
++}
++
++describe("syntax integrity", () => {
++  it("produces an interchange that verifies from the outside", () => {
++    for (const date of ["2026-06-15", "2026-03-29", "2026-10-25"]) {
++      const r = verifyInterchange(build(date).message);
++      expect(r.findings).toEqual([]);
++      expect(r.ok).toBe(true);
++    }
++  });
++
++  it("emits the segments an MSCONS message is made of", () => {
++    const tags = parseInterchange(build("2026-06-15").message).segments.map((s) => s.tag);
++    expect(tags[0]).toBe("UNB");
++    expect(tags[1]).toBe("UNH");
++    expect(tags).toContain("BGM");
++    expect(tags).toContain("UNS");
++    expect(tags).toContain("LOC");
++    expect(tags).toContain("PIA");
++    expect(tags).toContain("QTY");
++    expect(tags[tags.length - 1]).toBe("UNZ");
++  });
++
++  it("declares the message type and directory in UNH", () => {
++    const unh = parseInterchange(build("2026-06-15").message).segments.find((s) => s.tag === "UNH")!;
++    expect(unh.elements[1]).toEqual(["MSCONS", "D", "04B", "UN", "2.4c"]);
++  });
++
++  /*
++   * The OBIS code contains the component separator. Written by concatenation
++   * it would split the element and change what was reported; escaped, it
++   * survives the round trip.
++   */
++  it("keeps the OBIS code intact on the wire", () => {
++    const out = build("2026-06-15");
++    expect(out.message).toContain("PIA+5+1-1?:1.29.0:SRW'");
++    const pia = parseInterchange(out.message).segments.find((s) => s.tag === "PIA")!;
++    expect(pia.elements[1]).toEqual([OBIS.consumptionInterval, "SRW"]);
++  });
++
++  it("selects the OBIS code by energy direction", () => {
++    expect(obisForInterval("consumption")).toBe(OBIS.consumptionInterval);
++    expect(obisForInterval("feed_in")).toBe(OBIS.feedInInterval);
++    expect(build("2026-06-15", {
++      locations: [{ melo: MELO, direction: "feed_in", valuesKwh: new Array(96).fill(0.1) }],
++    }).message).toContain("1-1?:2.29.0");
++  });
++
++  it("is reproducible for the same input and the same clock", () => {
++    expect(build("2026-06-15").message).toBe(build("2026-06-15").message);
++  });
++});
++
++describe("the clock-change days", () => {
++  it("carries 92 values on the short day and 100 on the long one", () => {
++    expect(build("2026-03-29").grid.intervals).toBe(92);
++    expect(build("2026-10-25").grid.intervals).toBe(100);
++    expect(build("2026-06-15").grid.intervals).toBe(96);
++  });
++
++  it("emits exactly one quantity per interval", () => {
++    for (const [date, expected] of [["2026-03-29", 92], ["2026-06-15", 96], ["2026-10-25", 100]] as const) {
++      const qty = parseInterchange(build(date).message).segments.filter((s) => s.tag === "QTY");
++      expect(qty).toHaveLength(expected);
++    }
++  });
++
++  /*
++   * The failure this whole module exists to prevent: a series sized 96 for a
++   * day that is not 96 intervals long. Padding or truncating it would file
++   * wrong quantities; the message is refused instead, and the error says why.
++   */
++  it("refuses a 96-value series on a clock-change day, and names the reason", () => {
++    for (const date of ["2026-03-29", "2026-10-25"]) {
++      expect(() =>
++        buildMscons({
++          period: { date },
++          sender: { code: SENDER },
++          receiver: { code: RECEIVER },
++          locations: [{ melo: MELO, direction: "consumption", valuesKwh: new Array(96).fill(0.1) }],
++          preparedAtMs: PREPARED,
++        }),
++      ).toThrow(/Zeitumstellung/);
++    }
++  });
++
++  it("warns that the period contains a clock change", () => {
++    expect(build("2026-10-25").warnings.map((w) => w.code)).toContain("dst_day_in_period");
++    expect(build("2026-06-15").warnings.map((w) => w.code)).not.toContain("dst_day_in_period");
++  });
++
++  it("distinguishes the two 02:00 quarter-hours by their UTC offset", () => {
++    const dtms = parseInterchange(build("2026-10-25").message)
++      .segments.filter((s) => s.tag === "DTM")
++      .map((s) => (Array.isArray(s.elements[0]) ? String(s.elements[0][1]) : ""))
++      .filter((v) => v.startsWith("202610250200"));
++    expect(dtms).toContain("202610250200+02");
++    expect(dtms).toContain("202610250200+01");
++  });
++
++  it("stamps every interval with a distinct instant", () => {
++    const starts = parseInterchange(build("2026-10-25").message)
++      .segments.filter((s) => s.tag === "DTM")
++      .map((s) => (Array.isArray(s.elements[0]) ? `${s.elements[0][0]}:${s.elements[0][1]}` : ""))
++      .filter((v) => v.startsWith("163:"));
++    // One per interval plus the one for the reporting period.
++    expect(new Set(starts).size).toBe(starts.length - 1);
++  });
++});
++
++describe("identifier validation before anything is sent", () => {
++  it("refuses a malformed sender code", () => {
++    expect(() => build("2026-06-15", { sender: { code: "123" } })).toThrow(MsconsError);
++  });
++
++  it("refuses a Messlokation of the wrong length", () => {
++    expect(() =>
++      build("2026-06-15", {
++        locations: [{ melo: "DE0001", direction: "consumption", valuesKwh: new Array(96).fill(0.1) }],
++      }),
++    ).toThrow(/33 Stellen/);
++  });
++
++  it("refuses the same Messlokation twice for one direction", () => {
++    const values = new Array(96).fill(0.1);
++    expect(() =>
++      build("2026-06-15", {
++        locations: [
++          { melo: MELO, direction: "consumption", valuesKwh: values },
++          { melo: MELO, direction: "consumption", valuesKwh: values },
++        ],
++      }),
++    ).toThrow(/mehrfach/);
++  });
++
++  it("permits the same Messlokation for both directions", () => {
++    const values = new Array(96).fill(0.1);
++    const out = build("2026-06-15", {
++      locations: [
++        { melo: MELO, direction: "consumption", valuesKwh: values },
++        { melo: MELO, direction: "feed_in", valuesKwh: values },
++      ],
++    });
++    expect(out.totals).toHaveLength(2);
++  });
++
++  it("refuses a negative or non-finite value rather than sending it", () => {
++    const bad = new Array(96).fill(0.1);
++    bad[5] = -1;
++    expect(() =>
++      build("2026-06-15", { locations: [{ melo: MELO, direction: "consumption", valuesKwh: bad }] }),
++    ).toThrow(MsconsError);
++  });
++
++  it("refuses a status series that does not match the values", () => {
++    expect(() =>
++      build("2026-06-15", {
++        locations: [
++          {
++            melo: MELO,
++            direction: "consumption",
++            valuesKwh: new Array(96).fill(0.1),
++            statuses: ["measured"],
++          },
++        ],
++      }),
++    ).toThrow(/Statusangaben/);
++  });
++});
++
++describe("value status", () => {
++  /*
++   * Settlement treats a substituted value differently from a measured one.
++   * Emitting everything as measured would be a quiet misstatement.
++   */
++  it("marks substituted and estimated values with their own qualifier", () => {
++    const statuses = new Array(96).fill("measured") as ("measured" | "substituted" | "estimated")[];
++    statuses[10] = "substituted";
++    statuses[20] = "estimated";
++    const out = build("2026-06-15", {
++      locations: [
++        { melo: MELO, direction: "consumption", valuesKwh: new Array(96).fill(0.1), statuses },
++      ],
++    });
++    const qualifiers = parseInterchange(out.message)
++      .segments.filter((s) => s.tag === "QTY")
++      .map((s) => (Array.isArray(s.elements[0]) ? String(s.elements[0][0]) : ""));
++    expect(qualifiers.filter((q) => q === "220")).toHaveLength(94);
++    expect(qualifiers.filter((q) => q === "67")).toHaveLength(1);
++    expect(qualifiers.filter((q) => q === "79")).toHaveLength(1);
++  });
++});
++
++describe("profile readiness", () => {
++  /*
++   * The syntax being provably right does not make the segment usage right.
++   * While the profile is unverified the interchange is flagged as a test and
++   * the result says so, rather than implying the message is ready to send.
++   */
++  it("marks the interchange as a test while the profile is unverified", () => {
++    expect(MSCONS_PROFILE.verified).toBe(false);
++    const out = build("2026-06-15");
++    expect(out.warnings.map((w) => w.code)).toContain("profile_unverified");
++    expect(out.warnings.find((w) => w.code === "profile_unverified")!.message).toBe(
++      MSCONS_READINESS_NOTE_DE,
++    );
++  });
++
++  it("separates the verified syntax from the unverified profile in what it claims", () => {
++    expect(MSCONS_READINESS_NOTE_DE).toMatch(/Syntax dieser Nachricht ist geprüft/);
++    expect(MSCONS_READINESS_NOTE_DE).toMatch(/nicht verifizierten Profilfassung/);
++  });
++
++  it("requires a reference and a date before the profile may be verified", () => {
++    if (MSCONS_PROFILE.verified) {
++      expect(MSCONS_PROFILE.reference).not.toBeNull();
++      expect(MSCONS_PROFILE.asOf).not.toBeNull();
++    } else {
++      expect(MSCONS_PROFILE.openQuestion).toBeTruthy();
++    }
++  });
++});
++
++describe("ranges and reconciliation", () => {
++  it("accepts a multi-day range at the range's own interval count", () => {
++    const r = rangeGrid("2026-10-24", "2026-10-27");
++    const out = buildMscons({
++      period: { from: "2026-10-24", to: "2026-10-27" },
++      sender: { code: SENDER },
++      receiver: { code: RECEIVER },
++      locations: [
++        { melo: MELO, direction: "consumption", valuesKwh: new Array(r.intervals).fill(0.1) },
++      ],
++      preparedAtMs: PREPARED,
++    });
++    expect(out.grid.intervals).toBe(3 * 96 + 4);
++    expect(out.grid.dstDays).toEqual([{ date: "2026-10-25", intervals: 100 }]);
++    expect(verifyInterchange(out.message).ok).toBe(true);
++  });
++
++  it("reports totals that match the values it was given", () => {
++    const g = dayGrid("2026-06-15");
++    const values = Array.from({ length: g.intervals }, (_, i) => i / 1000);
++    const out = build("2026-06-15", {
++      locations: [{ melo: MELO, direction: "consumption", valuesKwh: values }],
++    });
++    expect(out.totals[0].values).toBe(96);
++    expect(out.totals[0].kwh).toBeCloseTo(values.reduce((s, v) => s + v, 0), 9);
++  });
++
++  it("reports its own byte length, which is what a transport limits", () => {
++    const out = build("2026-06-15");
++    expect(out.bytes).toBe(new TextEncoder().encode(out.message).length);
++  });
++});
++
++// The chain has to close: what the allocation engine assigned is what goes
++// onto the wire, on the same grid, with no reshaping in between.
++describe("composition with the allocation engine", () => {
++  it("sends exactly what was allocated, on the real grid of the day", () => {
++    for (const date of ["2026-06-15", "2026-03-29", "2026-10-25"]) {
++      const g = dayGrid(date);
++      const profile = illustrativeDayProfile({
++        kwp: 30,
++        dailyConsumptionKwh: 8,
++        participants: 4,
++        intervals: g.intervals,
++      });
++      const shares = illustrativeShares(4);
++      const allocation = allocate(
++        {
++          key: "cascading",
++          generationKwh: profile.generationKwh,
++          participants: profile.consumptionKwh.map((c, i) => ({
++            id: `we-${i + 1}`,
++            share: shares[i],
++            consumptionKwh: c,
++          })),
++        },
++        { includeSeries: true },
++      );
++
++      const out = buildMscons({
++        period: { date },
++        sender: { code: SENDER },
++        receiver: { code: RECEIVER },
++        locations: [
++          {
++            melo: MELO,
++            direction: "consumption",
++            valuesKwh: allocation.participants[0].series ?? [],
++          },
++        ],
++        preparedAtMs: PREPARED,
++      });
++
++      expect(out.grid.intervals).toBe(g.intervals);
++      expect(out.totals[0].kwh).toBeCloseTo(allocation.participants[0].allocatedKwh, 6);
++      expect(verifyInterchange(out.message).ok).toBe(true);
++    }
++  });
++});
+diff --git a/client/src/pages/Home.tsx b/client/src/pages/Home.tsx
+index b7609e2..b131b67 100644
+--- a/client/src/pages/Home.tsx
++++ b/client/src/pages/Home.tsx
+@@ -4,6 +4,7 @@ import { BreakEvenPanel } from "@/components/BreakEvenPanel";
+ import { EligibilityPanel } from "@/components/EligibilityPanel";
+ import { MesskonzeptPanel, type MesskonzeptAnswers } from "@/components/MesskonzeptPanel";
+ import { AllocationPanel } from "@/components/AllocationPanel";
++import { MarktkommunikationPanel } from "@/components/MarktkommunikationPanel";
+ import type { QualificationFacts } from "../../../shared/eligibility";
+ import { evaluateEligibility } from "../../../shared/eligibility";
+ import { track } from "@/lib/analytics";
+@@ -683,6 +684,9 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
+         {/* What the metering is for: the split, and what it is worth. */}
+         <AllocationPanel inputs={inputs} />
+ 
++        {/* Where a project stops being a spreadsheet. */}
++        <MarktkommunikationPanel inputs={inputs} />
++
+         <LeadCaptureBand
+           inputs={inputs}
+           result={baseScenario}
+diff --git a/server/api-v1.ts b/server/api-v1.ts
+index 8c046d9..72008d4 100644
+--- a/server/api-v1.ts
++++ b/server/api-v1.ts
+@@ -28,9 +28,25 @@ import {
+   type ProvenanceEntry,
+   AllocationRequestSchema,
+   BillingRequestSchema,
++  IdentifierCheckRequestSchema,
++  MAKO_PREFIX,
++  MarketGridRequestSchema,
+   MesskonzeptRequestSchema,
++  MsconsRequestSchema,
+   type BillingResponse,
++  type IdentifierCheckResponse,
++  type MarketGridResponse,
++  type MsconsResponse,
+ } from "../shared/api-contract.js";
++import {
++  MarketTimeError,
++  dayGrid,
++  edifact303,
++  rangeGrid,
++} from "../shared/market-time.js";
++import { CHECK_DIGIT_ALGORITHMS, validateMessageIdentifiers } from "../shared/market-ids.js";
++import { MsconsError, buildMscons } from "../shared/mscons.js";
++import { verifyInterchange } from "../shared/edifact.js";
+ import { BillingError, billPeriod, reconcile } from "../shared/billing.js";
+ import {
+   AllocationError,
+@@ -308,6 +324,9 @@ export function mountApiV1(
+         `${API_PREFIX}/messkonzept`,
+         `${API_PREFIX}/allocation`,
+         `${API_PREFIX}/billing`,
++        `${MAKO_PREFIX}/grid`,
++        `${MAKO_PREFIX}/identifiers`,
++        `${MAKO_PREFIX}/mscons`,
+       ],
+     };
+ 
+@@ -508,4 +527,142 @@ export function mountApiV1(
+     res.setHeader("Cache-Control", "no-store");
+     return res.status(200).json(body);
+   });
++
++  // --------------------------------------------------------------------------
++  // GET /api/v1/mako/grid — the real quarter-hour grid of a day or range
++  // --------------------------------------------------------------------------
++  app.get(`${MAKO_PREFIX}/grid`, deps.limiter, requireKey, (req: Request, res: Response) => {
++    const parsed = MarketGridRequestSchema.safeParse(req.query);
++    if (!parsed.success) {
++      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++    }
++
++    try {
++      const q = parsed.data;
++      const grid =
++        q.date !== undefined
++          ? (() => {
++              const g = dayGrid(q.date);
++              return {
++                from: g.date,
++                to: g.date,
++                intervals: g.intervals,
++                days: [{ date: g.date, intervals: g.intervals, kind: g.kind }],
++                startsUtcMs: g.startsUtcMs,
++              };
++            })()
++          : (() => {
++              const r = rangeGrid(q.from!, q.to!);
++              return {
++                from: r.from,
++                to: r.to,
++                intervals: r.intervals,
++                days: r.days.map((d) => ({ date: d.date, intervals: d.intervals, kind: d.kind })),
++                startsUtcMs: r.startsUtcMs,
++              };
++            })();
++
++      const body: MarketGridResponse = {
++        ok: true,
++        model: stamp(new Date()),
++        timezone: "Europe/Berlin",
++        from: grid.from,
++        to: grid.to,
++        intervals: grid.intervals,
++        days: grid.days,
++        dstDays: grid.days
++          .filter((d) => d.kind !== "normal")
++          .map((d) => ({ date: d.date, intervals: d.intervals })),
++        firstIntervalStart: edifact303(grid.startsUtcMs[0]),
++        lastIntervalStart: edifact303(grid.startsUtcMs[grid.startsUtcMs.length - 1]),
++      };
++
++      res.setHeader("Cache-Control", "no-store");
++      return res.status(200).json(body);
++    } catch (err) {
++      if (err instanceof MarketTimeError) {
++        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
++      }
++      throw err;
++    }
++  });
++
++  // --------------------------------------------------------------------------
++  // POST /api/v1/mako/identifiers — check before anything is sent
++  // --------------------------------------------------------------------------
++  app.post(`${MAKO_PREFIX}/identifiers`, deps.limiter, requireKey, (req: Request, res: Response) => {
++    const parsed = IdentifierCheckRequestSchema.safeParse(req.body);
++    if (!parsed.success) {
++      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++    }
++
++    const result = validateMessageIdentifiers(parsed.data);
++    const body: IdentifierCheckResponse = {
++      ok: true,
++      model: stamp(new Date()),
++      valid: result.ok,
++      results: result.results,
++      problems: result.problems,
++      algorithms: Object.values(CHECK_DIGIT_ALGORITHMS).map((a) => ({
++        id: a.id,
++        name: a.name,
++        appliesTo: a.appliesTo,
++        verified: a.verified,
++        openQuestion: a.openQuestion ?? null,
++      })),
++    };
++
++    res.setHeader("Cache-Control", "no-store");
++    return res.status(200).json(body);
++  });
++
++  // --------------------------------------------------------------------------
++  // POST /api/v1/mako/mscons — build the metering-value message
++  // --------------------------------------------------------------------------
++  app.post(`${MAKO_PREFIX}/mscons`, deps.limiter, requireKey, (req: Request, res: Response) => {
++    const parsed = MsconsRequestSchema.safeParse(req.body);
++    if (!parsed.success) {
++      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++    }
++
++    const { reference, ...input } = parsed.data;
++
++    let result: ReturnType<typeof buildMscons>;
++    try {
++      result = buildMscons(input);
++    } catch (err) {
++      // Wrong series length for a clock-change day, a malformed identifier, a
++      // duplicated Messlokation: the caller's input, with the reason named.
++      if (err instanceof MsconsError || err instanceof MarketTimeError) {
++        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
++      }
++      throw err;
++    }
++
++    const body: MsconsResponse = {
++      ok: true,
++      reference: reference ?? null,
++      model: stamp(new Date()),
++      message: result.message,
++      bytes: result.bytes,
++      controlReference: result.controlReference,
++      messageReference: result.messageReference,
++      grid: result.grid,
++      totals: result.totals,
++      // Read back out of the produced message, not assumed.
++      syntax: verifyInterchange(result.message),
++      profile: {
++        id: result.profile.id,
++        messageType: result.profile.messageType,
++        directory: result.profile.directory,
++        associationCode: result.profile.associationCode,
++        verified: result.profile.verified,
++        openQuestion: result.profile.openQuestion ?? null,
++      },
++      warnings: result.warnings,
++    };
++
++    res.setHeader("Cache-Control", "no-store");
++    return res.status(200).json(body);
++  });
+ }
+diff --git a/shared/allocation.ts b/shared/allocation.ts
+index 082341a..9afb07d 100644
+--- a/shared/allocation.ts
++++ b/shared/allocation.ts
+@@ -32,15 +32,21 @@
+  */
+ 
+ import { z } from "zod";
++import { INTERVALS_NORMAL_DAY, INTERVAL_MINUTES as MARKET_INTERVAL_MINUTES } from "./market-time.js";
+ 
+ // ============================================================================
+ // TIME BASE
+ // ============================================================================
+ 
+-/** Settlement resolution for the German market. */
+-export const INTERVAL_MINUTES = 15;
++/**
++ * Settlement resolution, taken from the market time base so there is one
++ * source of truth. INTERVALS_PER_DAY is the ORDINARY day only: two days a
++ * year have 92 and 100 intervals, and anything that needs the real count for
++ * a specific date asks shared/market-time.ts for that day's grid.
++ */
++export const INTERVAL_MINUTES = MARKET_INTERVAL_MINUTES;
+ export const INTERVALS_PER_HOUR = 60 / INTERVAL_MINUTES;
+-export const INTERVALS_PER_DAY = 24 * INTERVALS_PER_HOUR;
++export const INTERVALS_PER_DAY = INTERVALS_NORMAL_DAY;
+ 
+ /** Bounded so a single request cannot be turned into an unbounded computation. */
+ export const MAX_INTERVALS = 35_040; // one non-leap year at 15 minutes
+@@ -446,15 +452,22 @@ export function illustrativeDayProfile(options: {
+   participants: number;
+   /** Peak-sun equivalent hours for the modelled day. */
+   peakSunHours?: number;
++  /**
++   * Length of the day being modelled. Pass the real count from
++   * shared/market-time.ts when the day is a clock-change day: on those the
++   * profile must be 92 or 100 values long, not 96.
++   */
++  intervals?: number;
+ }): { generationKwh: number[]; consumptionKwh: number[][] } {
+   const { kwp, dailyConsumptionKwh, participants } = options;
+   const peakSunHours = options.peakSunHours ?? 3.5;
++  const n = options.intervals ?? INTERVALS_PER_DAY;
+ 
+-  // Generation: raised cosine over a 12-hour window centred at interval 48.
+-  const raw = zeros(INTERVALS_PER_DAY);
++  // Generation: raised cosine over a 12-hour window centred on solar noon.
++  const raw = zeros(n);
+   const halfWindow = 6 * INTERVALS_PER_HOUR;
+-  for (let t = 0; t < INTERVALS_PER_DAY; t++) {
+-    const offset = t - INTERVALS_PER_DAY / 2;
++  for (let t = 0; t < n; t++) {
++    const offset = t - n / 2;
+     if (Math.abs(offset) >= halfWindow) continue;
+     raw[t] = 0.5 * (1 + Math.cos((Math.PI * offset) / halfWindow));
+   }
+@@ -470,8 +483,8 @@ export function illustrativeDayProfile(options: {
+   for (let p = 0; p < participants; p++) {
+     const shiftHours = ((p % 5) - 2) * 0.75;
+     const scale = 1 + ((p % 3) - 1) * 0.2;
+-    const shape = zeros(INTERVALS_PER_DAY);
+-    for (let t = 0; t < INTERVALS_PER_DAY; t++) {
++    const shape = zeros(n);
++    for (let t = 0; t < n; t++) {
+       const hour = t / INTERVALS_PER_HOUR - shiftHours;
+       const base = 0.35;
+       const morning = 0.9 * Math.exp(-Math.pow(hour - 7.5, 2) / 2.5);
+diff --git a/shared/api-contract.ts b/shared/api-contract.ts
+index cf3c37e..2c3aa18 100644
+--- a/shared/api-contract.ts
++++ b/shared/api-contract.ts
+@@ -440,3 +440,156 @@ export const BillingResponseSchema = z.object({
+   disclaimer: z.string(),
+ });
+ export type BillingResponse = z.infer<typeof BillingResponseSchema>;
++
++// ============================================================================
++// MARKTKOMMUNIKATION
++// ============================================================================
++
++export const MAKO_PREFIX = `${API_PREFIX}/mako`;
++
++export const MarketGridRequestSchema = z
++  .object({
++    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
++    from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
++    to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
++  })
++  .refine((v) => (v.date !== undefined) !== (v.from !== undefined && v.to !== undefined), {
++    message: "Entweder ein Datum oder ein Zeitraum aus from und to angeben.",
++  });
++export type MarketGridRequest = z.infer<typeof MarketGridRequestSchema>;
++
++export const MarketGridResponseSchema = z.object({
++  ok: z.literal(true),
++  model: ApiModelStampSchema,
++  timezone: z.literal("Europe/Berlin"),
++  from: z.string(),
++  to: z.string(),
++  /** Real interval count. Not days x 96. */
++  intervals: z.number().int(),
++  days: z.array(
++    z.object({
++      date: z.string(),
++      intervals: z.number().int(),
++      kind: z.enum(["normal", "dst_short", "dst_long"]),
++    }),
++  ),
++  /** Days in the range that are not 96 intervals long. */
++  dstDays: z.array(z.object({ date: z.string(), intervals: z.number().int() })),
++  /** First and last interval start, as EDIFACT format 303. */
++  firstIntervalStart: z.string(),
++  lastIntervalStart: z.string(),
++});
++export type MarketGridResponse = z.infer<typeof MarketGridResponseSchema>;
++
++export const IdentifierCheckRequestSchema = z.object({
++  senderCode: z.string().max(64),
++  receiverCode: z.string().max(64),
++  malo: z.string().max(64).optional(),
++  melo: z.string().max(64).optional(),
++  balancingAreaEic: z.string().max(64).optional(),
++});
++export type IdentifierCheckRequest = z.infer<typeof IdentifierCheckRequestSchema>;
++
++export const IdValidationSchema = z.object({
++  value: z.string(),
++  format: z.enum(["ok", "invalid"]),
++  /**
++   * Never "ok" while the check-digit algorithm is unverified — the same gate
++   * the statutory citations use.
++   */
++  checkDigit: z.enum(["ok", "mismatch", "algorithm_unverified"]),
++  computed: z.string().nullable(),
++  problems: z.array(z.string()),
++});
++
++export const IdentifierCheckResponseSchema = z.object({
++  ok: z.literal(true),
++  model: ApiModelStampSchema,
++  valid: z.boolean(),
++  results: z.record(z.string(), IdValidationSchema),
++  problems: z.array(z.string()),
++  algorithms: z.array(
++    z.object({
++      id: z.string(),
++      name: z.string(),
++      appliesTo: z.string(),
++      verified: z.boolean(),
++      openQuestion: z.string().nullable(),
++    }),
++  ),
++});
++export type IdentifierCheckResponse = z.infer<typeof IdentifierCheckResponseSchema>;
++
++export const MsconsRequestSchema = z.object({
++  period: z.union([
++    z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }),
++    z.object({
++      from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
++      to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
++    }),
++  ]),
++  sender: z.object({ code: z.string().max(64), qualifier: z.string().max(8).optional() }),
++  receiver: z.object({ code: z.string().max(64), qualifier: z.string().max(8).optional() }),
++  locations: z
++    .array(
++      z.object({
++        melo: z.string().max(64),
++        malo: z.string().max(64).optional(),
++        direction: z.enum(["consumption", "feed_in"]),
++        valuesKwh: z.array(z.number().min(0)).min(1).max(35_040),
++        statuses: z.array(z.enum(["measured", "substituted", "estimated"])).optional(),
++      }),
++    )
++    .min(1)
++    .max(200),
++  controlReference: z.string().max(14).optional(),
++  messageReference: z.string().max(14).optional(),
++  test: z.boolean().optional(),
++  reference: z.string().max(120).optional(),
++});
++export type MsconsRequest = z.infer<typeof MsconsRequestSchema>;
++
++export const MsconsResponseSchema = z.object({
++  ok: z.literal(true),
++  reference: z.string().nullable(),
++  model: ApiModelStampSchema,
++  /** The interchange, ready to hand to a transport. */
++  message: z.string(),
++  bytes: z.number().int(),
++  controlReference: z.string(),
++  messageReference: z.string(),
++  grid: z.object({
++    intervals: z.number().int(),
++    from: z.string(),
++    to: z.string(),
++    dstDays: z.array(z.object({ date: z.string(), intervals: z.number().int() })),
++  }),
++  totals: z.array(
++    z.object({
++      melo: z.string(),
++      direction: z.enum(["consumption", "feed_in"]),
++      kwh: z.number(),
++      values: z.number().int(),
++    }),
++  ),
++  /**
++   * Syntax integrity re-checked from the produced message: segment counts and
++   * control references read back out, not assumed from the code path.
++   */
++  syntax: z.object({
++    ok: z.boolean(),
++    messageCount: z.number().int(),
++    findings: z.array(z.object({ code: z.string(), message: z.string() })),
++  }),
++  /** Message type, directory and whether the segment usage is verified. */
++  profile: z.object({
++    id: z.string(),
++    messageType: z.string(),
++    directory: z.object({ version: z.string(), release: z.string(), agency: z.string() }),
++    associationCode: z.string(),
++    verified: z.boolean(),
++    openQuestion: z.string().nullable(),
++  }),
++  warnings: z.array(z.object({ code: z.string(), message: z.string() })),
++});
++export type MsconsResponse = z.infer<typeof MsconsResponseSchema>;
+diff --git a/shared/edifact.ts b/shared/edifact.ts
+new file mode 100644
+index 0000000..fe7789b
+--- /dev/null
++++ b/shared/edifact.ts
+@@ -0,0 +1,491 @@
++/**
++ * shared/edifact.ts
++ *
++ * UN/EDIFACT syntax, level A — the wire format German market communication
++ * still runs on.
++ *
++ * This is where naive implementations break, and they break in the same place
++ * every time: escaping. EDIFACT reserves four characters — component
++ * separator, element separator, segment terminator and the release character
++ * itself — and any of them may legitimately appear inside a value. A meter
++ * point name containing an apostrophe, a partner name containing a plus sign,
++ * a free-text field containing a colon: each one silently truncates a message
++ * that was assembled by string concatenation, and the receiving system answers
++ * days later with a rejection that names no cause.
++ *
++ * So the rule here is absolute: values NEVER reach the wire without passing
++ * through the escaper, and the parser reverses it exactly. The round trip is
++ * tested against payloads built specifically out of the reserved characters.
++ *
++ * Two more integrity rules the format demands and half of the implementations
++ * get wrong:
++ *
++ *   - UNT counts the segments of its own message INCLUDING UNH and UNT.
++ *   - UNZ counts the messages in the interchange, and its control reference
++ *     must equal the one in UNB.
++ *
++ * Both are computed here, never supplied by the caller.
++ */
++
++// ============================================================================
++// SERVICE CHARACTERS
++// ============================================================================
++
++export type ServiceCharacters = {
++  /** Separates components inside a composite data element. Default ":". */
++  component: string;
++  /** Separates data elements inside a segment. Default "+". */
++  element: string;
++  /** Decimal mark. Default "." — note EDIFACT's default is in fact the comma. */
++  decimal: string;
++  /** Release (escape) character. Default "?". */
++  release: string;
++  /** Reserved, always a space. */
++  reserved: string;
++  /** Terminates a segment. Default "'". */
++  segment: string;
++};
++
++/**
++ * The set German market communication uses. The decimal mark is the point,
++ * which differs from the EDIFACT default and is exactly the kind of detail
++ * that has to be declared rather than assumed.
++ */
++export const DEFAULT_SERVICE_CHARACTERS: ServiceCharacters = {
++  component: ":",
++  element: "+",
++  decimal: ".",
++  release: "?",
++  reserved: " ",
++  segment: "'",
++};
++
++/** The UNA segment that announces the service characters. */
++export function serviceStringAdvice(chars: ServiceCharacters = DEFAULT_SERVICE_CHARACTERS): string {
++  return `UNA${chars.component}${chars.element}${chars.decimal}${chars.release}${chars.reserved}${chars.segment}`;
++}
++
++export class EdifactError extends Error {
++  readonly code: string;
++  constructor(code: string, message: string) {
++    super(message);
++    this.name = "EdifactError";
++    this.code = code;
++  }
++}
++
++// ============================================================================
++// ESCAPING
++// ============================================================================
++
++/**
++ * Escape a value for the wire.
++ *
++ * The release character is escaped FIRST. Doing it in any other order double-
++ * escapes what the earlier passes inserted, and the value comes back wrong.
++ */
++export function escapeValue(value: string, chars: ServiceCharacters = DEFAULT_SERVICE_CHARACTERS): string {
++  let out = "";
++  for (const ch of value) {
++    if (
++      ch === chars.release ||
++      ch === chars.component ||
++      ch === chars.element ||
++      ch === chars.segment
++    ) {
++      out += chars.release;
++    }
++    out += ch;
++  }
++  return out;
++}
++
++/** Reverse of escapeValue. A trailing release character is a malformed value. */
++export function unescapeValue(value: string, chars: ServiceCharacters = DEFAULT_SERVICE_CHARACTERS): string {
++  let out = "";
++  for (let i = 0; i < value.length; i++) {
++    if (value[i] === chars.release) {
++      if (i + 1 >= value.length) {
++        throw new EdifactError("dangling_release", "Ein Freigabezeichen steht am Ende des Wertes.");
++      }
++      out += value[i + 1];
++      i++;
++      continue;
++    }
++    out += value[i];
++  }
++  return out;
++}
++
++// ============================================================================
++// SEGMENTS
++// ============================================================================
++
++/**
++ * A segment: a tag and its data elements. An element is either a simple value
++ * or a composite — an array of components. Undefined and null components are
++ * written as empty, which is how EDIFACT expresses an omitted component.
++ */
++export type Component = string | number | null | undefined;
++export type DataElement = Component | Component[];
++
++export type Segment = {
++  tag: string;
++  elements: DataElement[];
++};
++
++function componentToString(c: Component, chars: ServiceCharacters): string {
++  if (c === null || c === undefined) return "";
++  if (typeof c === "number") {
++    if (!Number.isFinite(c)) {
++      throw new EdifactError("non_finite_number", "Ein nicht endlicher Zahlenwert kann nicht übertragen werden.");
++    }
++    // The decimal mark is a service character, so it is written, not escaped.
++    return String(c).replace(".", chars.decimal);
++  }
++  return escapeValue(c, chars);
++}
++
++/** Serialise one segment, terminator included. */
++export function writeSegment(
++  segment: Segment,
++  chars: ServiceCharacters = DEFAULT_SERVICE_CHARACTERS,
++): string {
++  if (!/^[A-Z]{3}$/.test(segment.tag)) {
++    throw new EdifactError("invalid_tag", `Segmentbezeichner "${segment.tag}" muss aus drei Großbuchstaben bestehen.`);
++  }
++
++  const parts = segment.elements.map((el) =>
++    Array.isArray(el)
++      ? el.map((c) => componentToString(c, chars)).join(chars.component)
++      : componentToString(el, chars),
++  );
++
++  // Trailing empty elements carry no information and are omitted, which is
++  // what receiving systems expect and what keeps messages comparable.
++  while (parts.length > 0 && parts[parts.length - 1] === "") parts.pop();
++
++  return [segment.tag, ...parts].join(chars.element) + chars.segment;
++}
++
++/**
++ * Split a message into segments, honouring the release character.
++ *
++ * A terminator preceded by an unconsumed release character is data, not a
++ * boundary — the single rule a `split("'")` gets wrong.
++ */
++export function splitSegments(
++  message: string,
++  chars: ServiceCharacters = DEFAULT_SERVICE_CHARACTERS,
++): string[] {
++  const segments: string[] = [];
++  let current = "";
++  let released = false;
++
++  for (const ch of message) {
++    if (released) {
++      current += ch;
++      released = false;
++      continue;
++    }
++    if (ch === chars.release) {
++      current += ch;
++      released = true;
++      continue;
++    }
++    if (ch === chars.segment) {
++      if (current.trim().length > 0) segments.push(current.trim());
++      current = "";
++      continue;
++    }
++    current += ch;
++  }
++
++  if (released) {
++    throw new EdifactError("dangling_release", "Die Nachricht endet mit einem Freigabezeichen.");
++  }
++  if (current.trim().length > 0) {
++    throw new EdifactError("unterminated_segment", "Das letzte Segment ist nicht abgeschlossen.");
++  }
++  return segments;
++}
++
++/** Split on a separator, honouring the release character. */
++function splitReleased(value: string, separator: string, chars: ServiceCharacters): string[] {
++  const out: string[] = [];
++  let current = "";
++  let released = false;
++
++  for (const ch of value) {
++    if (released) {
++      current += ch;
++      released = false;
++      continue;
++    }
++    if (ch === chars.release) {
++      current += ch;
++      released = true;
++      continue;
++    }
++    if (ch === separator) {
++      out.push(current);
++      current = "";
++      continue;
++    }
++    current += ch;
++  }
++  out.push(current);
++  return out;
++}
++
++/**
++ * Parse one serialised segment back into tag and elements.
++ *
++ * A trailing terminator is accepted and discarded, so a segment can be handed
++ * back exactly as writeSegment produced it. An ESCAPED terminator inside a
++ * value is not a boundary and survives — which is why this splits on the
++ * terminator rather than trimming the last character.
++ */
++export function readSegment(
++  raw: string,
++  chars: ServiceCharacters = DEFAULT_SERVICE_CHARACTERS,
++): Segment {
++  const body = splitReleased(raw.trim(), chars.segment, chars)[0];
++  const parts = splitReleased(body, chars.element, chars);
++  const tag = parts.shift() ?? "";
++  if (!/^[A-Z]{3}$/.test(tag)) {
++    throw new EdifactError("invalid_tag", `Segmentbezeichner "${tag}" ist ungültig.`);
++  }
++  const elements: DataElement[] = parts.map((p) => {
++    const comps = splitReleased(p, chars.component, chars).map((c) => unescapeValue(c, chars));
++    return comps.length === 1 ? comps[0] : comps;
++  });
++  return { tag, elements };
++}
++
++/** Parse a whole interchange, detecting a leading UNA and using its characters. */
++export function parseInterchange(message: string): {
++  chars: ServiceCharacters;
++  segments: Segment[];
++} {
++  let chars = DEFAULT_SERVICE_CHARACTERS;
++  let body = message.trim();
++
++  if (body.startsWith("UNA")) {
++    if (body.length < 9) {
++      throw new EdifactError("invalid_una", "Das UNA-Segment ist unvollständig.");
++    }
++    chars = {
++      component: body[3],
++      element: body[4],
++      decimal: body[5],
++      release: body[6],
++      reserved: body[7],
++      segment: body[8],
++    };
++    body = body.slice(9);
++  }
++
++  return { chars, segments: splitSegments(body, chars).map((s) => readSegment(s, chars)) };
++}
++
++// ============================================================================
++// INTERCHANGE ASSEMBLY
++// ============================================================================
++
++export type MessageBody = {
++  /** Message reference, unique within the interchange. */
++  reference: string;
++  /** e.g. ["MSCONS", "D", "04B", "UN", "2.4c"] */
++  identifier: string[];
++  /** Everything between UNH and UNT, in order. */
++  segments: Segment[];
++};
++
++export type InterchangeHeader = {
++  /** Sender identification and qualifier. */
++  sender: { id: string; qualifier: string };
++  receiver: { id: string; qualifier: string };
++  /** Interchange preparation date/time. */
++  preparedAt: { date: string; time: string };
++  /** Interchange control reference. UNZ must repeat it, and does. */
++  controlReference: string;
++  /** Application reference, e.g. the message type. */
++  applicationReference?: string;
++  /** Syntax identifier and version. */
++  syntax?: { identifier: string; version: string };
++  /** Test indicator. Set for anything not meant to be processed productively. */
++  testIndicator?: boolean;
++};
++
++/**
++ * Assemble a complete interchange.
++ *
++ * UNT segment counts and the UNZ message count are computed from the actual
++ * content. They are the two integrity checks a receiving system runs first,
++ * and a caller-supplied count is a caller-supplied bug.
++ */
++export function buildInterchange(
++  header: InterchangeHeader,
++  messages: MessageBody[],
++  chars: ServiceCharacters = DEFAULT_SERVICE_CHARACTERS,
++): string {
++  if (messages.length === 0) {
++    throw new EdifactError("empty_interchange", "Eine Übertragungsdatei ohne Nachricht ist nicht zulässig.");
++  }
++
++  const seen = new Set<string>();
++  for (const m of messages) {
++    if (seen.has(m.reference)) {
++      throw new EdifactError("duplicate_message_reference", `Die Nachrichtenreferenz "${m.reference}" kommt mehrfach vor.`);
++    }
++    seen.add(m.reference);
++  }
++
++  const syntax = header.syntax ?? { identifier: "UNOC", version: "3" };
++
++  const out: string[] = [serviceStringAdvice(chars)];
++
++  out.push(
++    writeSegment(
++      {
++        tag: "UNB",
++        elements: [
++          [syntax.identifier, syntax.version],
++          [header.sender.id, header.sender.qualifier],
++          [header.receiver.id, header.receiver.qualifier],
++          [header.preparedAt.date, header.preparedAt.time],
++          header.controlReference,
++          null,
++          header.applicationReference ?? null,
++          null,
++          null,
++          null,
++          header.testIndicator ? "1" : null,
++        ],
++      },
++      chars,
++    ),
++  );
++
++  for (const m of messages) {
++    const unh: Segment = { tag: "UNH", elements: [m.reference, m.identifier] };
++    // UNH + body + UNT.
++    const count = m.segments.length + 2;
++    const unt: Segment = { tag: "UNT", elements: [String(count), m.reference] };
++
++    out.push(writeSegment(unh, chars));
++    for (const s of m.segments) out.push(writeSegment(s, chars));
++    out.push(writeSegment(unt, chars));
++  }
++
++  out.push(
++    writeSegment(
++      { tag: "UNZ", elements: [String(messages.length), header.controlReference] },
++      chars,
++    ),
++  );
++
++  return out.join("");
++}
++
++// ============================================================================
++// INTEGRITY
++// ============================================================================
++
++export type IntegrityFinding = { code: string; message: string };
++
++/**
++ * Verify an interchange against its own declared counts and references.
++ *
++ * Deliberately independent of the builder: it reads the produced message and
++ * checks the invariants from the outside, so a test — or a receiving system —
++ * can establish that a message is well-formed without trusting the code that
++ * wrote it.
++ */
++export function verifyInterchange(message: string): {
++  ok: boolean;
++  findings: IntegrityFinding[];
++  messageCount: number;
++} {
++  const findings: IntegrityFinding[] = [];
++  const { segments } = parseInterchange(message);
++
++  const first = segments[0];
++  const last = segments[segments.length - 1];
++
++  if (!first || first.tag !== "UNB") {
++    findings.push({ code: "missing_unb", message: "Die Übertragungsdatei beginnt nicht mit UNB." });
++  }
++  if (!last || last.tag !== "UNZ") {
++    findings.push({ code: "missing_unz", message: "Die Übertragungsdatei endet nicht mit UNZ." });
++  }
++
++  const flat = (el: DataElement | undefined): string =>
++    el === undefined ? "" : Array.isArray(el) ? String(el[0] ?? "") : String(el ?? "");
++
++  let messageCount = 0;
++  let open: { reference: string; startIndex: number } | null = null;
++
++  for (let i = 0; i < segments.length; i++) {
++    const seg = segments[i];
++
++    if (seg.tag === "UNH") {
++      if (open) {
++        findings.push({ code: "nested_unh", message: `UNH ohne vorangehendes UNT bei Segment ${i + 1}.` });
++      }
++      open = { reference: flat(seg.elements[0]), startIndex: i };
++      continue;
++    }
++
++    if (seg.tag === "UNT") {
++      if (!open) {
++        findings.push({ code: "unt_without_unh", message: `UNT ohne UNH bei Segment ${i + 1}.` });
++        continue;
++      }
++      messageCount++;
++
++      const declared = Number(flat(seg.elements[0]));
++      const actual = i - open.startIndex + 1;
++      if (declared !== actual) {
++        findings.push({
++          code: "unt_count_mismatch",
++          message: `UNT weist ${declared} Segmente aus, tatsächlich sind es ${actual}.`,
++        });
++      }
++
++      const reference = flat(seg.elements[1]);
++      if (reference !== open.reference) {
++        findings.push({
++          code: "unt_reference_mismatch",
++          message: `UNT verweist auf "${reference}", UNH lautet "${open.reference}".`,
++        });
++      }
++      open = null;
++    }
++  }
++
++  if (open) {
++    findings.push({ code: "unclosed_message", message: `Die Nachricht "${open.reference}" ist nicht durch UNT abgeschlossen.` });
++  }
++
++  if (first?.tag === "UNB" && last?.tag === "UNZ") {
++    const unbRef = flat(first.elements[4]);
++    const unzRef = flat(last.elements[1]);
++    if (unbRef !== unzRef) {
++      findings.push({
++        code: "control_reference_mismatch",
++        message: `UNZ verweist auf "${unzRef}", UNB lautet "${unbRef}".`,
++      });
++    }
++    const declared = Number(flat(last.elements[0]));
++    if (declared !== messageCount) {
++      findings.push({
++        code: "unz_count_mismatch",
++        message: `UNZ weist ${declared} Nachrichten aus, tatsächlich sind es ${messageCount}.`,
++      });
++    }
++  }
++
++  return { ok: findings.length === 0, findings, messageCount };
++}
+diff --git a/shared/market-ids.ts b/shared/market-ids.ts
+new file mode 100644
+index 0000000..d945df1
+--- /dev/null
++++ b/shared/market-ids.ts
+@@ -0,0 +1,307 @@
++/**
++ * shared/market-ids.ts
++ *
++ * The identifiers German market communication is addressed with.
++ *
++ * Nothing can be exchanged with a Netzbetreiber, a Messstellenbetreiber or a
++ * Bilanzkreisverantwortlichen without them: the Marktlokation and Messlokation
++ * being reported on, the BDEW code numbers of sender and receiver, and the EIC
++ * of the balancing area. A message with a malformed identifier is rejected
++ * downstream, days later, by a system that answers with an error code and no
++ * explanation — so they are validated here, before anything is sent.
++ *
++ * Two classes of rule, kept apart on purpose:
++ *
++ *   - FORMAT rules (length, character set) are self-evident from the value and
++ *     are asserted plainly.
++ *   - CHECK-DIGIT algorithms are specifications published by a third party.
++ *     Each one is registered with its own `verified` flag, and a validator
++ *     never reports a check digit as correct while its algorithm is unverified
++ *     — it reports `algorithm_unverified` instead. The same gate the statutory
++ *     citations use: an unchecked rule does not get to sound authoritative.
++ */
++
++// ============================================================================
++// ALGORITHM REGISTER
++// ============================================================================
++
++export type CheckDigitAlgorithm = {
++  id: string;
++  name: string;
++  /** What it is applied to. */
++  appliesTo: string;
++  /** Has the implementation been checked against the published specification? */
++  verified: boolean;
++  /** Where it was checked. MUST be non-null when verified is true. */
++  reference: string | null;
++  /** ISO date it was checked. MUST be non-null when verified is true. */
++  asOf: string | null;
++  openQuestion?: string;
++};
++
++export const CHECK_DIGIT_ALGORITHMS: Record<string, CheckDigitAlgorithm> = {
++  malo: {
++    id: "malo",
++    name: "Prüfziffer der Marktlokations-ID",
++    appliesTo: "MaLo-ID, 11 Stellen",
++    verified: false,
++    reference: null,
++    asOf: null,
++    openQuestion:
++      "Die Gewichtung ist nicht gegen die aktuelle Veröffentlichung des BDEW geprüft. Bis dahin wird die Prüfziffer berechnet, aber nicht als bestätigt ausgewiesen.",
++  },
++  ean13: {
++    id: "ean13",
++    name: "Prüfziffer nach EAN-13 / GS1",
++    appliesTo: "BDEW-Codenummer, 13 Stellen",
++    verified: false,
++    reference: null,
++    asOf: null,
++    openQuestion:
++      "Der Algorithmus ist der allgemein bekannte EAN-13-Modulo-10; die Anwendung auf BDEW-Codenummern ist nicht gegen die Veröffentlichung geprüft.",
++  },
++  eic: {
++    id: "eic",
++    name: "Prüfzeichen des Energy Identification Code",
++    appliesTo: "EIC, 16 Stellen",
++    verified: false,
++    reference: null,
++    asOf: null,
++    openQuestion:
++      "Die Umsetzung folgt dem veröffentlichten ENTSO-E-Verfahren, ist aber nicht gegen die aktuelle Fassung des EIC-Referenzhandbuchs geprüft.",
++  },
++};
++
++export type CheckDigitStatus = "ok" | "mismatch" | "algorithm_unverified";
++
++/**
++ * Report a computed check digit only when its algorithm has been verified.
++ *
++ * This is the gate. Without it, an unchecked weighting would silently become a
++ * claim that an identifier is valid.
++ */
++function gate(algorithmId: string, matches: boolean): CheckDigitStatus {
++  const algo = CHECK_DIGIT_ALGORITHMS[algorithmId];
++  if (!algo || !algo.verified) return "algorithm_unverified";
++  return matches ? "ok" : "mismatch";
++}
++
++export type IdValidation = {
++  value: string;
++  /** Length and character set — asserted, because they need no third party. */
++  format: "ok" | "invalid";
++  checkDigit: CheckDigitStatus;
++  /** The digit or character the algorithm computed, whether or not it is trusted. */
++  computed: string | null;
++  problems: string[];
++};
++
++// ============================================================================
++// MARKTLOKATIONS-ID (MaLo)
++// ============================================================================
++
++export const MALO_LENGTH = 11;
++
++/** Modulo-10 over the first ten digits, even positions weighted double. */
++export function deriveMaloCheckDigit(first10: string): string {
++  if (!/^\d{10}$/.test(first10)) {
++    throw new Error("Für die Prüfziffer werden genau zehn Ziffern benötigt.");
++  }
++  let sum = 0;
++  for (let i = 0; i < 10; i++) {
++    const digit = first10.charCodeAt(i) - 48;
++    sum += i % 2 === 0 ? digit : digit * 2;
++  }
++  return String((10 - (sum % 10)) % 10);
++}
++
++export function validateMalo(value: string): IdValidation {
++  const problems: string[] = [];
++  const trimmed = value.trim();
++
++  if (!/^\d{11}$/.test(trimmed)) {
++    problems.push(`Eine MaLo-ID besteht aus genau ${MALO_LENGTH} Ziffern.`);
++    return { value: trimmed, format: "invalid", checkDigit: "algorithm_unverified", computed: null, problems };
++  }
++  if (trimmed.startsWith("0")) {
++    problems.push("Eine MaLo-ID beginnt nicht mit einer Null.");
++  }
++
++  const computed = deriveMaloCheckDigit(trimmed.slice(0, 10));
++  const status = gate("malo", computed === trimmed[10]);
++  if (status === "mismatch") problems.push("Die Prüfziffer stimmt nicht.");
++
++  return {
++    value: trimmed,
++    format: problems.length === 0 ? "ok" : "invalid",
++    checkDigit: status,
++    computed,
++    problems,
++  };
++}
++
++// ============================================================================
++// MESSLOKATIONS-ID (MeLo) — the Zählpunktbezeichnung
++// ============================================================================
++
++export const MELO_LENGTH = 33;
++
++/**
++ * Structure is asserted only as far as it is self-evident: 33 uppercase
++ * alphanumerics beginning with a two-letter country code. The internal split
++ * is documented but not enforced, because enforcing an unverified layout would
++ * reject valid identifiers.
++ */
++export function validateMelo(value: string): IdValidation {
++  const problems: string[] = [];
++  const trimmed = value.trim().toUpperCase();
++
++  if (trimmed.length !== MELO_LENGTH) {
++    problems.push(`Eine MeLo-ID (Zählpunktbezeichnung) hat genau ${MELO_LENGTH} Stellen, hier ${trimmed.length}.`);
++  }
++  if (!/^[0-9A-Z]*$/.test(trimmed)) {
++    problems.push("Eine MeLo-ID enthält ausschließlich Ziffern und Großbuchstaben.");
++  }
++  if (!/^[A-Z]{2}/.test(trimmed)) {
++    problems.push("Eine MeLo-ID beginnt mit einem zweistelligen Ländercode.");
++  }
++
++  return {
++    value: trimmed,
++    format: problems.length === 0 ? "ok" : "invalid",
++    // There is no check digit in this identifier.
++    checkDigit: "algorithm_unverified",
++    computed: null,
++    problems,
++  };
++}
++
++// ============================================================================
++// BDEW-CODENUMMER
++// ============================================================================
++
++export const BDEW_CODE_LENGTH = 13;
++
++/** EAN-13 modulo 10: positions weighted 1 and 3 alternately from the left. */
++export function deriveEan13CheckDigit(first12: string): string {
++  if (!/^\d{12}$/.test(first12)) {
++    throw new Error("Für die Prüfziffer werden genau zwölf Ziffern benötigt.");
++  }
++  let sum = 0;
++  for (let i = 0; i < 12; i++) {
++    sum += (first12.charCodeAt(i) - 48) * (i % 2 === 0 ? 1 : 3);
++  }
++  return String((10 - (sum % 10)) % 10);
++}
++
++export function validateBdewCode(value: string): IdValidation {
++  const problems: string[] = [];
++  const trimmed = value.trim();
++
++  if (!/^\d{13}$/.test(trimmed)) {
++    problems.push(`Eine BDEW-Codenummer besteht aus genau ${BDEW_CODE_LENGTH} Ziffern.`);
++    return { value: trimmed, format: "invalid", checkDigit: "algorithm_unverified", computed: null, problems };
++  }
++
++  const computed = deriveEan13CheckDigit(trimmed.slice(0, 12));
++  const status = gate("ean13", computed === trimmed[12]);
++  if (status === "mismatch") problems.push("Die Prüfziffer stimmt nicht.");
++
++  return { value: trimmed, format: problems.length === 0 ? "ok" : "invalid", checkDigit: status, computed, problems };
++}
++
++// ============================================================================
++// EIC — Energy Identification Code
++// ============================================================================
++
++export const EIC_LENGTH = 16;
++const EIC_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-";
++
++/**
++ * Check character over the first fifteen positions, weights 16 down to 2,
++ * modulo 37 across the code's own alphabet.
++ */
++export function deriveEicCheckCharacter(first15: string): string {
++  if (first15.length !== 15) {
++    throw new Error("Für das Prüfzeichen werden genau fünfzehn Stellen benötigt.");
++  }
++  let sum = 0;
++  for (let i = 0; i < 15; i++) {
++    const v = EIC_ALPHABET.indexOf(first15[i]);
++    if (v < 0) throw new Error(`Zeichen "${first15[i]}" gehört nicht zum EIC-Zeichenvorrat.`);
++    sum += v * (16 - i);
++  }
++  const check = 36 - ((sum - 1) % 37);
++  // 36 maps to "-", which the scheme does not permit as a check character:
++  // such a code has to be reissued rather than corrected.
++  return check === 36 ? "" : EIC_ALPHABET[check];
++}
++
++export function validateEic(value: string): IdValidation {
++  const problems: string[] = [];
++  const trimmed = value.trim().toUpperCase();
++
++  if (trimmed.length !== EIC_LENGTH) {
++    problems.push(`Ein EIC hat genau ${EIC_LENGTH} Stellen, hier ${trimmed.length}.`);
++    return { value: trimmed, format: "invalid", checkDigit: "algorithm_unverified", computed: null, problems };
++  }
++  for (const ch of trimmed) {
++    if (EIC_ALPHABET.indexOf(ch) < 0) {
++      problems.push(`Das Zeichen "${ch}" gehört nicht zum EIC-Zeichenvorrat.`);
++      return { value: trimmed, format: "invalid", checkDigit: "algorithm_unverified", computed: null, problems };
++    }
++  }
++
++  const computed = deriveEicCheckCharacter(trimmed.slice(0, 15));
++  if (computed === "") {
++    problems.push("Für diese Zeichenfolge ergibt sich kein zulässiges Prüfzeichen; der Code muss neu vergeben werden.");
++  }
++  const status = gate("eic", computed !== "" && computed === trimmed[15]);
++  if (status === "mismatch") problems.push("Das Prüfzeichen stimmt nicht.");
++
++  return {
++    value: trimmed,
++    format: problems.length === 0 ? "ok" : "invalid",
++    checkDigit: status,
++    computed: computed === "" ? null : computed,
++    problems,
++  };
++}
++
++// ============================================================================
++// PARTNER
++// ============================================================================
++
++export type MarketPartner = {
++  /** BDEW code number used to address this partner. */
++  code: string;
++  name: string;
++  /** Role in the message, e.g. "MS" sender, "MR" receiver. */
++  role: string;
++};
++
++/** Every identifier in one message, checked together. */
++export function validateMessageIdentifiers(input: {
++  senderCode: string;
++  receiverCode: string;
++  malo?: string;
++  melo?: string;
++  balancingAreaEic?: string;
++}): { ok: boolean; results: Record<string, IdValidation>; problems: string[] } {
++  const results: Record<string, IdValidation> = {
++    senderCode: validateBdewCode(input.senderCode),
++    receiverCode: validateBdewCode(input.receiverCode),
++  };
++  if (input.malo !== undefined) results.malo = validateMalo(input.malo);
++  if (input.melo !== undefined) results.melo = validateMelo(input.melo);
++  if (input.balancingAreaEic !== undefined) {
++    results.balancingAreaEic = validateEic(input.balancingAreaEic);
++  }
++
++  const problems: string[] = [];
++  for (const [field, r] of Object.entries(results)) {
++    for (const p of r.problems) problems.push(`${field}: ${p}`);
++  }
++
++  return { ok: problems.length === 0, results, problems };
++}
+diff --git a/shared/market-time.ts b/shared/market-time.ts
+new file mode 100644
+index 0000000..43fc4a8
+--- /dev/null
++++ b/shared/market-time.ts
+@@ -0,0 +1,332 @@
++/**
++ * shared/market-time.ts
++ *
++ * The German market time base.
++ *
++ * Every settlement quantity in this market is a quarter-hour value on a LOCAL
++ * time grid — Europe/Berlin — and that grid is not 96 intervals long. On the
++ * last Sunday in March a day has 92 quarter-hours; on the last Sunday in
++ * October it has 100. Two days a year, every engine that hard-codes 96 is
++ * wrong: it drops four intervals in spring and double-counts four in autumn,
++ * and the error lands in an invoice.
++ *
++ * This module is the single place that knows that. Everything downstream —
++ * allocation series, metering values, message timestamps — is built on the
++ * grid it produces rather than on an assumed interval count.
++ *
++ * No timezone library: the IANA rules come from the platform's own tz database
++ * through Intl, so they stay current without a dependency to update.
++ */
++
++/** The market's reference timezone. */
++export const MARKET_TIMEZONE = "Europe/Berlin";
++
++/** Settlement resolution. */
++export const INTERVAL_MINUTES = 15;
++export const INTERVAL_MS = INTERVAL_MINUTES * 60_000;
++
++/** Interval counts a local day can have. Anything else is a bug, not a date. */
++export const INTERVALS_NORMAL_DAY = 96;
++export const INTERVALS_SHORT_DAY = 92;
++export const INTERVALS_LONG_DAY = 100;
++
++export class MarketTimeError extends Error {
++  readonly code: string;
++  constructor(code: string, message: string) {
++    super(message);
++    this.name = "MarketTimeError";
++    this.code = code;
++  }
++}
++
++const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
++
++const partsFormatter = new Intl.DateTimeFormat("en-US", {
++  timeZone: MARKET_TIMEZONE,
++  hourCycle: "h23",
++  year: "numeric",
++  month: "2-digit",
++  day: "2-digit",
++  hour: "2-digit",
++  minute: "2-digit",
++  second: "2-digit",
++});
++
++type WallClock = {
++  year: number;
++  month: number;
++  day: number;
++  hour: number;
++  minute: number;
++  second: number;
++};
++
++/** The wall-clock reading in Europe/Berlin for a UTC instant. */
++export function wallClock(utcMs: number): WallClock {
++  const parts = partsFormatter.formatToParts(new Date(utcMs));
++  const get = (type: string) => {
++    const p = parts.find((x) => x.type === type);
++    if (!p) throw new MarketTimeError("format_failed", "Zeitzonendaten nicht verfügbar.");
++    return Number(p.value);
++  };
++  // Some ICU builds report midnight as hour 24 of the previous day.
++  const hour = get("hour") % 24;
++  return {
++    year: get("year"),
++    month: get("month"),
++    day: get("day"),
++    hour,
++    minute: get("minute"),
++    second: get("second"),
++  };
++}
++
++/**
++ * Offset of Europe/Berlin from UTC at a given instant, in milliseconds.
++ * +3600000 in winter, +7200000 in summer.
++ */
++export function utcOffsetMs(utcMs: number): number {
++  const w = wallClock(utcMs);
++  const asIfUtc = Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute, w.second);
++  // Round to the second: Date.UTC drops the milliseconds we did not read back.
++  return asIfUtc - Math.floor(utcMs / 1000) * 1000;
++}
++
++/** Is Europe/Berlin on summer time at this instant? */
++export function isSummerTime(utcMs: number): boolean {
++  return utcOffsetMs(utcMs) === 7_200_000;
++}
++
++function parseIsoDate(date: string): { y: number; m: number; d: number } {
++  const match = ISO_DATE.exec(date);
++  if (!match) {
++    throw new MarketTimeError("invalid_date", `Datum im Format JJJJ-MM-TT erwartet, erhalten: "${date}".`);
++  }
++  const y = Number(match[1]);
++  const m = Number(match[2]);
++  const d = Number(match[3]);
++  if (m < 1 || m > 12 || d < 1 || d > 31) {
++    throw new MarketTimeError("invalid_date", `Kein gültiges Datum: "${date}".`);
++  }
++  return { y, m, d };
++}
++
++/**
++ * The UTC instant at which a given local wall-clock time occurs.
++ *
++ * Converges in two passes: the offset depends on the instant, and the instant
++ * depends on the offset. Where the wall time does not exist (the hour skipped
++ * in spring) the result is the instant the clock jumps to, and where it occurs
++ * twice (autumn) the first occurrence is returned — stated here because those
++ * two cases are exactly where naive conversions differ silently.
++ */
++export function localToUtc(
++  y: number,
++  m: number,
++  d: number,
++  hour = 0,
++  minute = 0,
++): number {
++  const naive = Date.UTC(y, m - 1, d, hour, minute, 0);
++
++  // Both offsets Europe/Berlin can be in around this instant. Probing an hour
++  // and two hours back covers the transition in either direction.
++  const candidates = Array.from(
++    new Set([naive - utcOffsetMs(naive - 3_600_000), naive - utcOffsetMs(naive - 7_200_000)]),
++  ).sort((a, b) => a - b);
++
++  const matches = candidates.filter((c) => {
++    const w = wallClock(c);
++    return (
++      w.year === y && w.month === m && w.day === d && w.hour === hour && w.minute === minute
++    );
++  });
++
++  // Ambiguous (the autumn hour occurs twice): the earlier instant, still on
++  // summer time, is the first occurrence.
++  if (matches.length > 0) return matches[0];
++
++  // Non-existent (the spring hour is skipped): the later candidate lands after
++  // the jump, which is the only defined answer.
++  return candidates[candidates.length - 1];
++}
++
++/** The UTC instant of local midnight beginning the given local date. */
++export function startOfLocalDay(date: string): number {
++  const { y, m, d } = parseIsoDate(date);
++  return localToUtc(y, m, d, 0, 0);
++}
++
++/** The local date, as an ISO string, containing a UTC instant. */
++export function localDateOf(utcMs: number): string {
++  const w = wallClock(utcMs);
++  return `${w.year}-${String(w.month).padStart(2, "0")}-${String(w.day).padStart(2, "0")}`;
++}
++
++/** The next local date, handling month and year ends without arithmetic on strings. */
++export function nextLocalDate(date: string): string {
++  const { y, m, d } = parseIsoDate(date);
++  const next = new Date(Date.UTC(y, m - 1, d + 1));
++  return `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, "0")}-${String(
++    next.getUTCDate(),
++  ).padStart(2, "0")}`;
++}
++
++export type DayGrid = {
++  /** The local date this grid covers. */
++  date: string;
++  /** UTC instant of local midnight starting the day. */
++  startUtcMs: number;
++  /** UTC instant of local midnight ending the day. */
++  endUtcMs: number;
++  /** 92, 96 or 100. */
++  intervals: number;
++  /** Which kind of day this is, and why. */
++  kind: "normal" | "dst_short" | "dst_long";
++  /** UTC instant each interval begins, length === intervals. */
++  startsUtcMs: number[];
++};
++
++/**
++ * The quarter-hour grid of one local day.
++ *
++ * The interval count is DERIVED from the elapsed time between the two local
++ * midnights, not assumed. That is the whole point: the calendar answers the
++ * question, the code does not guess.
++ */
++export function dayGrid(date: string): DayGrid {
++  const startUtcMs = startOfLocalDay(date);
++  const endUtcMs = startOfLocalDay(nextLocalDate(date));
++  const span = endUtcMs - startUtcMs;
++
++  if (span <= 0 || span % INTERVAL_MS !== 0) {
++    throw new MarketTimeError(
++      "grid_not_aligned",
++      `Der Tag ${date} ergibt keine ganze Zahl von Viertelstunden.`,
++    );
++  }
++
++  const intervals = span / INTERVAL_MS;
++  const kind =
++    intervals === INTERVALS_NORMAL_DAY
++      ? "normal"
++      : intervals === INTERVALS_SHORT_DAY
++        ? "dst_short"
++        : intervals === INTERVALS_LONG_DAY
++          ? "dst_long"
++          : null;
++
++  if (kind === null) {
++    throw new MarketTimeError(
++      "unexpected_interval_count",
++      `Der Tag ${date} hat ${intervals} Viertelstunden; erwartet werden 92, 96 oder 100.`,
++    );
++  }
++
++  const startsUtcMs = new Array<number>(intervals);
++  for (let i = 0; i < intervals; i++) startsUtcMs[i] = startUtcMs + i * INTERVAL_MS;
++
++  return { date, startUtcMs, endUtcMs, intervals, kind, startsUtcMs };
++}
++
++/**
++ * The grid over a half-open local date range [from, to).
++ *
++ * Built by concatenating day grids, so a range spanning a clock change carries
++ * the right number of intervals rather than daysInRange × 96.
++ */
++export function rangeGrid(from: string, to: string): {
++  from: string;
++  to: string;
++  intervals: number;
++  days: DayGrid[];
++  startsUtcMs: number[];
++  /** Days in the range whose length is not 96. */
++  dstDays: { date: string; intervals: number; kind: DayGrid["kind"] }[];
++} {
++  if (from >= to) {
++    throw new MarketTimeError("empty_range", "Der Zeitraum muss mit dem Beginn anfangen.");
++  }
++
++  const days: DayGrid[] = [];
++  const startsUtcMs: number[] = [];
++  let cursor = from;
++  // A year of daily grids is 365 iterations; the cap stops a malformed range
++  // from becoming an unbounded loop.
++  for (let guard = 0; cursor < to && guard < 4000; guard++) {
++    const g = dayGrid(cursor);
++    days.push(g);
++    for (const s of g.startsUtcMs) startsUtcMs.push(s);
++    cursor = nextLocalDate(cursor);
++  }
++  if (cursor < to) {
++    throw new MarketTimeError("range_too_long", "Der Zeitraum überschreitet die zulässige Länge.");
++  }
++
++  return {
++    from,
++    to,
++    intervals: startsUtcMs.length,
++    days,
++    startsUtcMs,
++    dstDays: days
++      .filter((d) => d.kind !== "normal")
++      .map((d) => ({ date: d.date, intervals: d.intervals, kind: d.kind })),
++  };
++}
++
++/**
++ * Local wall-clock label for an interval start, e.g. "02:15".
++ *
++ * On the long October day two intervals carry the same label; the A/B suffix
++ * distinguishes the first pass from the second, which is how the repeated hour
++ * has to be shown to a human who is reconciling values.
++ */
++export function intervalLabel(grid: DayGrid, index: number): string {
++  if (index < 0 || index >= grid.intervals) {
++    throw new MarketTimeError("index_out_of_range", `Index ${index} liegt außerhalb des Tages.`);
++  }
++  const w = wallClock(grid.startsUtcMs[index]);
++  const base = `${String(w.hour).padStart(2, "0")}:${String(w.minute).padStart(2, "0")}`;
++  if (grid.kind !== "dst_long") return base;
++
++  // Only the hour that actually occurs twice is suffixed. Marking every
++  // interval would imply the whole day is ambiguous, which it is not.
++  const occurrences: number[] = [];
++  for (let i = 0; i < grid.intervals; i++) {
++    const x = wallClock(grid.startsUtcMs[i]);
++    if (x.hour === w.hour && x.minute === w.minute) occurrences.push(i);
++  }
++  if (occurrences.length < 2) return base;
++  return occurrences[0] === index ? `${base}A` : `${base}B`;
++}
++
++/**
++ * EDIFACT date/time in format qualifier 303: CCYYMMDDHHMM followed by the
++ * offset from UTC in whole hours, e.g. "202603291115+02".
++ */
++export function edifact303(utcMs: number): string {
++  const w = wallClock(utcMs);
++  const offsetHours = utcOffsetMs(utcMs) / 3_600_000;
++  const sign = offsetHours < 0 ? "-" : "+";
++  const abs = String(Math.abs(offsetHours)).padStart(2, "0");
++  return (
++    `${w.year}${String(w.month).padStart(2, "0")}${String(w.day).padStart(2, "0")}` +
++    `${String(w.hour).padStart(2, "0")}${String(w.minute).padStart(2, "0")}${sign}${abs}`
++  );
++}
++
++/** EDIFACT date/time in format qualifier 102: CCYYMMDD, local date. */
++export function edifact102(utcMs: number): string {
++  const w = wallClock(utcMs);
++  return `${w.year}${String(w.month).padStart(2, "0")}${String(w.day).padStart(2, "0")}`;
++}
++
++/** EDIFACT date/time in format qualifier 203: CCYYMMDDHHMM, local time. */
++export function edifact203(utcMs: number): string {
++  const w = wallClock(utcMs);
++  return (
++    `${w.year}${String(w.month).padStart(2, "0")}${String(w.day).padStart(2, "0")}` +
++    `${String(w.hour).padStart(2, "0")}${String(w.minute).padStart(2, "0")}`
++  );
++}
+diff --git a/shared/mscons.ts b/shared/mscons.ts
+new file mode 100644
+index 0000000..4a01476
+--- /dev/null
++++ b/shared/mscons.ts
+@@ -0,0 +1,411 @@
++/**
++ * shared/mscons.ts
++ *
++ * MSCONS — the message that carries metering values into the market.
++ *
++ * When a Mieterstrom operator supplies participants, it is a Lieferant, and a
++ * Lieferant has to move quarter-hour values between itself, the
++ * Messstellenbetreiber, the Netzbetreiber and the Bilanzkreisverantwortlichen.
++ * That movement is MSCONS, and it is the boundary between a spreadsheet and a
++ * business that can actually operate.
++ *
++ * The layering here is the point, and it is deliberate:
++ *
++ *   - The SYNTAX layer (shared/edifact.ts) implements ISO 9735 and is provably
++ *     correct: escaping round-trips, segment counts and control references are
++ *     computed from content and verified from the outside.
++ *   - The TIME layer (shared/market-time.ts) puts every value on the real
++ *     local quarter-hour grid, so the two days a year that are not 96
++ *     intervals long carry the right number of values.
++ *   - The PROFILE layer — which segments a given market role expects, in which
++ *     order, with which qualifiers — is a published format description that
++ *     changes on a fixed release cycle. It is registered below with its own
++ *     `verified` flag, and while that flag is false the builder marks its
++ *     output as not ready for productive exchange. The syntax being right does
++ *     not make the profile right, and saying otherwise would be the single
++ *     most expensive kind of wrong in this market.
++ */
++
++import {
++  buildInterchange,
++  type MessageBody,
++  type Segment,
++} from "./edifact.js";
++import {
++  dayGrid,
++  edifact102,
++  edifact203,
++  edifact303,
++  rangeGrid,
++  type DayGrid,
++} from "./market-time.js";
++import { validateMessageIdentifiers } from "./market-ids.js";
++
++// ============================================================================
++// PROFILE REGISTER
++// ============================================================================
++
++export type MessageProfile = {
++  id: string;
++  messageType: string;
++  /** Controlling agency directory, e.g. D 04B UN. */
++  directory: { version: string; release: string; agency: string };
++  /** Association assigned code — the German market's own subset. */
++  associationCode: string;
++  /** Has the segment usage been checked against the current format description? */
++  verified: boolean;
++  reference: string | null;
++  asOf: string | null;
++  openQuestion?: string;
++};
++
++export const MSCONS_PROFILE: MessageProfile = {
++  id: "mscons_de",
++  messageType: "MSCONS",
++  directory: { version: "D", release: "04B", agency: "UN" },
++  associationCode: "2.4c",
++  verified: false,
++  reference: null,
++  asOf: null,
++  openQuestion:
++    "Segmentverwendung, Qualifier und Verzeichnisstand sind nicht gegen die aktuelle Formatbeschreibung des BDEW geprüft. Bis dahin ist die erzeugte Nachricht für Test- und Abstimmungszwecke bestimmt.",
++};
++
++export const MSCONS_READINESS_NOTE_DE =
++  "Die Syntax dieser Nachricht ist geprüft: Freigabezeichen, Segmentzählung und Kontrollreferenzen werden aus dem Inhalt berechnet und unabhängig nachgeprüft. Die Segmentverwendung folgt einer noch nicht verifizierten Profilfassung; vor dem produktiven Austausch ist sie gegen die geltende Formatbeschreibung abzugleichen.";
++
++// ============================================================================
++// OBIS
++// ============================================================================
++
++/**
++ * The OBIS codes this module knows how to emit.
++ *
++ * An OBIS code says what was measured. Choosing the wrong one is not a
++ * rounding error — it files consumption as generation.
++ */
++export const OBIS = {
++  /** Wirkarbeit Bezug, Zählerstandsgang (load profile, consumption). */
++  consumptionInterval: "1-1:1.29.0",
++  /** Wirkarbeit Lieferung, Zählerstandsgang (load profile, feed-in). */
++  feedInInterval: "1-1:2.29.0",
++  /** Wirkarbeit Bezug, Zählerstand (register reading, consumption). */
++  consumptionRegister: "1-1:1.8.0",
++  /** Wirkarbeit Lieferung, Zählerstand (register reading, feed-in). */
++  feedInRegister: "1-1:2.8.0",
++} as const;
++
++export type ObisCode = (typeof OBIS)[keyof typeof OBIS];
++
++export type MeasurementDirection = "consumption" | "feed_in";
++
++export function obisForInterval(direction: MeasurementDirection): ObisCode {
++  return direction === "consumption" ? OBIS.consumptionInterval : OBIS.feedInInterval;
++}
++
++// ============================================================================
++// INPUT
++// ============================================================================
++
++export type MsconsLocation = {
++  /** Messlokation (Zählpunktbezeichnung) the values belong to. */
++  melo: string;
++  /** Marktlokation, where the values are settled. */
++  malo?: string;
++  direction: MeasurementDirection;
++  /**
++   * Quarter-hour values in kWh, aligned to the grid of the stated day or
++   * range. Length is checked against the grid, not assumed.
++   */
++  valuesKwh: number[];
++  /**
++   * Status per value. Absent means measured. This is what separates a real
++   * implementation from a demo: substituted values must be marked, because
++   * settlement treats them differently.
++   */
++  statuses?: ValueStatus[];
++};
++
++/** Measured, substituted, or estimated. */
++export type ValueStatus = "measured" | "substituted" | "estimated";
++
++/** Qualifier written for each status. */
++const STATUS_QUALIFIER: Record<ValueStatus, string> = {
++  measured: "220",
++  substituted: "67",
++  estimated: "79",
++};
++
++export type MsconsInput = {
++  /** Local date, or a half-open local date range. */
++  period: { date: string } | { from: string; to: string };
++  sender: { code: string; qualifier?: string };
++  receiver: { code: string; qualifier?: string };
++  locations: MsconsLocation[];
++  /** Interchange control reference. Generated when omitted. */
++  controlReference?: string;
++  /** Message reference. Generated when omitted. */
++  messageReference?: string;
++  /** Instant the message is prepared. Injectable so output is reproducible. */
++  preparedAtMs?: number;
++  /** Mark the interchange as a test. Defaults to true while the profile is unverified. */
++  test?: boolean;
++};
++
++export class MsconsError extends Error {
++  readonly code: string;
++  constructor(code: string, message: string) {
++    super(message);
++    this.name = "MsconsError";
++    this.code = code;
++  }
++}
++
++export type MsconsResult = {
++  /** The complete interchange, ready to hand to a transport. */
++  message: string;
++  /** Byte length as UTF-8, which is what a transport limit applies to. */
++  bytes: number;
++  controlReference: string;
++  messageReference: string;
++  /** The grid the values were placed on, including any short or long day. */
++  grid: { intervals: number; from: string; to: string; dstDays: { date: string; intervals: number }[] };
++  /** Total energy per location, so the message can be reconciled at a glance. */
++  totals: { melo: string; direction: MeasurementDirection; kwh: number; values: number }[];
++  profile: MessageProfile;
++  /** Non-fatal notes, including the readiness of the profile. */
++  warnings: { code: string; message: string }[];
++};
++
++// ============================================================================
++// BUILDER
++// ============================================================================
++
++function gridFor(period: MsconsInput["period"]): {
++  intervals: number;
++  startsUtcMs: number[];
++  from: string;
++  to: string;
++  dstDays: { date: string; intervals: number }[];
++  days: DayGrid[];
++} {
++  if ("date" in period) {
++    const g = dayGrid(period.date);
++    return {
++      intervals: g.intervals,
++      startsUtcMs: g.startsUtcMs,
++      from: g.date,
++      to: g.date,
++      dstDays: g.kind === "normal" ? [] : [{ date: g.date, intervals: g.intervals }],
++      days: [g],
++    };
++  }
++  const r = rangeGrid(period.from, period.to);
++  return {
++    intervals: r.intervals,
++    startsUtcMs: r.startsUtcMs,
++    from: r.from,
++    to: r.to,
++    dstDays: r.dstDays.map((d) => ({ date: d.date, intervals: d.intervals })),
++    days: r.days,
++  };
++}
++
++/** Deterministic reference from the prepared instant plus a discriminator. */
++function reference(prefix: string, preparedAtMs: number, salt: string): string {
++  let hash = 0;
++  for (const ch of salt) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
++  const stamp = Math.floor(preparedAtMs / 1000).toString(36).toUpperCase();
++  return `${prefix}${stamp}${hash.toString(36).toUpperCase().slice(0, 4)}`.slice(0, 14);
++}
++
++/**
++ * Build an MSCONS interchange from interval values.
++ *
++ * Every quantity is stamped with the UTC instant of its own interval, taken
++ * from the real local grid. The 92-interval and 100-interval days therefore
++ * carry 92 and 100 values, and the message is rejected when the supplied
++ * series does not match — rather than being padded or truncated to 96, which
++ * is how a clock change turns into a wrong invoice.
++ */
++export function buildMscons(input: MsconsInput): MsconsResult {
++  if (input.locations.length === 0) {
++    throw new MsconsError("no_locations", "Es wurde keine Messlokation übergeben.");
++  }
++
++  const grid = gridFor(input.period);
++  const preparedAtMs = input.preparedAtMs ?? Date.now();
++  const warnings: { code: string; message: string }[] = [];
++
++  // Identifiers first: a malformed one is rejected days later by a system that
++  // explains nothing, so it is caught here.
++  const ids = validateMessageIdentifiers({
++    senderCode: input.sender.code,
++    receiverCode: input.receiver.code,
++    malo: input.locations.find((l) => l.malo)?.malo,
++    melo: input.locations[0]?.melo,
++  });
++  if (!ids.ok) {
++    throw new MsconsError("invalid_identifiers", ids.problems.join(" "));
++  }
++
++  const seenMelo = new Set<string>();
++  for (const loc of input.locations) {
++    const key = `${loc.melo}:${loc.direction}`;
++    if (seenMelo.has(key)) {
++      throw new MsconsError(
++        "duplicate_location",
++        `Die Messlokation ${loc.melo} kommt für dieselbe Energierichtung mehrfach vor.`,
++      );
++    }
++    seenMelo.add(key);
++
++    if (loc.valuesKwh.length !== grid.intervals) {
++      throw new MsconsError(
++        "series_length_mismatch",
++        `Messlokation ${loc.melo}: ${loc.valuesKwh.length} Werte übergeben, der Zeitraum umfasst ${grid.intervals} Viertelstunden.` +
++          (grid.dstDays.length > 0
++            ? ` Der Zeitraum enthält eine Zeitumstellung (${grid.dstDays
++                .map((d) => `${d.date}: ${d.intervals}`)
++                .join(", ")}).`
++            : ""),
++      );
++    }
++    if (loc.statuses && loc.statuses.length !== loc.valuesKwh.length) {
++      throw new MsconsError(
++        "status_length_mismatch",
++        `Messlokation ${loc.melo}: Anzahl der Statusangaben passt nicht zur Anzahl der Werte.`,
++      );
++    }
++    for (const v of loc.valuesKwh) {
++      if (!Number.isFinite(v) || v < 0) {
++        throw new MsconsError("invalid_value", `Messlokation ${loc.melo}: unzulässiger Messwert.`);
++      }
++    }
++  }
++
++  if (grid.dstDays.length > 0) {
++    warnings.push({
++      code: "dst_day_in_period",
++      message: `Der Zeitraum enthält eine Zeitumstellung: ${grid.dstDays
++        .map((d) => `${d.date} mit ${d.intervals} Viertelstunden`)
++        .join(", ")}. Die Werte wurden auf dieses Raster gestellt.`,
++    });
++  }
++
++  const controlReference = input.controlReference ?? reference("ET", preparedAtMs, input.sender.code);
++  const messageReference = input.messageReference ?? reference("M", preparedAtMs, input.receiver.code);
++
++  const periodStart = grid.startsUtcMs[0];
++  const periodEnd = grid.days[grid.days.length - 1].endUtcMs;
++
++  const segments: Segment[] = [];
++
++  // Document identification: metering values, original.
++  segments.push({ tag: "BGM", elements: [["7", "", "", "9"], messageReference, "9"] });
++  // Message date/time.
++  segments.push({ tag: "DTM", elements: [["137", edifact303(preparedAtMs), "303"]] });
++
++  // Parties.
++  segments.push({
++    tag: "NAD",
++    elements: ["MS", [input.sender.code, "", input.sender.qualifier ?? "293"]],
++  });
++  segments.push({
++    tag: "NAD",
++    elements: ["MR", [input.receiver.code, "", input.receiver.qualifier ?? "293"]],
++  });
++
++  // Detail section.
++  segments.push({ tag: "UNS", elements: ["D"] });
++
++  for (const loc of input.locations) {
++    segments.push({ tag: "NAD", elements: ["DP"] });
++    segments.push({ tag: "LOC", elements: ["172", [loc.melo, "", "89"]] });
++    if (loc.malo) {
++      segments.push({ tag: "RFF", elements: [["Z18", loc.malo]] });
++    }
++
++    // Reporting period for this location.
++    segments.push({
++      tag: "DTM",
++      elements: [["163", edifact303(periodStart), "303"]],
++    });
++    segments.push({ tag: "DTM", elements: [["164", edifact303(periodEnd), "303"]] });
++
++    const obis = obisForInterval(loc.direction);
++
++    let line = 0;
++    for (let i = 0; i < loc.valuesKwh.length; i++) {
++      const value = loc.valuesKwh[i];
++      const status = loc.statuses?.[i] ?? "measured";
++      const intervalStart = grid.startsUtcMs[i];
++      const intervalEnd = intervalStart + 15 * 60_000;
++
++      line++;
++      segments.push({ tag: "LIN", elements: [String(line)] });
++      segments.push({ tag: "PIA", elements: ["5", [obis, "SRW"]] });
++      segments.push({
++        tag: "QTY",
++        elements: [[STATUS_QUALIFIER[status], round3(value), "KWH"]],
++      });
++      // Interval boundaries. A value belongs to the quarter-hour that ENDS at
++      // 164; stating both removes the ambiguity that costs reconciliations.
++      segments.push({ tag: "DTM", elements: [["163", edifact303(intervalStart), "303"]] });
++      segments.push({ tag: "DTM", elements: [["164", edifact303(intervalEnd), "303"]] });
++    }
++  }
++
++  const body: MessageBody = {
++    reference: messageReference,
++    identifier: [
++      MSCONS_PROFILE.messageType,
++      MSCONS_PROFILE.directory.version,
++      MSCONS_PROFILE.directory.release,
++      MSCONS_PROFILE.directory.agency,
++      MSCONS_PROFILE.associationCode,
++    ],
++    segments,
++  };
++
++  const isTest = input.test ?? !MSCONS_PROFILE.verified;
++  if (isTest) {
++    warnings.push({
++      code: "profile_unverified",
++      message: MSCONS_READINESS_NOTE_DE,
++    });
++  }
++
++  const message = buildInterchange(
++    {
++      sender: { id: input.sender.code, qualifier: input.sender.qualifier ?? "500" },
++      receiver: { id: input.receiver.code, qualifier: input.receiver.qualifier ?? "500" },
++      preparedAt: { date: edifact102(preparedAtMs).slice(2), time: edifact203(preparedAtMs).slice(8) },
++      controlReference,
++      applicationReference: MSCONS_PROFILE.messageType,
++      testIndicator: isTest,
++    },
++    [body],
++  );
++
++  return {
++    message,
++    bytes: new TextEncoder().encode(message).length,
++    controlReference,
++    messageReference,
++    grid: { intervals: grid.intervals, from: grid.from, to: grid.to, dstDays: grid.dstDays },
++    totals: input.locations.map((l) => ({
++      melo: l.melo,
++      direction: l.direction,
++      kwh: l.valuesKwh.reduce((s, v) => s + v, 0),
++      values: l.valuesKwh.length,
++    })),
++    profile: MSCONS_PROFILE,
++    warnings,
++  };
++}
++
++/** Three decimals is the resolution settlement uses for kWh. */
++function round3(v: number): number {
++  return Math.round(v * 1000) / 1000;
++}
+-- 
+2.43.0
+
