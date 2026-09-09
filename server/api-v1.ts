@@ -18,6 +18,7 @@ import {
   CalculateRequestSchema,
   EligibilityRequestSchema,
   type ApiModelStamp,
+  type ApiV1Endpoint,
   type ApiV1Error,
   type ApiV1ErrorCode,
   type CalculateResponse,
@@ -91,15 +92,15 @@ import { extractApiKey, identifyApiKey } from "./api-keys.js";
 // ============================================================================
 
 function apiV1Error(
-  res: Response,
+  res: ResultSink,
   status: number,
   code: ApiV1ErrorCode,
   message: string,
   details?: unknown,
-): Response {
+): void {
   const body: ApiV1Error = { ok: false, code, message, details };
   res.setHeader("Cache-Control", "no-store");
-  return res.status(status).json(body);
+  res.status(status).json(body);
 }
 
 function stamp(now: Date): ApiModelStamp {
@@ -266,6 +267,441 @@ function recommendKey(runs: Record<AllocationKey, AllocationResult>) {
 // MOUNT
 // ============================================================================
 
+// ============================================================================
+// HANDLERS
+// ----------------------------------------------------------------------------
+// Each endpoint is a function over its input, not a closure over an Express
+// request. Both the HTTP route and the MCP tool of the same name run the
+// SAME function, so a refusal, a warning or a stamp cannot differ between the
+// two surfaces — which it would within a week if there were two code paths.
+// ============================================================================
+
+/**
+ * The subset of the Express response the handlers use.
+ *
+ * An Express Response satisfies it, and so does the in-process collector the
+ * MCP dispatcher passes in.
+ */
+export type ResultSink = {
+  status(code: number): ResultSink;
+  json(body: unknown): ResultSink;
+  setHeader(name: string, value: string): void;
+};
+
+export function handleMeta(payload: unknown, res: ResultSink): void {
+  const now = new Date();
+  const rates = Object.fromEntries(
+    Object.entries(DATED_TABLES).map(([name, t]) => [
+      name,
+      {
+        bands: t.bands.map((b) => ({ maxKwp: b.maxKwp, ctPerKwh: b.ctPerKwh })),
+        legalBasis: t.legalBasis,
+        validFrom: t.validFrom,
+        validUntil: t.validUntil,
+        verified: t.verified,
+        freshness: freshness(t, now),
+      },
+    ]),
+  );
+
+  const body: MetaResponse = {
+    ok: true,
+    model: stamp(now),
+    rates,
+    models: LEGAL_MODEL_ORDER.map((id) => {
+      const m = LEGAL_MODELS[id];
+      return {
+        id: m.id,
+        name: m.name,
+        scope: m.scope,
+        computed: m.modelledByCalculator,
+        citation: formatCitation(m),
+      };
+    }),
+    endpoints: [
+      `${API_PREFIX}/meta`,
+      `${API_PREFIX}/calculate`,
+      `${API_PREFIX}/eligibility`,
+      `${API_PREFIX}/messkonzept`,
+      `${API_PREFIX}/allocation`,
+      `${API_PREFIX}/billing`,
+      `${MAKO_PREFIX}/grid`,
+      `${MAKO_PREFIX}/identifiers`,
+      `${MAKO_PREFIX}/mscons`,
+    ],
+  };
+
+  res.setHeader("Cache-Control", "no-store");
+  res.status(200).json(body);
+}
+
+export function handleCalculate(payload: unknown, res: ResultSink): void {
+  const parsed = CalculateRequestSchema.safeParse(payload);
+  if (!parsed.success) {
+    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+  }
+
+  const now = new Date();
+  const { inputs, outOfBand } = resolveInputs(parsed.data.inputs);
+  const scenarios = scenarioBundle(inputs);
+
+  const body: CalculateResponse = {
+    ok: true,
+    reference: parsed.data.reference ?? null,
+    model: stamp(now),
+    scenarios: {
+      konservativ: scenarios.konservativ.kpis,
+      realistisch: scenarios.realistisch.kpis,
+      optimistisch: scenarios.optimistisch.kpis,
+    },
+    schedule: parsed.data.includeSchedule ? scenarios.realistisch.jahre : null,
+    provenance: provenanceFor(inputs),
+    freshness: freshnessPayload(now),
+    coverage: calculatorCoverageStatement(),
+    warnings: buildWarnings(inputs, outOfBand, now),
+  };
+
+  res.setHeader("Cache-Control", "no-store");
+  return void res.status(200).json(body);
+}
+
+export function handleEligibility(payload: unknown, res: ResultSink): void {
+  const parsed = EligibilityRequestSchema.safeParse(payload);
+  if (!parsed.success) {
+    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+  }
+
+  const now = new Date();
+  const { inputs } = resolveInputs(parsed.data.inputs);
+  const evaluation = evaluateEligibility({
+    economics: inputs,
+    kpis: calculateMieterstrom(inputs).kpis,
+    facts: parsed.data.facts,
+  });
+
+  const step = evaluation.nextPaidStep;
+  const body: EligibilityResponse = {
+    ok: true,
+    reference: parsed.data.reference ?? null,
+    model: stamp(now),
+    verdict: evaluation.verdict,
+    verdictLabel: evaluation.verdictLabel,
+    findings: evaluation.findings,
+    missingData: evaluation.missingData,
+    feasibility: evaluation.feasibility,
+    valueDriver: evaluation.valueDriver,
+    mainRisk: evaluation.mainRisk,
+    estimatedEffort: evaluation.estimatedEffort,
+    nextPaidStep: step
+      ? {
+          offerCode: step.offerCode,
+          label: step.label,
+          rationale: step.rationale,
+          requiredData: PILOT_OFFER_FULFILLMENT[step.offerCode as PilotOfferCode].requiredData,
+        }
+      : null,
+    disclaimer: API_DISCLAIMER_DE,
+  };
+
+  res.setHeader("Cache-Control", "no-store");
+  return void res.status(200).json(body);
+}
+
+export function handleMesskonzept(payload: unknown, res: ResultSink): void {
+  const parsed = MesskonzeptRequestSchema.safeParse(payload);
+  if (!parsed.success) {
+    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+  }
+
+  const now = new Date();
+  const result = deriveMesskonzept(parsed.data.constellation);
+
+  const body: MesskonzeptResponse = {
+    ok: true,
+    reference: parsed.data.reference ?? null,
+    model: stamp(now),
+    variant: result.variant,
+    variantLabel: result.variantLabel,
+    rationale: result.rationale,
+    meters: result.meters,
+    meterCount: result.meterCount,
+    roles: result.roles,
+    tasks: result.tasks,
+    criticalPath: criticalPath(result),
+    warnings: result.warnings,
+    missingInputs: result.missingInputs,
+    confidence: result.confidence,
+    disclaimer: result.disclaimer,
+  };
+
+  res.setHeader("Cache-Control", "no-store");
+  return void res.status(200).json(body);
+}
+
+export function handleAllocation(payload: unknown, res: ResultSink): void {
+  const parsed = AllocationRequestSchema.safeParse(payload);
+  if (!parsed.success) {
+    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+  }
+
+  const { key, generationKwh, participants, includeSeries } = parsed.data;
+  const options = { includeSeries };
+
+  let runs: Partial<Record<AllocationKey, AllocationResult>>;
+  try {
+    runs = key
+      ? { [key]: allocate({ key, generationKwh, participants }, options) }
+      : compareKeys({ generationKwh, participants }, options);
+  } catch (err) {
+    // A shape the schema cannot express — mismatched series lengths, shares
+    // over 100 %. Reported as the caller's input error, with its code.
+    if (err instanceof AllocationError) {
+      return void apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+    }
+    throw err;
+  }
+
+  const body: AllocationResponse = {
+    ok: true,
+    reference: parsed.data.reference ?? null,
+    model: stamp(new Date()),
+    key: key ?? null,
+    runs: runs as Record<AllocationKey, AllocationResult>,
+    recommendation: key ? null : recommendKey(runs as Record<AllocationKey, AllocationResult>),
+  };
+
+  res.setHeader("Cache-Control", "no-store");
+  return void res.status(200).json(body);
+}
+
+export function handleBilling(payload: unknown, res: ResultSink): void {
+  const parsed = BillingRequestSchema.safeParse(payload);
+  if (!parsed.success) {
+    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+  }
+
+  const { reference, ...input } = parsed.data;
+
+  let result: ReturnType<typeof billPeriod>;
+  try {
+    result = billPeriod(input);
+  } catch (err) {
+    if (err instanceof BillingError) {
+      return void apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+    }
+    throw err;
+  }
+
+  const body: BillingResponse = {
+    ok: true,
+    reference: reference ?? null,
+    model: stamp(new Date()),
+    period: result.period,
+    days: result.days,
+    vatRate: result.vatRate,
+    statements: result.statements,
+    totals: result.totals,
+    priceCap: result.priceCap,
+    // Re-checked from the produced result, not assumed from the code path.
+    reconciliation: reconcile(result),
+    missingData: result.missingData,
+    warnings: result.warnings,
+    conventions: result.conventions,
+    disclaimer: result.disclaimer,
+  };
+
+  res.setHeader("Cache-Control", "no-store");
+  return void res.status(200).json(body);
+}
+
+export function handleGrid(payload: unknown, res: ResultSink): void {
+  const parsed = MarketGridRequestSchema.safeParse(payload);
+  if (!parsed.success) {
+    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+  }
+
+  try {
+    const q = parsed.data;
+    const grid =
+      q.date !== undefined
+        ? (() => {
+            const g = dayGrid(q.date);
+            return {
+              from: g.date,
+              to: g.date,
+              intervals: g.intervals,
+              days: [{ date: g.date, intervals: g.intervals, kind: g.kind }],
+              startsUtcMs: g.startsUtcMs,
+            };
+          })()
+        : (() => {
+            const r = rangeGrid(q.from!, q.to!);
+            return {
+              from: r.from,
+              to: r.to,
+              intervals: r.intervals,
+              days: r.days.map((d) => ({ date: d.date, intervals: d.intervals, kind: d.kind })),
+              startsUtcMs: r.startsUtcMs,
+            };
+          })();
+
+    const body: MarketGridResponse = {
+      ok: true,
+      model: stamp(new Date()),
+      timezone: "Europe/Berlin",
+      from: grid.from,
+      to: grid.to,
+      intervals: grid.intervals,
+      days: grid.days,
+      dstDays: grid.days
+        .filter((d) => d.kind !== "normal")
+        .map((d) => ({ date: d.date, intervals: d.intervals })),
+      firstIntervalStart: edifact303(grid.startsUtcMs[0]),
+      lastIntervalStart: edifact303(grid.startsUtcMs[grid.startsUtcMs.length - 1]),
+    };
+
+    res.setHeader("Cache-Control", "no-store");
+    return void res.status(200).json(body);
+  } catch (err) {
+    if (err instanceof MarketTimeError) {
+      return void apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+    }
+    throw err;
+  }
+}
+
+export function handleIdentifiers(payload: unknown, res: ResultSink): void {
+  const parsed = IdentifierCheckRequestSchema.safeParse(payload);
+  if (!parsed.success) {
+    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+  }
+
+  const result = validateMessageIdentifiers(parsed.data);
+  const body: IdentifierCheckResponse = {
+    ok: true,
+    model: stamp(new Date()),
+    valid: result.ok,
+    results: result.results,
+    problems: result.problems,
+    algorithms: Object.values(CHECK_DIGIT_ALGORITHMS).map((a) => ({
+      id: a.id,
+      name: a.name,
+      appliesTo: a.appliesTo,
+      verified: a.verified,
+      openQuestion: a.openQuestion ?? null,
+    })),
+  };
+
+  res.setHeader("Cache-Control", "no-store");
+  return void res.status(200).json(body);
+}
+
+export function handleMscons(payload: unknown, res: ResultSink): void {
+  const parsed = MsconsRequestSchema.safeParse(payload);
+  if (!parsed.success) {
+    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+  }
+
+  const { reference, ...input } = parsed.data;
+
+  let result: ReturnType<typeof buildMscons>;
+  try {
+    result = buildMscons(input);
+  } catch (err) {
+    // Wrong series length for a clock-change day, a malformed identifier, a
+    // duplicated Messlokation: the caller's input, with the reason named.
+    if (err instanceof MsconsError || err instanceof MarketTimeError) {
+      return void apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+    }
+    throw err;
+  }
+
+  const body: MsconsResponse = {
+    ok: true,
+    reference: reference ?? null,
+    model: stamp(new Date()),
+    message: result.message,
+    bytes: result.bytes,
+    controlReference: result.controlReference,
+    messageReference: result.messageReference,
+    grid: result.grid,
+    totals: result.totals,
+    // Read back out of the produced message, not assumed.
+    syntax: verifyInterchange(result.message),
+    profile: {
+      id: result.profile.id,
+      messageType: result.profile.messageType,
+      directory: result.profile.directory,
+      associationCode: result.profile.associationCode,
+      verified: result.profile.verified,
+      openQuestion: result.profile.openQuestion ?? null,
+    },
+    warnings: result.warnings,
+  };
+
+  res.setHeader("Cache-Control", "no-store");
+  return void res.status(200).json(body);
+}
+
+
+// ============================================================================
+// IN-PROCESS DISPATCH
+// ============================================================================
+
+/**
+ * Run an endpoint without going over the network.
+ *
+ * The MCP server calls this. Routing a public endpoint's own request back
+ * through HTTP would add a round trip and a failure mode for nothing, and —
+ * worse — would make it possible for the two surfaces to diverge. They run the
+ * same function.
+ */
+export function dispatchApiV1(
+  endpoint: string,
+  _method: "GET" | "POST",
+  payload: unknown,
+): { status: number; body: unknown } {
+  const handler = HANDLER_BY_ENDPOINT[endpoint];
+  if (!handler) {
+    return {
+      status: 404,
+      body: { ok: false, code: "not_found", message: `Kein Endpunkt "${endpoint}".` },
+    };
+  }
+
+  // Collects what the handler would have written to an Express response.
+  let status = 200;
+  let body: unknown = null;
+  const sink: ResultSink = {
+    status(code) {
+      status = code;
+      return sink;
+    },
+    json(value) {
+      body = value;
+      return sink;
+    },
+    setHeader() {
+      /* headers are meaningless in-process */
+    },
+  };
+
+  handler(payload, sink);
+  return { status, body };
+}
+
+const HANDLER_BY_ENDPOINT: Record<ApiV1Endpoint, (payload: unknown, res: ResultSink) => void> = {
+  [`${API_PREFIX}/meta`]: handleMeta,
+  [`${API_PREFIX}/calculate`]: handleCalculate,
+  [`${API_PREFIX}/eligibility`]: handleEligibility,
+  [`${API_PREFIX}/messkonzept`]: handleMesskonzept,
+  [`${API_PREFIX}/allocation`]: handleAllocation,
+  [`${API_PREFIX}/billing`]: handleBilling,
+  [`${MAKO_PREFIX}/grid`]: handleGrid,
+  [`${MAKO_PREFIX}/identifiers`]: handleIdentifiers,
+  [`${MAKO_PREFIX}/mscons`]: handleMscons,
+};
+
 export function mountApiV1(
   app: Express,
   deps: { limiter: RequestHandler },
@@ -287,382 +723,49 @@ export function mountApiV1(
   // --------------------------------------------------------------------------
   // GET /api/v1/meta — what this deployment computes, and how current it is
   // --------------------------------------------------------------------------
-  app.get(`${API_PREFIX}/meta`, deps.limiter, requireKey, (_req: Request, res: Response) => {
-    const now = new Date();
-    const rates = Object.fromEntries(
-      Object.entries(DATED_TABLES).map(([name, t]) => [
-        name,
-        {
-          bands: t.bands.map((b) => ({ maxKwp: b.maxKwp, ctPerKwh: b.ctPerKwh })),
-          legalBasis: t.legalBasis,
-          validFrom: t.validFrom,
-          validUntil: t.validUntil,
-          verified: t.verified,
-          freshness: freshness(t, now),
-        },
-      ]),
-    );
+  app.get(`${API_PREFIX}/meta`, deps.limiter, requireKey, (req: Request, res: Response) => {
+      handleMeta(req.query, res as unknown as ResultSink);
+    },
+  );
 
-    const body: MetaResponse = {
-      ok: true,
-      model: stamp(now),
-      rates,
-      models: LEGAL_MODEL_ORDER.map((id) => {
-        const m = LEGAL_MODELS[id];
-        return {
-          id: m.id,
-          name: m.name,
-          scope: m.scope,
-          computed: m.modelledByCalculator,
-          citation: formatCitation(m),
-        };
-      }),
-      endpoints: [
-        `${API_PREFIX}/meta`,
-        `${API_PREFIX}/calculate`,
-        `${API_PREFIX}/eligibility`,
-        `${API_PREFIX}/messkonzept`,
-        `${API_PREFIX}/allocation`,
-        `${API_PREFIX}/billing`,
-        `${MAKO_PREFIX}/grid`,
-        `${MAKO_PREFIX}/identifiers`,
-        `${MAKO_PREFIX}/mscons`,
-      ],
-    };
-
-    res.setHeader("Cache-Control", "no-store");
-    res.status(200).json(body);
-  });
-
-  // --------------------------------------------------------------------------
-  // POST /api/v1/calculate
-  // --------------------------------------------------------------------------
   app.post(`${API_PREFIX}/calculate`, deps.limiter, requireKey, (req: Request, res: Response) => {
-    const parsed = CalculateRequestSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
-    }
+      handleCalculate(req.body, res as unknown as ResultSink);
+    },
+  );
 
-    const now = new Date();
-    const { inputs, outOfBand } = resolveInputs(parsed.data.inputs);
-    const scenarios = scenarioBundle(inputs);
-
-    const body: CalculateResponse = {
-      ok: true,
-      reference: parsed.data.reference ?? null,
-      model: stamp(now),
-      scenarios: {
-        konservativ: scenarios.konservativ.kpis,
-        realistisch: scenarios.realistisch.kpis,
-        optimistisch: scenarios.optimistisch.kpis,
-      },
-      schedule: parsed.data.includeSchedule ? scenarios.realistisch.jahre : null,
-      provenance: provenanceFor(inputs),
-      freshness: freshnessPayload(now),
-      coverage: calculatorCoverageStatement(),
-      warnings: buildWarnings(inputs, outOfBand, now),
-    };
-
-    res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json(body);
-  });
-
-  // --------------------------------------------------------------------------
-  // POST /api/v1/eligibility
-  // --------------------------------------------------------------------------
   app.post(`${API_PREFIX}/eligibility`, deps.limiter, requireKey, (req: Request, res: Response) => {
-    const parsed = EligibilityRequestSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
-    }
+      handleEligibility(req.body, res as unknown as ResultSink);
+    },
+  );
 
-    const now = new Date();
-    const { inputs } = resolveInputs(parsed.data.inputs);
-    const evaluation = evaluateEligibility({
-      economics: inputs,
-      kpis: calculateMieterstrom(inputs).kpis,
-      facts: parsed.data.facts,
-    });
-
-    const step = evaluation.nextPaidStep;
-    const body: EligibilityResponse = {
-      ok: true,
-      reference: parsed.data.reference ?? null,
-      model: stamp(now),
-      verdict: evaluation.verdict,
-      verdictLabel: evaluation.verdictLabel,
-      findings: evaluation.findings,
-      missingData: evaluation.missingData,
-      feasibility: evaluation.feasibility,
-      valueDriver: evaluation.valueDriver,
-      mainRisk: evaluation.mainRisk,
-      estimatedEffort: evaluation.estimatedEffort,
-      nextPaidStep: step
-        ? {
-            offerCode: step.offerCode,
-            label: step.label,
-            rationale: step.rationale,
-            requiredData: PILOT_OFFER_FULFILLMENT[step.offerCode as PilotOfferCode].requiredData,
-          }
-        : null,
-      disclaimer: API_DISCLAIMER_DE,
-    };
-
-    res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json(body);
-  });
-
-  // --------------------------------------------------------------------------
-  // POST /api/v1/messkonzept — meter inventory, market roles, critical path
-  // --------------------------------------------------------------------------
   app.post(`${API_PREFIX}/messkonzept`, deps.limiter, requireKey, (req: Request, res: Response) => {
-    const parsed = MesskonzeptRequestSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
-    }
+      handleMesskonzept(req.body, res as unknown as ResultSink);
+    },
+  );
 
-    const now = new Date();
-    const result = deriveMesskonzept(parsed.data.constellation);
-
-    const body: MesskonzeptResponse = {
-      ok: true,
-      reference: parsed.data.reference ?? null,
-      model: stamp(now),
-      variant: result.variant,
-      variantLabel: result.variantLabel,
-      rationale: result.rationale,
-      meters: result.meters,
-      meterCount: result.meterCount,
-      roles: result.roles,
-      tasks: result.tasks,
-      criticalPath: criticalPath(result),
-      warnings: result.warnings,
-      missingInputs: result.missingInputs,
-      confidence: result.confidence,
-      disclaimer: result.disclaimer,
-    };
-
-    res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json(body);
-  });
-
-  // --------------------------------------------------------------------------
-  // POST /api/v1/allocation — interval-level Aufteilungsschlüssel
-  // --------------------------------------------------------------------------
   app.post(`${API_PREFIX}/allocation`, deps.limiter, requireKey, (req: Request, res: Response) => {
-    const parsed = AllocationRequestSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
-    }
+      handleAllocation(req.body, res as unknown as ResultSink);
+    },
+  );
 
-    const { key, generationKwh, participants, includeSeries } = parsed.data;
-    const options = { includeSeries };
-
-    let runs: Partial<Record<AllocationKey, AllocationResult>>;
-    try {
-      runs = key
-        ? { [key]: allocate({ key, generationKwh, participants }, options) }
-        : compareKeys({ generationKwh, participants }, options);
-    } catch (err) {
-      // A shape the schema cannot express — mismatched series lengths, shares
-      // over 100 %. Reported as the caller's input error, with its code.
-      if (err instanceof AllocationError) {
-        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
-      }
-      throw err;
-    }
-
-    const body: AllocationResponse = {
-      ok: true,
-      reference: parsed.data.reference ?? null,
-      model: stamp(new Date()),
-      key: key ?? null,
-      runs: runs as Record<AllocationKey, AllocationResult>,
-      recommendation: key ? null : recommendKey(runs as Record<AllocationKey, AllocationResult>),
-    };
-
-    res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json(body);
-  });
-
-  // --------------------------------------------------------------------------
-  // POST /api/v1/billing — annual statements from measured quantities
-  // --------------------------------------------------------------------------
   app.post(`${API_PREFIX}/billing`, deps.limiter, requireKey, (req: Request, res: Response) => {
-    const parsed = BillingRequestSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
-    }
+      handleBilling(req.body, res as unknown as ResultSink);
+    },
+  );
 
-    const { reference, ...input } = parsed.data;
-
-    let result: ReturnType<typeof billPeriod>;
-    try {
-      result = billPeriod(input);
-    } catch (err) {
-      if (err instanceof BillingError) {
-        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
-      }
-      throw err;
-    }
-
-    const body: BillingResponse = {
-      ok: true,
-      reference: reference ?? null,
-      model: stamp(new Date()),
-      period: result.period,
-      days: result.days,
-      vatRate: result.vatRate,
-      statements: result.statements,
-      totals: result.totals,
-      priceCap: result.priceCap,
-      // Re-checked from the produced result, not assumed from the code path.
-      reconciliation: reconcile(result),
-      missingData: result.missingData,
-      warnings: result.warnings,
-      conventions: result.conventions,
-      disclaimer: result.disclaimer,
-    };
-
-    res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json(body);
-  });
-
-  // --------------------------------------------------------------------------
-  // GET /api/v1/mako/grid — the real quarter-hour grid of a day or range
-  // --------------------------------------------------------------------------
   app.get(`${MAKO_PREFIX}/grid`, deps.limiter, requireKey, (req: Request, res: Response) => {
-    const parsed = MarketGridRequestSchema.safeParse(req.query);
-    if (!parsed.success) {
-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
-    }
+      handleGrid(req.query, res as unknown as ResultSink);
+    },
+  );
 
-    try {
-      const q = parsed.data;
-      const grid =
-        q.date !== undefined
-          ? (() => {
-              const g = dayGrid(q.date);
-              return {
-                from: g.date,
-                to: g.date,
-                intervals: g.intervals,
-                days: [{ date: g.date, intervals: g.intervals, kind: g.kind }],
-                startsUtcMs: g.startsUtcMs,
-              };
-            })()
-          : (() => {
-              const r = rangeGrid(q.from!, q.to!);
-              return {
-                from: r.from,
-                to: r.to,
-                intervals: r.intervals,
-                days: r.days.map((d) => ({ date: d.date, intervals: d.intervals, kind: d.kind })),
-                startsUtcMs: r.startsUtcMs,
-              };
-            })();
-
-      const body: MarketGridResponse = {
-        ok: true,
-        model: stamp(new Date()),
-        timezone: "Europe/Berlin",
-        from: grid.from,
-        to: grid.to,
-        intervals: grid.intervals,
-        days: grid.days,
-        dstDays: grid.days
-          .filter((d) => d.kind !== "normal")
-          .map((d) => ({ date: d.date, intervals: d.intervals })),
-        firstIntervalStart: edifact303(grid.startsUtcMs[0]),
-        lastIntervalStart: edifact303(grid.startsUtcMs[grid.startsUtcMs.length - 1]),
-      };
-
-      res.setHeader("Cache-Control", "no-store");
-      return res.status(200).json(body);
-    } catch (err) {
-      if (err instanceof MarketTimeError) {
-        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
-      }
-      throw err;
-    }
-  });
-
-  // --------------------------------------------------------------------------
-  // POST /api/v1/mako/identifiers — check before anything is sent
-  // --------------------------------------------------------------------------
   app.post(`${MAKO_PREFIX}/identifiers`, deps.limiter, requireKey, (req: Request, res: Response) => {
-    const parsed = IdentifierCheckRequestSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
-    }
+      handleIdentifiers(req.body, res as unknown as ResultSink);
+    },
+  );
 
-    const result = validateMessageIdentifiers(parsed.data);
-    const body: IdentifierCheckResponse = {
-      ok: true,
-      model: stamp(new Date()),
-      valid: result.ok,
-      results: result.results,
-      problems: result.problems,
-      algorithms: Object.values(CHECK_DIGIT_ALGORITHMS).map((a) => ({
-        id: a.id,
-        name: a.name,
-        appliesTo: a.appliesTo,
-        verified: a.verified,
-        openQuestion: a.openQuestion ?? null,
-      })),
-    };
-
-    res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json(body);
-  });
-
-  // --------------------------------------------------------------------------
-  // POST /api/v1/mako/mscons — build the metering-value message
-  // --------------------------------------------------------------------------
   app.post(`${MAKO_PREFIX}/mscons`, deps.limiter, requireKey, (req: Request, res: Response) => {
-    const parsed = MsconsRequestSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
-    }
+      handleMscons(req.body, res as unknown as ResultSink);
+    },
+  );
 
-    const { reference, ...input } = parsed.data;
-
-    let result: ReturnType<typeof buildMscons>;
-    try {
-      result = buildMscons(input);
-    } catch (err) {
-      // Wrong series length for a clock-change day, a malformed identifier, a
-      // duplicated Messlokation: the caller's input, with the reason named.
-      if (err instanceof MsconsError || err instanceof MarketTimeError) {
-        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
-      }
-      throw err;
-    }
-
-    const body: MsconsResponse = {
-      ok: true,
-      reference: reference ?? null,
-      model: stamp(new Date()),
-      message: result.message,
-      bytes: result.bytes,
-      controlReference: result.controlReference,
-      messageReference: result.messageReference,
-      grid: result.grid,
-      totals: result.totals,
-      // Read back out of the produced message, not assumed.
-      syntax: verifyInterchange(result.message),
-      profile: {
-        id: result.profile.id,
-        messageType: result.profile.messageType,
-        directory: result.profile.directory,
-        associationCode: result.profile.associationCode,
-        verified: result.profile.verified,
-        openQuestion: result.profile.openQuestion ?? null,
-      },
-      warnings: result.warnings,
-    };
-
-    res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json(body);
-  });
 }

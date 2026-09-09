@@ -19,6 +19,14 @@
       "destination": "/api"
     },
     {
+      "source": "/mcp",
+      "destination": "/api"
+    },
+    {
+      "source": "/mcp/(.*)",
+      "destination": "/api"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
@@ -38,6 +46,27 @@
   "headers": [
     {
       "source": "/api/(.*)",
+      "headers": [
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "Cache-Control",
+          "value": "no-store, no-cache, must-revalidate"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "no-referrer"
+        }
+      ]
+    },
+    {
+      "source": "/mcp",
       "headers": [
         {
           "key": "X-Content-Type-Options",

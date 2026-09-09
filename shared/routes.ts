@@ -41,6 +41,16 @@ export type RouteDefinition = {
   relatedPaths: string[];
   /** JSON-LD emitted into this page's head, beyond the site-wide graph. */
   structuredData?: StructuredData;
+  /**
+   * This path serves another page's content under a second URL.
+   *
+   * The alias keeps working — links to it exist and should not break — but it
+   * points its canonical at the page it duplicates and stays out of the
+   * sitemap. Two URLs serving the same document under two canonicals split
+   * whatever ranking either would have earned and read, correctly, as a site
+   * that does not know what its own pages are.
+   */
+  aliasOf?: string;
 };
 
 const ORIGIN_FALLBACK = "https://energie-teilen-site.vercel.app";
@@ -77,6 +87,7 @@ export const ROUTES: RouteDefinition[] = [
   {
     path: "/rechner",
     kind: "tool",
+    aliasOf: "/",
     title: "Mieterstrom-Rechner — Rendite, Amortisation, NPV",
     description:
       "Drei Szenarien mit dokumentierter Herkunft jeder Annahme: Amortisation, Kapitalwert, interner Zinsfuß und CO2. Kostenlos, ohne Anmeldung, Bericht als PDF.",
@@ -244,7 +255,14 @@ export function routeFor(path: string): RouteDefinition | null {
 
 /** Routes that belong in the sitemap. */
 export function indexableRoutes(): RouteDefinition[] {
-  return ROUTES.filter((r) => r.indexable);
+  // An alias is a second URL for a page already listed. Listing it too asks a
+  // crawler to choose between two identical documents.
+  return ROUTES.filter((r) => r.indexable && !r.aliasOf);
+}
+
+/** The URL a page should declare as its own, following any alias. */
+export function canonicalPathFor(path: string): string {
+  return routeFor(path)?.aliasOf ?? path;
 }
 
 /** The tools, in the order they appear in navigation. */

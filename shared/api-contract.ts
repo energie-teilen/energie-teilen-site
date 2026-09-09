@@ -593,3 +593,30 @@ export const MsconsResponseSchema = z.object({
   warnings: z.array(z.object({ code: z.string(), message: z.string() })),
 });
 export type MsconsResponse = z.infer<typeof MsconsResponseSchema>;
+
+// ============================================================================
+// THE ENDPOINT REGISTER
+// ============================================================================
+
+/**
+ * Every computation the v1 API exposes, named once.
+ *
+ * Three surfaces describe the same set: the HTTP routes, the MCP tool list and
+ * the published OpenAPI document. Naming the set here — in a module all three
+ * already depend on — means a new endpoint that is not wired into all of them
+ * fails a test rather than shipping as an endpoint an agent is told about and
+ * cannot call, or can call and was never told about.
+ */
+export const API_V1_ENDPOINTS = [
+  `${API_PREFIX}/meta`,
+  `${API_PREFIX}/calculate`,
+  `${API_PREFIX}/eligibility`,
+  `${API_PREFIX}/messkonzept`,
+  `${API_PREFIX}/allocation`,
+  `${API_PREFIX}/billing`,
+  `${MAKO_PREFIX}/grid`,
+  `${MAKO_PREFIX}/identifiers`,
+  `${MAKO_PREFIX}/mscons`,
+] as const;
+
+export type ApiV1Endpoint = (typeof API_V1_ENDPOINTS)[number];

@@ -31,46 +31,19 @@ if (!existsSync(SHELL)) {
   process.exit(1);
 }
 
-// The manifest is TypeScript; read the fields we need without a compile step.
-const routesSource = readFileSync(join(process.cwd(), "shared", "routes.ts"), "utf8");
+import { loadManifests } from "./load-manifests.mjs";
 
 const ORIGIN = (process.env.APP_URL || "https://energie-teilen-site.vercel.app").replace(/\/+$/, "");
 
-/** Parse the ROUTES array out of the manifest. */
-function parseRoutes() {
-  const body = routesSource.slice(
-    routesSource.indexOf("export const ROUTES: RouteDefinition[] = ["),
-  );
-  const routes = [];
-  const blockRe = /\{\s*\n\s*path: "([^"]+)",([\s\S]*?)\n  \},/g;
-  let m;
-  while ((m = blockRe.exec(body)) !== null) {
-    const [, path, rest] = m;
-    const field = (name) => {
-      const r = new RegExp(`${name}:\\s*(?:\\n\\s*)?"((?:[^"\\\\]|\\\\.)*)"`);
-      const hit = r.exec(rest);
-      return hit ? hit[1].replace(/\\"/g, '"') : null;
-    };
-    const bool = (name) => new RegExp(`${name}: (true|false)`).exec(rest)?.[1] === "true";
-    routes.push({
-      path,
-      title: field("title"),
-      description: field("description"),
-      navLabel: field("navLabel"),
-      answers: field("answers"),
-      indexable: bool("indexable"),
-      changefreq: field("changefreq") ?? "monthly",
-      priority: Number(/priority: ([\d.]+)/.exec(rest)?.[1] ?? "0.5"),
-      kind: field("kind") ?? "tool",
-    });
-    if (routes.length > 40) break;
-  }
-  return routes;
-}
+// The manifests are executed rather than parsed, so a reformat of the source
+// can never change what gets published. See scripts/load-manifests.mjs.
+const manifests = await loadManifests();
+const routes = manifests.ROUTES;
+const faqFor = manifests.faqFor;
+const canonicalPathFor = manifests.canonicalPathFor;
 
-const routes = parseRoutes();
 if (routes.length < 5) {
-  console.error(`Only parsed ${routes.length} routes from shared/routes.ts — refusing to continue.`);
+  console.error(`Only ${routes.length} routes in the manifest — refusing to continue.`);
   process.exit(1);
 }
 
@@ -120,6 +93,22 @@ function structuredDataFor(route) {
     },
   ];
 
+  const faq = faqFor(route.path);
+  if (faq.length > 0) {
+    // The answers are on the page in full. This block is the same text in the
+    // form a crawler can extract without parsing the layout — which is how a
+    // question gets answered with this page rather than about it.
+    graph.push({
+      "@type": "FAQPage",
+      "@id": `${ORIGIN}${route.path}#faq`,
+      mainEntity: faq.map((entry) => ({
+        "@type": "Question",
+        name: entry.question,
+        acceptedAnswer: { "@type": "Answer", text: entry.answer },
+      })),
+    });
+  }
+
   if (route.path !== "/") {
     graph.push({
       "@type": "BreadcrumbList",
@@ -142,34 +131,81 @@ function structuredDataFor(route) {
  */
 function noscriptSummary(route) {
   if (route.path === "/") return "";
+  const faq = faqFor(route.path)
+    .map(
+      (entry) =>
+        `        <dt>${escapeAttr(entry.question)}</dt>\n` +
+        `        <dd>${escapeAttr(entry.answer)}</dd>\n`,
+    )
+    .join("");
+
   return (
     `\n    <noscript>\n` +
     `      <h1>${escapeAttr(route.navLabel)}</h1>\n` +
     `      <p>${escapeAttr(route.description)}</p>\n` +
     `      <p>${escapeAttr(route.answers)}</p>\n` +
+    (faq ? `      <dl>\n${faq}      </dl>\n` : "") +
     `    </noscript>\n`
+  );
+}
+
+/**
+ * The shell's own JSON-LD describes the LANDING page as well as the site.
+ *
+ * Copied unchanged into every document, it asserts the landing page's
+ * questions and its @id on /messkonzept — the same identifier claimed at two
+ * URLs, which invalidates both. The site-level entities are true everywhere and
+ * stay; the page-level ones belong only to the page they describe.
+ */
+const PAGE_SPECIFIC_TYPES = new Set(["FAQPage", "HowTo", "WebPage", "BreadcrumbList"]);
+
+function stripLandingPageEntities(html, route) {
+  if (route.path === "/") return html;
+  return html.replace(
+    /<script type="application\/ld\+json">([\s\S]*?)<\/script>/,
+    (whole, body) => {
+      let parsed;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        return whole; // Leave anything unparseable alone rather than corrupt it.
+      }
+      if (!Array.isArray(parsed["@graph"])) return whole;
+      parsed["@graph"] = parsed["@graph"].filter((n) => !PAGE_SPECIFIC_TYPES.has(n["@type"]));
+      return `<script type="application/ld+json">${JSON.stringify(parsed)}</script>`;
+    },
   );
 }
 
 let written = 0;
 for (const route of routes) {
   const url = `${ORIGIN}${route.path}`;
+  // An alias points at the page it duplicates, not at itself.
+  const canonicalUrl = `${ORIGIN}${canonicalPathFor(route.path)}`;
   let html = shell;
 
   html = replaceTitle(html, route.title);
   html = replaceMultilineMeta(html, "name", "description", route.description);
   html = replaceMultilineMeta(html, "property", "og:title", route.title);
   html = replaceMultilineMeta(html, "property", "og:description", route.description);
-  html = replaceMultilineMeta(html, "property", "og:url", url);
+  html = replaceMultilineMeta(html, "property", "og:url", canonicalUrl);
   html = replaceMultilineMeta(html, "name", "twitter:title", route.title);
   html = replaceMultilineMeta(html, "name", "twitter:description", route.description);
-  html = setCanonical(html, url);
+  html = setCanonical(html, canonicalUrl);
+  html = stripLandingPageEntities(html, route);
 
+  // Marked, and any earlier copy removed first: running this script twice over
+  // the same output must produce the same document, not two of everything.
+  html = html.replace(
+    /\n\s*<script type="application\/ld\+json" data-route-graph>[\s\S]*?<\/script>/g,
+    "",
+  );
   html = html.replace(
     "</head>",
-    `    <script type="application/ld+json">\n${JSON.stringify(structuredDataFor(route), null, 2)}\n    </script>\n  </head>`,
+    `    <script type="application/ld+json" data-route-graph>\n${JSON.stringify(structuredDataFor(route), null, 2)}\n    </script>\n  </head>`,
   );
 
+  html = html.replace(/<body>\s*<noscript>[\s\S]*?<\/noscript>\n/, "<body>");
   html = html.replace("<body>", `<body>${noscriptSummary(route)}`);
 
   // "/" is the shell itself; everything else becomes <path>/index.html so a
@@ -184,7 +220,7 @@ const today = new Date().toISOString().slice(0, 10);
 const sitemap =
   `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
   routes
-    .filter((r) => r.indexable)
+    .filter((r) => r.indexable && !r.aliasOf)
     .map(
       (r) =>
         `  <url>\n    <loc>${ORIGIN}${r.path}</loc>\n    <lastmod>${today}</lastmod>\n` +
@@ -194,12 +230,12 @@ const sitemap =
   `\n</urlset>\n`;
 
 writeFileSync(join(DIST, "sitemap.xml"), sitemap);
-writeFileSync(
-  join(DIST, "robots.txt"),
-  ["User-agent: *", "Allow: /", "", `Sitemap: ${ORIGIN}/sitemap.xml`, ""].join("\n"),
-);
 
-const indexable = routes.filter((r) => r.indexable).length;
+// robots.txt is written by scripts/build-discovery.mjs, which names the AI
+// crawlers individually. One file, one owner: two scripts writing it meant the
+// richer version survived only because of the order they happened to run in.
+
+const indexable = routes.filter((r) => r.indexable && !r.aliasOf).length;
 console.log(
   `static: ${written} documents, ${indexable} in the sitemap` +
     ` (was 1 document and 4 sitemap entries, three of them legal pages)`,

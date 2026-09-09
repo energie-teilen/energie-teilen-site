@@ -13,7 +13,7 @@
  * is called.
  */
 
-import { absoluteUrl, routeFor, type RouteDefinition } from "../../../shared/routes";
+import { absoluteUrl, canonicalPathFor, routeFor, type RouteDefinition } from "../../../shared/routes";
 
 const OG_IMAGE = "/og-image.png";
 
@@ -50,7 +50,9 @@ export function applyRouteHead(route: RouteDefinition): void {
   setMeta('meta[name="twitter:title"]', "name", "twitter:title", route.title);
   setMeta('meta[name="twitter:description"]', "name", "twitter:description", route.description);
 
-  setLink("canonical", absoluteUrl(route.path));
+  // Follow an alias: a second URL for the same page declares the page it
+  // duplicates, not itself.
+  setLink("canonical", absoluteUrl(canonicalPathFor(route.path)));
 }
 
 /** Apply the head for a path, falling back to the landing route. */

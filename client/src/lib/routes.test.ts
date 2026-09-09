@@ -7,6 +7,7 @@ import {
   absoluteUrl,
   buildRobots,
   buildSitemap,
+  canonicalPathFor,
   indexableRoutes,
   routeFor,
   navRoutes,
@@ -122,14 +123,19 @@ describe("sitemap and robots", () => {
     const xml = buildSitemap("2026-09-09");
     for (const r of ROUTES) {
       const url = absoluteUrl(r.path);
-      if (r.indexable) expect(xml, `${r.path} in sitemap`).toContain(`<loc>${url}</loc>`);
-      else expect(xml, `${r.path} not in sitemap`).not.toContain(`<loc>${url}</loc>`);
+      // An alias is indexable in the sense that it is a real page, but it is
+      // advertised under the URL it duplicates, not its own.
+      if (r.indexable && !r.aliasOf) {
+        expect(xml, `${r.path} in sitemap`).toContain(`<loc>${url}</loc>`);
+      } else {
+        expect(xml, `${r.path} not in sitemap`).not.toContain(`<loc>${url}</loc>`);
+      }
     }
   });
 
   it("covers more than the legal pages", () => {
     const nonLegal = indexableRoutes().filter((r) => r.kind !== "legal");
-    expect(nonLegal.length, "indexable pages that are not legal boilerplate").toBeGreaterThanOrEqual(6);
+    expect(nonLegal.length, "indexable pages that are not legal boilerplate").toBeGreaterThanOrEqual(5);
   });
 
   it("is well-formed and carries a lastmod on every entry", () => {
@@ -184,5 +190,31 @@ describe("the API reference matches the API", () => {
   it("marks required parameters as required", () => {
     const calculate = API_ENDPOINTS.find((e) => e.path.endsWith("/calculate"))!;
     expect(calculate.parameters.find((p) => p.name === "inputs.kwp")?.required).toBe(true);
+  });
+});
+
+describe("aliases", () => {
+  it("keeps an alias out of the sitemap while leaving the route reachable", () => {
+    // /rechner serves the landing page under a second URL. Both must work; only
+    // one may be advertised, or the two split whatever ranking either earns.
+    expect(routeFor("/rechner")).not.toBeNull();
+    expect(indexableRoutes().map((r) => r.path)).not.toContain("/rechner");
+    expect(buildSitemap()).not.toContain("/rechner<");
+  });
+
+  it("points every alias at a page that exists and is itself canonical", () => {
+    for (const route of ROUTES) {
+      if (!route.aliasOf) continue;
+      const target = routeFor(route.aliasOf);
+      expect(target, `${route.path} aliases a missing route`).not.toBeNull();
+      expect(target!.aliasOf, `${route.path} aliases another alias`).toBeUndefined();
+      expect(canonicalPathFor(route.path)).toBe(route.aliasOf);
+    }
+  });
+
+  it("leaves a real page pointing at itself", () => {
+    for (const route of indexableRoutes()) {
+      expect(canonicalPathFor(route.path), route.path).toBe(route.path);
+    }
   });
 });

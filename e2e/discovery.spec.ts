@@ -166,3 +166,128 @@ test.describe("the tools work on their own routes", () => {
     }
   });
 });
+
+test.describe("the machine-readable surface", () => {
+  const FILES = [
+    { path: "/llms.txt", type: /text\/plain/ },
+    { path: "/llms-full.txt", type: /text\/plain/ },
+    { path: "/openapi.json", type: /application\/json/ },
+    { path: "/.well-known/mcp.json", type: /application\/json/ },
+    { path: "/mcp.json", type: /application\/json/ },
+    { path: "/ai.txt", type: /text\/plain/ },
+  ];
+
+  for (const file of FILES) {
+    test(`${file.path} is served`, async ({ request }) => {
+      const res = await request.get(file.path);
+      expect(res.status(), file.path).toBe(200);
+      expect(res.headers()["content-type"], file.path).toMatch(file.type);
+      expect((await res.text()).length, file.path).toBeGreaterThan(200);
+    });
+  }
+
+  test("llms.txt links only to pages that exist", async ({ request }) => {
+    // A model that follows a dead link from the index learns the site is
+    // unreliable, which is worse than not being indexed at all.
+    const txt = await (await request.get("/llms.txt")).text();
+    const paths = [...txt.matchAll(/\]\(https?:\/\/[^/)]+(\/[^)\s]*)\)/g)].map((m) => m[1]);
+    expect(paths.length).toBeGreaterThan(5);
+    for (const path of new Set(paths)) {
+      expect((await request.get(path)).status(), path).toBe(200);
+    }
+  });
+
+  test("llms-full.txt carries the facts, not just the links", async ({ request }) => {
+    const txt = await (await request.get("/llms-full.txt")).text();
+    // The three things that are true here and guessed everywhere else.
+    expect(txt).toContain("92");
+    expect(txt).toContain("100");
+    expect(txt).toMatch(/Cent/);
+    expect(txt).toMatch(/not_determinable|verweiger|Verweiger/);
+    expect(txt.length).toBeGreaterThan(8000);
+  });
+
+  test("openapi.json describes exactly the endpoints that exist", async ({ request }) => {
+    const spec = await (await request.get("/openapi.json")).json();
+    expect(spec.openapi).toMatch(/^3\.1/);
+    for (const path of [
+      "/api/v1/meta",
+      "/api/v1/calculate",
+      "/api/v1/eligibility",
+      "/api/v1/messkonzept",
+      "/api/v1/allocation",
+      "/api/v1/billing",
+      "/api/v1/mako/grid",
+      "/api/v1/mako/identifiers",
+      "/api/v1/mako/mscons",
+    ]) {
+      expect(Object.keys(spec.paths), `${path} in spec`).toContain(path);
+    }
+    // Every operation an agent might call must state how to authenticate and
+    // what a refusal looks like.
+    for (const [path, ops] of Object.entries(spec.paths as Record<string, Record<string, { responses: Record<string, unknown> }>>)) {
+      for (const [verb, op] of Object.entries(ops)) {
+        expect(op.responses["401"], `${verb} ${path} documents 401`).toBeTruthy();
+        expect(op.responses["400"], `${verb} ${path} documents 400`).toBeTruthy();
+      }
+    }
+    expect(spec.components.securitySchemes).toBeTruthy();
+  });
+
+  test("openapi.json publishes the schema the server enforces", async ({ request }) => {
+    const spec = await (await request.get("/openapi.json")).json();
+    // A spec with an empty request body teaches an agent nothing and costs it
+    // a round trip per guess.
+    const calculate = spec.paths["/api/v1/calculate"].post.requestBody.content["application/json"].schema;
+    expect(calculate.type).toBe("object");
+    expect(calculate.required).toContain("inputs");
+
+    const grid = spec.paths["/api/v1/mako/grid"].get;
+    expect(grid.parameters.map((p: { name: string }) => p.name)).toContain("date");
+  });
+
+  test("the MCP manifest points at an endpoint that answers", async ({ request }) => {
+    const manifest = await (await request.get("/.well-known/mcp.json")).json();
+    expect(manifest.transport.type).toBe("streamable-http");
+    expect(manifest.transport.url).toMatch(/\/mcp$/);
+    expect(manifest.authentication.type).toBe("bearer");
+    expect(manifest.tools.length).toBeGreaterThanOrEqual(8);
+    for (const tool of manifest.tools) {
+      // Every tool must also be reachable without MCP, so a plain HTTP client
+      // is not shut out.
+      expect(tool.httpEquivalent.path, tool.name).toMatch(/^\/api\/v1\//);
+      expect(tool.inputSchema.type, tool.name).toBe("object");
+    }
+  });
+
+  test("the root copy of the manifest matches the well-known copy", async ({ request }) => {
+    const wellKnown = await (await request.get("/.well-known/mcp.json")).text();
+    const root = await (await request.get("/mcp.json")).text();
+    expect(root).toBe(wellKnown);
+  });
+
+  test("robots.txt names the AI crawlers explicitly", async ({ request }) => {
+    // Several of these default to not crawling unless named. Being absent from
+    // this list is being absent from the answer.
+    const txt = await (await request.get("/robots.txt")).text();
+    for (const agent of [
+      "GPTBot",
+      "OAI-SearchBot",
+      "ChatGPT-User",
+      "ClaudeBot",
+      "Claude-User",
+      "PerplexityBot",
+      "Google-Extended",
+      "CCBot",
+    ]) {
+      expect(txt, `${agent} named`).toContain(agent);
+    }
+    expect(txt).not.toMatch(/^Disallow: \/$/m);
+  });
+
+  test("ai.txt states the terms rather than leaving them to be assumed", async ({ request }) => {
+    const txt = await (await request.get("/ai.txt")).text();
+    expect(txt).toMatch(/llms\.txt/);
+    expect(txt).toMatch(/openapi\.json/);
+  });
+});

@@ -3,6 +3,7 @@ import { ArrowRight } from "lucide-react";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import { routeFor, type RouteDefinition } from "../../../shared/routes";
+import { faqFor } from "../../../shared/faq";
 
 /**
  * ToolPageLayout
@@ -32,6 +33,7 @@ export function ToolPageLayout({
   aside?: React.ReactNode;
 }) {
   const route = routeFor(path);
+  const faq = faqFor(path);
   const related = (route?.relatedPaths ?? [])
     .map((p) => routeFor(p))
     .filter((r): r is RouteDefinition => r !== null);
@@ -67,6 +69,29 @@ export function ToolPageLayout({
         <div className="mt-10">{children}</div>
 
         {aside ? <div className="mt-14 max-w-3xl">{aside}</div> : null}
+
+        {faq.length > 0 ? (
+          <section className="mt-16 max-w-3xl border-t border-border/60 pt-10">
+            <h2 className="font-display text-xl font-semibold tracking-[-0.02em] text-foreground">
+              Häufige Fragen
+            </h2>
+            {/*
+              These answers are also published as structured data. They are
+              rendered here because an answer that exists only in a metadata
+              block is one a reader cannot check — and a page that says one
+              thing to a crawler and another to a person deserves neither's
+              trust.
+            */}
+            <dl className="mt-6 space-y-6">
+              {faq.map((entry) => (
+                <div key={entry.question} className="space-y-2">
+                  <dt className="font-medium leading-7 text-foreground">{entry.question}</dt>
+                  <dd className="text-sm leading-7 text-muted-foreground">{entry.answer}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        ) : null}
 
         {related.length > 0 ? (
           <section className="mt-16 border-t border-border/60 pt-10">

@@ -63,7 +63,8 @@ import {
   type OrderLedgerRecord,
 } from "../shared/ledger.js";
 import { getKv } from "./kv.js";
-import { mountApiV1 } from "./api-v1.js";
+import { dispatchApiV1, mountApiV1 } from "./api-v1.js";
+import { mountMcp } from "./mcp.js";
 import { apiKeysConfigured, configuredKeyLabels } from "./api-keys.js";
 import {
   Deadline,
@@ -895,6 +896,16 @@ export async function buildApp(): Promise<Express> {
   // ---------------------------------------------------------------------------
   const apiV1Limiter = createRateLimiter({ windowMs: 60_000, max: 120, bucket: "apiv1" });
   mountApiV1(app, { limiter: apiV1Limiter });
+
+  /*
+   * The same engines as tools an agent can call.
+   *
+   * Ranking for a query gets the product mentioned; being callable gets it
+   * used, inside whatever workflow the agent is already running. Each tool
+   * dispatches to the v1 handler of the same name in-process, so there is one
+   * implementation and one set of refusals.
+   */
+  mountMcp(app, { limiter: apiV1Limiter, invoke: async (endpoint, method, payload) => dispatchApiV1(endpoint, method, payload) });
 
   // GET /api/health
   /*
