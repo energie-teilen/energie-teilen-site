@@ -139,6 +139,18 @@ export default function Header() {
   }, [menuOpen]);
 
   return (
+    <>
+      {/*
+        The first thing a keyboard or screen-reader user meets. Without it the
+        primary navigation has to be traversed on every page before the content
+        can be reached.
+      */}
+      <a
+        href="#main"
+        className="sr-only rounded-full bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[100] focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2"
+      >
+        Zum Hauptinhalt springen
+      </a>
     <header
       className={`fixed inset-x-0 top-0 z-50 transition-transform duration-500 motion-reduce:transition-none ${
         isHidden ? "-translate-y-full" : "translate-y-0"
@@ -229,5 +241,6 @@ export default function Header() {
         ) : null}
       </div>
     </header>
+    </>
   );
 }

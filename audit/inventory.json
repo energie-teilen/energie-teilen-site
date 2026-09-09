@@ -1,0 +1,303 @@
+{
+  "generatedAt": "2026-09-08T23:38:23.836Z",
+  "counts": {
+    "files": 119,
+    "sourceFiles": 103,
+    "appComponents": 26,
+    "uiComponents": 5,
+    "sharedModules": 18,
+    "testFiles": 22,
+    "routes": 7,
+    "endpoints": 17
+  },
+  "routes": [
+    {
+      "path": "/",
+      "component": "Home"
+    },
+    {
+      "path": "/rechner",
+      "component": "Home"
+    },
+    {
+      "path": "/pilot",
+      "component": "Home"
+    },
+    {
+      "path": "/impressum",
+      "component": "Impressum"
+    },
+    {
+      "path": "/datenschutz",
+      "component": "Datenschutz"
+    },
+    {
+      "path": "/agb",
+      "component": "Agb"
+    },
+    {
+      "path": "/404",
+      "component": "NotFound"
+    }
+  ],
+  "catchAll": "NotFound",
+  "endpoints": [
+    {
+      "method": "GET",
+      "expr": "`${API_PREFIX}/meta`",
+      "file": "server/api-v1.ts"
+    },
+    {
+      "method": "POST",
+      "expr": "`${API_PREFIX}/calculate`",
+      "file": "server/api-v1.ts"
+    },
+    {
+      "method": "POST",
+      "expr": "`${API_PREFIX}/eligibility`",
+      "file": "server/api-v1.ts"
+    },
+    {
+      "method": "POST",
+      "expr": "`${API_PREFIX}/messkonzept`",
+      "file": "server/api-v1.ts"
+    },
+    {
+      "method": "POST",
+      "expr": "`${API_PREFIX}/allocation`",
+      "file": "server/api-v1.ts"
+    },
+    {
+      "method": "POST",
+      "expr": "`${API_PREFIX}/billing`",
+      "file": "server/api-v1.ts"
+    },
+    {
+      "method": "GET",
+      "expr": "`${MAKO_PREFIX}/grid`",
+      "file": "server/api-v1.ts"
+    },
+    {
+      "method": "POST",
+      "expr": "`${MAKO_PREFIX}/identifiers`",
+      "file": "server/api-v1.ts"
+    },
+    {
+      "method": "POST",
+      "expr": "`${MAKO_PREFIX}/mscons`",
+      "file": "server/api-v1.ts"
+    },
+    {
+      "method": "POST",
+      "expr": "\"/api/stripe/webhook\"",
+      "file": "server/index.ts"
+    },
+    {
+      "method": "POST",
+      "expr": "\"/api/pilot-checkout\"",
+      "file": "server/index.ts"
+    },
+    {
+      "method": "POST",
+      "expr": "\"/api/lead\"",
+      "file": "server/index.ts"
+    },
+    {
+      "method": "GET",
+      "expr": "\"/api/pilot-order/:sessionId\"",
+      "file": "server/index.ts"
+    },
+    {
+      "method": "GET",
+      "expr": "\"/api/admin/orders\"",
+      "file": "server/index.ts"
+    },
+    {
+      "method": "POST",
+      "expr": "\"/api/admin/orders/:reference/stage\"",
+      "file": "server/index.ts"
+    },
+    {
+      "method": "GET",
+      "expr": "\"/api/health\"",
+      "file": "server/index.ts"
+    },
+    {
+      "method": "GET",
+      "expr": "\"*\"",
+      "file": "server/index.ts"
+    }
+  ],
+  "reachability": {
+    "brokenAnchors": [],
+    "anchorLinks": [
+      "main",
+      "top",
+      "pilot-start",
+      "rechner",
+      "pilot-checkout-form"
+    ],
+    "sectionIds": [
+      "break-even-target-irr",
+      "lead-email",
+      "leistungen",
+      "main",
+      "mehrwert",
+      "pilot-checkout-form",
+      "pilot-confirmation",
+      "pilot-start",
+      "primary-mobile-nav",
+      "rechner",
+      "s",
+      "stakeholder",
+      "struktur",
+      "top",
+      "ueberblick"
+    ],
+    "unroutedInternalLinks": [],
+    "unreferencedAppComponents": [
+      "client/src/components/ScenarioCashflowChart.tsx",
+      "client/src/components/SensitivityTornado.tsx",
+      "client/src/pages/Home.tsx",
+      "client/src/pages/NotFound.tsx",
+      "client/src/pages/legal/Agb.tsx",
+      "client/src/pages/legal/Datenschutz.tsx",
+      "client/src/pages/legal/Impressum.tsx"
+    ],
+    "unreferencedUiComponents": []
+  },
+  "coverage": {
+    "sharedModules": [
+      "shared/allocation.ts",
+      "shared/api-contract.ts",
+      "shared/assumptions.ts",
+      "shared/billing.ts",
+      "shared/deadline.ts",
+      "shared/edifact.ts",
+      "shared/eligibility.ts",
+      "shared/ledger.ts",
+      "shared/legal-entity.ts",
+      "shared/legal-models.ts",
+      "shared/market-ids.ts",
+      "shared/market-time.ts",
+      "shared/messkonzept.ts",
+      "shared/mieterstrom.ts",
+      "shared/mscons.ts",
+      "shared/pilot-order.ts",
+      "shared/schema.ts",
+      "shared/tariffs.ts"
+    ],
+    "testedShared": [
+      "shared/allocation.ts",
+      "shared/assumptions.ts",
+      "shared/billing.ts",
+      "shared/deadline.ts",
+      "shared/edifact.ts",
+      "shared/eligibility.ts",
+      "shared/ledger.ts",
+      "shared/legal-entity.ts",
+      "shared/legal-models.ts",
+      "shared/market-ids.ts",
+      "shared/market-time.ts",
+      "shared/messkonzept.ts",
+      "shared/mieterstrom.ts",
+      "shared/mscons.ts",
+      "shared/pilot-order.ts",
+      "shared/tariffs.ts"
+    ],
+    "untestedShared": [
+      "shared/api-contract.ts",
+      "shared/schema.ts"
+    ]
+  },
+  "env": [
+    "ADMIN_API_TOKEN",
+    "APP_URL",
+    "CI",
+    "DEBUG",
+    "E2E_BASE_URL",
+    "E2E_ONLY_CHROMIUM",
+    "E2E_PORT",
+    "ET_API_KEYS",
+    "ET_CUSTOMER_REPLY_TO",
+    "ET_PILOT_RESPONSE_WINDOW",
+    "LEAD_NOTIFICATION_EMAIL",
+    "NODE_ENV",
+    "PLAYWRIGHT_CHROMIUM_PATH",
+    "PORT",
+    "RELEASE_CHECK",
+    "RESEND_API_KEY",
+    "RESEND_FROM_EMAIL",
+    "STRIPE_PRICE_ET_ELIGIBILITY",
+    "STRIPE_PRICE_ET_MANDATE",
+    "STRIPE_PRICE_ET_STRUCTURING",
+    "STRIPE_SECRET_KEY",
+    "STRIPE_WEBHOOK_SECRET",
+    "UNSPLASH_ACCESS_KEY",
+    "UPSTASH_REDIS_REST_TOKEN",
+    "UPSTASH_REDIS_REST_URL",
+    "VITE_DEV_API_TARGET",
+    "VITE_PILOT_CAPACITY_REMAINING"
+  ],
+  "smells": {
+    "todo": {
+      "count": 1,
+      "items": [
+        {
+          "at": "client/src/lib/legal-entity.test.ts:50",
+          "line": "for (const value of [\"HRB XXXXXX\", \"Platzhalter\", \"Mustermann GmbH\", \"TODO\", \"   \"]) {"
+        }
+      ]
+    },
+    "fixme": {
+      "count": 0,
+      "items": []
+    },
+    "anyType": {
+      "count": 4,
+      "items": [
+        {
+          "at": "api/index.ts:17",
+          "line": "let appPromise: Promise<any> | null = null;"
+        },
+        {
+          "at": "api/index.ts:20",
+          "line": "async function getApp(): Promise<any> {"
+        },
+        {
+          "at": "client/src/hooks/usePersistFn.ts:3",
+          "line": "type noop = (...args: any[]) => any;"
+        },
+        {
+          "at": "vite.config.ts:74",
+          "line": "const handlePayload = (payload: any) => {"
+        }
+      ]
+    },
+    "consoleLog": {
+      "count": 2,
+      "items": [
+        {
+          "at": "server/index.ts:1011",
+          "line": "console.log(`Energie Teilen server running on http://localhost:${port}/`);"
+        },
+        {
+          "at": "server/index.ts:1012",
+          "line": "console.log("
+        }
+      ]
+    },
+    "emptyHref": {
+      "count": 0,
+      "items": []
+    },
+    "nonNullAssert": {
+      "count": 0,
+      "items": []
+    },
+    "tsIgnore": {
+      "count": 0,
+      "items": []
+    }
+  }
+}

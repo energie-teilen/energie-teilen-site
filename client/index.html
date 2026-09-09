@@ -79,15 +79,14 @@
          Stripe is prefetched because checkout is the conversion
          path and users WILL go there.
          ========================================================= -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="dns-prefetch" href="https://fonts.googleapis.com" />
     <link rel="dns-prefetch" href="https://js.stripe.com" />
     <link rel="dns-prefetch" href="https://checkout.stripe.com" />
 
-    <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap"
-      rel="stylesheet" />
+    <!-- Web fonts are served from this origin. Loading them from a third-party
+         CDN would transmit every visitor's IP address to that provider before
+         any consent, and would add a render-blocking cross-origin request on
+         the critical path. See client/src/fonts.css and scripts/fetch-fonts.mjs;
+         a build guard keeps an external font host from returning. -->
 
     <!-- =========================================================
          CRITICAL INLINE CSS

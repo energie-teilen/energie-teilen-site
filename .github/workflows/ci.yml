@@ -1,15 +1,18 @@
 name: CI
 
-# Every push to main and every PR runs the same gate the operator runs locally:
-# typecheck both tsconfig projects, the full deterministic suite, a production
-# build, and a smoke test against that build.
+# The gate every change passes before it can reach production.
 #
-# This is what stops the guarantees in this repo from being aspirational:
-#   - the economics engine stays unit-tested (the wedge)
-#   - legal-models.test.ts scans client/index.html, so an SEO edit cannot slip
-#     an unverified statutory citation back into production
-#   - analytics.test.ts blocks personal data reaching an event property
-#   - the paid funnel's endpoints answer correctly before anything ships
+# Three jobs, deliberately separated so a failure names its own cause:
+#
+#   verify   — types, deterministic unit suite, production build, API smoke
+#   e2e      — the built application in real browsers: reachability, the
+#              funnel, accessibility, security headers, performance budgets
+#   release  — additional checks that only apply to a production deploy,
+#              including the legal-entity gate that blocks publishing an
+#              imprint made of placeholders
+#
+# Traces, screenshots and the HTML report are uploaded on failure, so a red run
+# is diagnosable rather than merely red.
 
 on:
   push:
@@ -20,20 +23,20 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  NODE_VERSION: "22"
+
 jobs:
   verify:
+    name: Types, tests, build
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
     steps:
       - uses: actions/checkout@v4
-
-      # Version comes from the "packageManager" field in package.json.
       - uses: pnpm/action-setup@v4
-
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
       - name: Install
@@ -42,7 +45,7 @@ jobs:
       - name: Typecheck (client + server projects)
         run: pnpm check
 
-      - name: Test
+      - name: Deterministic test suite
         run: pnpm test
 
       - name: Build
@@ -59,3 +62,87 @@ jobs:
           done
           bash smoke-test.sh http://localhost:3000
           kill "$SRV"
+
+      - name: Upload build for the e2e job
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          retention-days: 1
+
+  e2e:
+    name: Browser suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Reuse the verified build
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      # Chromium, Firefox and WebKit. Where a sandbox cannot download all
+      # three, E2E_ONLY_CHROMIUM=1 narrows the run and the report says so.
+      - name: Install browsers
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
+
+      - name: Run the browser suite
+        run: pnpm exec playwright test
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report
+            test-results
+          retention-days: 14
+
+  release:
+    name: Release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [verify, e2e]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Fails while shared/legal-entity.ts still carries no real data. That
+      # failure is intentional: it stops a deployment that would publish an
+      # imprint made of placeholders while taking payments.
+      - name: Legal entity is publishable
+        run: RELEASE_CHECK=1 pnpm test -- client/src/lib/legal-entity.test.ts
+
+      - name: Dependency audit
+        run: pnpm audit --audit-level high
+
+      - name: No unexpected licences
+        run: pnpm licenses list --prod --json > licenses.json && node scripts/check-licenses.mjs
+
+      - name: Upload licence inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: licenses
+          path: licenses.json
+          retention-days: 30

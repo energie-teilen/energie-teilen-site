@@ -265,7 +265,12 @@ export function MesskonzeptPanel({
                     {result.meterCount} Messeinrichtungen
                   </p>
                 </div>
-                <div className="mt-4 overflow-x-auto">
+                <div
+                  className="mt-4 overflow-x-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                  tabIndex={0}
+                  role="region"
+                  aria-label="Zählerinventar, horizontal scrollbar"
+                >
                   <table className="w-full min-w-[34rem] text-left text-sm">
                     <thead>
                       <tr className="text-[0.68rem] uppercase tracking-[0.14em] text-muted-foreground">

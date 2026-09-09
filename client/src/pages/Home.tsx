@@ -1,5 +1,10 @@
 import { type ScenarioBundle } from "@/lib/report-pdf";
-import { SensitivityTornado } from "@/components/SensitivityTornado";
+// Also a recharts consumer, and equally far down the page.
+import { DeferUntilVisible } from "@/components/DeferUntilVisible";
+
+const SensitivityTornado = lazy(() =>
+  import("@/components/SensitivityTornado").then((m) => ({ default: m.SensitivityTornado })),
+);
 import { BreakEvenPanel } from "@/components/BreakEvenPanel";
 import { EligibilityPanel } from "@/components/EligibilityPanel";
 import { MesskonzeptPanel, type MesskonzeptAnswers } from "@/components/MesskonzeptPanel";
@@ -9,6 +14,8 @@ import type { QualificationFacts } from "../../../shared/eligibility";
 import { evaluateEligibility } from "../../../shared/eligibility";
 import { track } from "@/lib/analytics";
 import {
+  Suspense,
+  lazy,
   useDeferredValue,
   useEffect,
   useMemo,
@@ -35,15 +42,6 @@ import {
   TrendingUp,
   Users2,
 } from "lucide-react";
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -251,57 +249,29 @@ function eurFmt(n: number): string {
 
 // --- Components for the calculator section ---
 
-const ScenarioCashflowChart = memo(function ScenarioCashflowChart({
-  data,
-  accent,
-}: {
-  data: Array<{ jahr: number; kumuliert: number }>;
-  accent: string;
-}) {
+/*
+ * The chart is loaded on demand: recharts is the largest chunk in the build
+ * and is only needed once a visitor reaches the scenario cards. A skeleton of
+ * the same height holds the space so nothing shifts when it arrives.
+ */
+const ScenarioCashflowChart = lazy(() => import("@/components/ScenarioCashflowChart"));
+
+function ChartFrame(props: { data: Array<{ jahr: number; kumuliert: number }>; accent: string }) {
   return (
-    <ResponsiveContainer width="100%" height={180}>
-      <AreaChart data={data}>
-        <defs>
-          <linearGradient id={`grad-${accent}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={accent} stopOpacity={0.28} />
-            <stop offset="100%" stopColor={accent} stopOpacity={0} />
-          </linearGradient>
-        </defs>
-        <CartesianGrid strokeDasharray="2 4" stroke="rgba(0,0,0,0.08)" />
-        <XAxis
-          dataKey="jahr"
-          stroke="rgba(0,0,0,0.4)"
-          fontSize={11}
-          axisLine={false}
-          tickLine={false}
-        />
-        <YAxis
-          stroke="rgba(0,0,0,0.4)"
-          fontSize={11}
-          axisLine={false}
-          tickLine={false}
-          tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`}
-        />
-        <Tooltip
-          formatter={(v: number) => [`${eurFmt(v)} €`, "Kumuliert"]}
-          labelFormatter={(l) => `Jahr ${l}`}
-          contentStyle={{
-            borderRadius: 12,
-            border: "1px solid rgba(0,0,0,0.08)",
-            fontSize: 12,
-          }}
-        />
-        <Area
-          type="monotone"
-          dataKey="kumuliert"
-          stroke={accent}
-          strokeWidth={2}
-          fill={`url(#grad-${accent})`}
-        />
-      </AreaChart>
-    </ResponsiveContainer>
+    <DeferUntilVisible minHeight={180} label="Cashflow-Verlauf wird geladen">
+      <Suspense
+        fallback={
+          <div
+            aria-hidden
+            className="h-[180px] w-full animate-pulse rounded-xl bg-muted/50 motion-reduce:animate-none"
+          />
+        }
+      >
+        <ScenarioCashflowChart {...props} />
+      </Suspense>
+    </DeferUntilVisible>
   );
-});
+}
 
 type ScenarioLabel = "konservativ" | "realistisch" | "optimistisch";
 
@@ -388,7 +358,7 @@ function ScenarioCard({
           <KPI label="Investition" value={`${eurFmt(result.kpis.investitionEur)} €`} />
         </div>
 
-        <ScenarioCashflowChart data={chartData} accent={meta.accent} />
+        <ChartFrame data={chartData} accent={meta.accent} />
 
         <div className="flex items-center justify-between border-t border-border/70 pt-3 text-xs text-muted-foreground">
           <span>Kum. Erlös (20 J.)</span>
@@ -652,7 +622,18 @@ function MieterstromRechner({ onProceedToPilot }: { onProceedToPilot: () => void
         </div>
         <div className="grid gap-5 lg:grid-cols-2 lg:items-start">
           <div className="ledger-panel rounded-2xl border border-border/70 bg-card p-5 sm:p-6">
-            <SensitivityTornado inputs={inputs} />
+            <DeferUntilVisible minHeight={240} label="Sensitivitätsanalyse wird geladen">
+              <Suspense
+                fallback={
+                  <div
+                    aria-hidden
+                    className="h-[240px] w-full animate-pulse rounded-xl bg-muted/50 motion-reduce:animate-none"
+                  />
+                }
+              >
+                <SensitivityTornado inputs={inputs} />
+              </Suspense>
+            </DeferUntilVisible>
           </div>
           <BreakEvenPanel inputs={inputs} />
         </div>
@@ -893,7 +874,7 @@ export default function Home() {
     <div className="min-h-screen bg-background text-foreground">
       <Header />
 
-      <main>
+      <main id="main">
         {/* =================================================================
             KAPITEL 01 — HERO (preserved)
             ================================================================= */}
@@ -1238,7 +1219,14 @@ export default function Home() {
 
             <Card className="ledger-panel overflow-hidden border-border/70 bg-card">
               <CardContent className="p-0">
-                <div className="overflow-x-auto">
+                {/* Scrolls on narrow viewports; without focus a keyboard user
+                    cannot reach the columns beyond the fold. */}
+                <div
+                  className="overflow-x-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                  tabIndex={0}
+                  role="region"
+                  aria-label="Vergleichstabelle, horizontal scrollbar"
+                >
                   <table className="ledger-table w-full min-w-[720px] border-collapse">
                     <thead>
                       <tr>

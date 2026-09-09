@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect } from "react";
 import { Route, Switch, useLocation } from "wouter";
+import { MotionConfig } from "framer-motion";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -94,14 +95,35 @@ function useDeepLinkRewrite() {
   const [location, setLocation] = useLocation();
   useEffect(() => {
     const rewrites: Record<string, string> = {
-      "/rechner": "#rechner",
-      "/pilot": "#pilot-start",
+      "/rechner": "rechner",
+      "/pilot": "pilot-start",
     };
-    const target = rewrites[location];
-    if (target) {
-      window.history.replaceState({}, "", "/" + target);
-      setLocation("/");
-    }
+    const anchor = rewrites[location];
+    if (!anchor) return;
+
+    /*
+     * setLocation("/") rewrites the URL, so calling replaceState first meant
+     * the hash it had just written was discarded — a shared /rechner link
+     * landed at the top of the page instead of at the calculator. The router
+     * moves first; the hash is applied afterwards, and the scroll is performed
+     * here because the hash arrives after the route effect has already run.
+     */
+    setLocation("/", { replace: true });
+    window.history.replaceState({}, "", `/#${anchor}`);
+
+    let frame = 0;
+    let attempts = 0;
+    const scrollWhenPresent = () => {
+      const target = document.getElementById(anchor);
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+      // The section is code-split; wait for it rather than giving up at once.
+      if (attempts++ < 60) frame = requestAnimationFrame(scrollWhenPresent);
+    };
+    frame = requestAnimationFrame(scrollWhenPresent);
+    return () => cancelAnimationFrame(frame);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 }
@@ -118,12 +140,20 @@ function AppInner() {
 function App() {
   return (
     <ErrorBoundary>
-      <ThemeProvider defaultTheme="light">
-        <TooltipProvider delayDuration={150}>
-          <Toaster richColors closeButton position="top-right" />
-          <AppInner />
-        </TooltipProvider>
-      </ThemeProvider>
+      {/*
+        Entrance and reveal animations previously ran even when the visitor had
+        asked their system for reduced motion; only the CSS transitions honoured
+        it. reducedMotion="user" makes every motion component in the tree follow
+        the same preference, so the setting means one thing across the product.
+      */}
+      <MotionConfig reducedMotion="user">
+        <ThemeProvider defaultTheme="light">
+          <TooltipProvider delayDuration={150}>
+            <Toaster richColors closeButton position="top-right" />
+            <AppInner />
+          </TooltipProvider>
+        </ThemeProvider>
+      </MotionConfig>
     </ErrorBoundary>
   );
 }

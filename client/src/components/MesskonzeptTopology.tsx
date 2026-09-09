@@ -264,7 +264,12 @@ export function MesskonzeptTopology({
 
   return (
     <figure className="overflow-hidden rounded-[20px] border border-border/60 bg-background/70">
-      <div className="overflow-x-auto">
+      <div
+        className="overflow-x-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+        tabIndex={0}
+        role="region"
+        aria-label="Schema des Messkonzepts, horizontal scrollbar"
+      >
         <svg
           viewBox={`0 0 ${W} ${H}`}
           role="img"

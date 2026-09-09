@@ -1,78 +1,142 @@
-import { Link } from "wouter";
+import { LegalLayout, LegalSection, PendingDetail } from "@/components/LegalLayout";
+import {
+  LEGAL_ENTITY,
+  LEGAL_ENTITY_PENDING_DE,
+  formattedAddress,
+  legalEntityPublishable,
+} from "../../../../shared/legal-entity";
 
 /**
- * DATENSCHUTZERKLÄRUNG — required by GDPR Art. 13.
- * This is a structured starting point reflecting the data flows actually
- * present in this codebase (lead forms, Stripe, Resend, Vercel, Google Fonts,
- * Plausible). Have a German data-protection lawyer finalise it. Strongly
- * consider self-hosting the web fonts to avoid the Google-Fonts transfer issue.
+ * Privacy notice.
+ *
+ * Describes the data flows this codebase actually has — the lead form, Stripe
+ * Checkout, Resend, the hosting platform, and Plausible — and nothing it does
+ * not. A notice that lists processors the application never contacts is as
+ * wrong as one that omits processors it does.
+ *
+ * The controller's identity comes from shared/legal-entity.ts, so it cannot
+ * disagree with the imprint.
  */
 export default function Datenschutz() {
+  const publishable = legalEntityPublishable();
+  const address = formattedAddress();
+
   return (
-    <main className="mx-auto max-w-3xl px-6 py-16 prose prose-neutral">
-      <Link href="/" className="text-sm no-underline opacity-70 hover:opacity-100">
-        ← Zur Startseite
-      </Link>
-      <h1>Datenschutzerklärung</h1>
+    <LegalLayout
+      title="Datenschutzerklärung"
+      lead="Welche Daten diese Website verarbeitet, wozu, auf welcher Rechtsgrundlage und wie lange."
+      updated="2026-09-08"
+    >
+      {!publishable ? (
+        <div
+          role="status"
+          className="rounded-2xl border border-amber-500/40 bg-amber-500/8 p-5 text-sm leading-7 text-foreground/90"
+        >
+          {LEGAL_ENTITY_PENDING_DE}
+        </div>
+      ) : null}
 
-      <h2>1. Verantwortlicher</h2>
-      <p>
-        Verantwortlich für die Datenverarbeitung auf dieser Website ist:
-        <br />
-        [FIRMENNAME], [ANSCHRIFT], E-Mail:{" "}
-        <a href="mailto:kontakt@energie-teilen.de">kontakt@energie-teilen.de</a>.
-      </p>
+      <LegalSection title="1. Verantwortlicher">
+        {address ? (
+          <address>
+            {address.map((line) => (
+              <span key={line} className="block">
+                {line}
+              </span>
+            ))}
+            <span className="mt-2 block">
+              E-Mail: <a href={`mailto:${LEGAL_ENTITY.email}`}>{LEGAL_ENTITY.email}</a>
+            </span>
+          </address>
+        ) : (
+          <>
+            <PendingDetail label="Verantwortliche Stelle" />
+            <p className="mt-2">
+              E-Mail: <a href={`mailto:${LEGAL_ENTITY.email}`}>{LEGAL_ENTITY.email}</a>
+            </p>
+          </>
+        )}
+      </LegalSection>
 
-      <h2>2. Verarbeitung bei Kontakt- und Lead-Formularen</h2>
-      <p>
-        Wenn Sie den Mieterstrom-Rechner-Bericht anfordern oder eine
-        Pilotaufnahme starten, verarbeiten wir die von Ihnen angegebenen Daten
-        (u. a. Name, E-Mail-Adresse, Organisation, Standort, Projektangaben).
-        Rechtsgrundlage ist die Anbahnung bzw. Erfüllung eines Vertrags
-        (Art. 6 Abs. 1 lit. b DSGVO) sowie Ihre Einwilligung
-        (Art. 6 Abs. 1 lit. a DSGVO), soweit erteilt.
-      </p>
+      <LegalSection title="2. Berechnungen im Rechner">
+        <p>
+          Die Wirtschaftlichkeitsberechnung läuft vollständig in Ihrem Browser. Die von
+          Ihnen eingestellten Werte werden dabei nicht an uns übertragen. Sie werden
+          ausschließlich lokal in Ihrem Browser gespeichert, damit Ihre Konstellation
+          beim nächsten Besuch noch vorliegt; Sie können diese Speicherung jederzeit
+          über die Einstellungen Ihres Browsers löschen.
+        </p>
+      </LegalSection>
 
-      <h2>3. Zahlungsabwicklung (Stripe)</h2>
-      <p>
-        Zahlungen werden über Stripe Payments Europe Ltd. abgewickelt. Dabei
-        werden die für die Zahlung erforderlichen Daten an Stripe übermittelt.
-        Rechtsgrundlage: Art. 6 Abs. 1 lit. b DSGVO.
-      </p>
+      <LegalSection title="3. Berichtsanforderung und Pilotaufnahme">
+        <p>
+          Fordern Sie den Bericht an oder starten Sie eine Pilotaufnahme, verarbeiten wir
+          die von Ihnen angegebenen Daten — insbesondere E-Mail-Adresse sowie die
+          Angaben zu Ihrem Vorhaben. Rechtsgrundlage ist die Durchführung
+          vorvertraglicher Maßnahmen und die Erfüllung des Vertrags
+          (Art. 6 Abs. 1 lit. b DSGVO) sowie, soweit Sie sie erteilt haben, Ihre
+          Einwilligung (Art. 6 Abs. 1 lit. a DSGVO). Eine erteilte Einwilligung können
+          Sie jederzeit mit Wirkung für die Zukunft widerrufen.
+        </p>
+      </LegalSection>
 
-      <h2>4. E-Mail-Versand (Resend) und Hosting (Vercel)</h2>
-      <p>
-        Benachrichtigungen werden über Resend versendet; die Website wird bei
-        Vercel gehostet. Beide verarbeiten dabei technische Daten
-        (z. B. Server-Logs) im Rahmen einer Auftragsverarbeitung.
-      </p>
+      <LegalSection title="4. Zahlungsabwicklung">
+        <p>
+          Zahlungen werden über Stripe abgewickelt. Beim Start eines Bezahlvorgangs
+          werden Sie zu Stripe weitergeleitet; die Zahlungsdaten geben Sie dort ein und
+          sie erreichen uns nicht. Wir erhalten von Stripe die Information, ob eine
+          Zahlung erfolgt ist, sowie die zur Zuordnung nötigen Angaben.
+          Rechtsgrundlage: Art. 6 Abs. 1 lit. b DSGVO.
+        </p>
+      </LegalSection>
 
-      <h2>5. Webschriften</h2>
-      <p>
-        [Aktuell werden Schriftarten von Google Fonts geladen. Empfehlung:
-        Schriften selbst hosten, um eine Übermittlung der IP-Adresse an Google
-        zu vermeiden. Bis dahin hier die Google-Fonts-Verarbeitung offenlegen.]
-      </p>
+      <LegalSection title="5. E-Mail-Versand und Hosting">
+        <p>
+          Benachrichtigungen und Bestätigungen versenden wir über Resend. Die Website
+          wird bei Vercel gehostet. Beide verarbeiten dabei technische Daten wie
+          Server-Logdateien im Rahmen einer Auftragsverarbeitung nach Art. 28 DSGVO.
+        </p>
+      </LegalSection>
 
-      <h2>6. Reichweitenmessung (Plausible)</h2>
-      <p>
-        Zur datensparsamen Reichweitenmessung setzen wir Plausible Analytics
-        ein. Plausible verwendet keine Cookies und erstellt keine
-        personenbezogenen Profile. Rechtsgrundlage ist unser berechtigtes
-        Interesse (Art. 6 Abs. 1 lit. f DSGVO).
-      </p>
+      <LegalSection title="6. Schriftarten">
+        <p>
+          Schriftarten werden von dieser Website selbst ausgeliefert. Es findet keine
+          Verbindung zu externen Schriftanbietern und damit keine Übermittlung Ihrer
+          IP-Adresse an Dritte zu diesem Zweck statt.
+        </p>
+      </LegalSection>
 
-      <h2>7. Ihre Rechte</h2>
-      <p>
-        Sie haben das Recht auf Auskunft, Berichtigung, Löschung, Einschränkung
-        der Verarbeitung, Datenübertragbarkeit und Widerspruch sowie das Recht,
-        sich bei einer Aufsichtsbehörde zu beschweren. Erteilte Einwilligungen
-        können Sie jederzeit mit Wirkung für die Zukunft widerrufen.
-      </p>
+      <LegalSection title="7. Reichweitenmessung">
+        <p>
+          Zur datensparsamen Reichweitenmessung setzen wir Plausible Analytics ein.
+          Plausible verwendet keine Cookies, speichert keine geräteübergreifenden
+          Kennungen und bildet keine personenbezogenen Profile. Rechtsgrundlage ist
+          unser berechtigtes Interesse an einer Auswertung der Nutzung
+          (Art. 6 Abs. 1 lit. f DSGVO).
+        </p>
+      </LegalSection>
 
-      <p className="text-sm opacity-60">
-        Hinweis: Strukturentwurf. Vor Veröffentlichung anwaltlich finalisieren.
-      </p>
-    </main>
+      <LegalSection title="8. Speicherdauer">
+        <p>
+          Wir speichern personenbezogene Daten so lange, wie es für den jeweiligen Zweck
+          erforderlich ist. Anfragen und Projektdaten löschen wir, sobald der Vorgang
+          abgeschlossen ist und keine gesetzlichen Aufbewahrungsfristen entgegenstehen;
+          für steuerlich relevante Unterlagen gelten die handels- und steuerrechtlichen
+          Fristen.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="9. Ihre Rechte">
+        <p>
+          Sie haben das Recht auf Auskunft, Berichtigung, Löschung, Einschränkung der
+          Verarbeitung, Datenübertragbarkeit und Widerspruch. Außerdem können Sie sich
+          bei einer Datenschutz-Aufsichtsbehörde beschweren.
+        </p>
+        <p>
+          Für Auskunft, Löschung oder Widerspruch genügt eine formlose Nachricht an{" "}
+          <a href={`mailto:${LEGAL_ENTITY.email}`}>{LEGAL_ENTITY.email}</a>.
+        </p>
+      </LegalSection>
+    </LegalLayout>
   );
 }

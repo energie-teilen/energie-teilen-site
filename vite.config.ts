@@ -95,31 +95,6 @@ function vitePluginManusDebugCollector(): Plugin {
   };
 }
 
-function vitePluginStorageProxy(): Plugin {
-  return {
-    name: "manus-storage-proxy",
-    apply: "serve",
-    configureServer(server: ViteDevServer) {
-      server.middlewares.use("/manus-storage", async (req, res) => {
-        const key = req.url?.replace(/^\//, "");
-        if (!key) { res.writeHead(400, { "Content-Type": "text/plain" }); res.end("Missing storage key"); return; }
-        const forgeBaseUrl = (process.env.BUILT_IN_FORGE_API_URL || "").replace(/\/+$/, "");
-        const forgeKey = process.env.BUILT_IN_FORGE_API_KEY;
-        if (!forgeBaseUrl || !forgeKey) { res.writeHead(500, { "Content-Type": "text/plain" }); res.end("Storage proxy not configured"); return; }
-        try {
-          const forgeUrl = new URL("v1/storage/presign/get", forgeBaseUrl + "/");
-          forgeUrl.searchParams.set("path", key);
-          const forgeResp = await fetch(forgeUrl, { headers: { Authorization: `Bearer ${forgeKey}` } });
-          if (!forgeResp.ok) { res.writeHead(502, { "Content-Type": "text/plain" }); res.end("Storage backend error"); return; }
-          const { url } = (await forgeResp.json()) as { url: string };
-          if (!url) { res.writeHead(502, { "Content-Type": "text/plain" }); res.end("Empty signed URL"); return; }
-          res.writeHead(307, { Location: url, "Cache-Control": "no-store" });
-          res.end();
-        } catch { res.writeHead(502, { "Content-Type": "text/plain" }); res.end("Storage proxy error"); }
-      });
-    },
-  };
-}
 
 const API_DEV_TARGET = process.env.VITE_DEV_API_TARGET || "http://localhost:3001";
 
@@ -128,7 +103,7 @@ export default defineConfig(({ command }) => {
 
   // Dev-only tooling. NEVER shipped to production.
   const devPlugins = isDev
-    ? [jsxLocPlugin(), vitePluginManusRuntime(), vitePluginManusDebugCollector(), vitePluginStorageProxy()]
+    ? [jsxLocPlugin(), vitePluginManusRuntime(), vitePluginManusDebugCollector()]
     : [];
 
   return {
@@ -154,15 +129,17 @@ export default defineConfig(({ command }) => {
         output: {
           manualChunks: {
             "react-vendor": ["react", "react-dom"],
-            recharts: ["recharts"],
+            /*
+             * recharts is deliberately NOT a manual chunk. Naming it here put
+             * it into the entry's preload graph, so every visitor downloaded
+             * the largest bundle in the build before the first paint even
+             * though the charts it draws are only reached further down the
+             * page. Left to Rollup, it lands in the lazily imported chunks
+             * that actually use it.
+             */
             framer: ["framer-motion"],
-            radix: [
-              "@radix-ui/react-dialog",
-              "@radix-ui/react-dropdown-menu",
-              "@radix-ui/react-tooltip",
-              "@radix-ui/react-tabs",
-              "@radix-ui/react-slot",
-            ],
+            /* Only the primitives the surviving components actually use. */
+            radix: ["@radix-ui/react-tooltip", "@radix-ui/react-slot"],
           },
         },
       },

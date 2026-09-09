@@ -69,19 +69,21 @@ export function PilotOfferCards({
         const isRecommended = offer.offerCode === RECOMMENDED_OFFER;
 
         return (
+          /*
+           * The card is a plain container.
+           *
+           * It used to carry role="radio" AND contain a button, which nests one
+           * interactive control inside another — an accessibility scan reports
+           * it as a serious violation, and in practice a screen-reader user
+           * cannot tell which of the two they are about to activate.
+           *
+           * Instead a real, visually hidden radio input covers the card. The
+           * group semantics and arrow-key navigation then come from the
+           * platform rather than from re-implemented ARIA, and the button is a
+           * sibling of the input, not a child of it.
+           */
           <motion.article
             key={offer.offerCode}
-            role="radio"
-            aria-checked={isSelected}
-            aria-label={`${offer.title} — ${offer.subtitle}`}
-            tabIndex={0}
-            onClick={() => handleSelect(offer.offerCode)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                handleSelect(offer.offerCode);
-              }
-            }}
             initial={false}
             animate={{ scale: isSelected ? 1.0 : 1.0 }}
             whileHover={{ y: isSubmitting ? 0 : -2 }}
@@ -109,7 +111,28 @@ export function PilotOfferCards({
               </div>
             ) : null}
 
-            <div className="flex min-h-full flex-col gap-5">
+            {/* The actual control: covers the card, invisible, fully native. */}
+            <label className="absolute inset-0 z-0 cursor-pointer rounded-[30px]">
+              <input
+                type="radio"
+                name="pilot-offer"
+                value={offer.offerCode}
+                checked={isSelected}
+                disabled={isSubmitting}
+                onChange={() => handleSelect(offer.offerCode)}
+                className="sr-only"
+              />
+              <span className="sr-only">
+                {offer.title} — {offer.subtitle}. Auswählen.
+              </span>
+            </label>
+
+            {/*
+              Content sits above the label but does not intercept the click, so
+              the whole card stays selectable; the button re-enables pointer
+              events for itself.
+            */}
+            <div className="pointer-events-none relative z-10 flex min-h-full flex-col gap-5">
               {/* HEADER */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
@@ -173,7 +196,7 @@ export function PilotOfferCards({
                 <Button
                   type="button"
                   variant={isSelected ? "default" : "outline"}
-                  className="w-full rounded-full"
+                  className="pointer-events-auto w-full rounded-full"
                   disabled={isSubmitting}
                   onClick={(e) => handleProceedClick(e, offer.offerCode)}
                   aria-label={

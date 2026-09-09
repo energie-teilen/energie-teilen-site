@@ -1,0 +1,7 @@
+The fonts in this directory are licensed under the SIL Open Font
+License, Version 1.1, which permits redistribution and self-hosting.
+
+  Manrope        — https://github.com/sharanda/manrope
+  IBM Plex Sans  — https://github.com/IBM/plex
+
+Refreshed with: pnpm fonts:fetch

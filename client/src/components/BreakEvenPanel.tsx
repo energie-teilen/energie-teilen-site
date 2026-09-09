@@ -44,12 +44,18 @@ export function BreakEvenPanel({ inputs }: { inputs: MieterstromInputs }) {
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <label className="text-sm font-medium text-foreground">Ziel-IRR</label>
+            <label htmlFor="break-even-target-irr" className="text-sm font-medium text-foreground">
+              Ziel-IRR
+            </label>
             <span className="font-display text-base font-semibold text-foreground">{targetIrr} %</span>
           </div>
+          {/* The label was previously not associated with the control, so the
+              slider reached assistive technology unnamed. */}
           <input
+            id="break-even-target-irr"
             type="range" min={2} max={25} step={0.5} value={targetIrr}
             onChange={(e) => setTargetIrr(Number(e.target.value))}
+            aria-valuetext={`${targetIrr} Prozent`}
             className="w-full accent-primary"
           />
         </div>

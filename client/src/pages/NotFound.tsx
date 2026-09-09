@@ -1,49 +1,88 @@
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { AlertCircle, Home } from "lucide-react";
-import { useLocation } from "wouter";
+import { Link } from "wouter";
+import { Compass } from "lucide-react";
+import Header from "@/components/Header";
+import Footer from "@/components/Footer";
+
+/**
+ * 404.
+ *
+ * Previously this page was untouched scaffolding: English copy on a
+ * German-language product, a colour palette from a different design system,
+ * and a button instead of a link — so the only way onward was not a real
+ * navigation target.
+ *
+ * A 404 is a routing accident that still costs a visit. This one keeps the
+ * visitor inside the site, in the product's own language, and offers the three
+ * destinations that are actually worth reaching.
+ */
+
+const DESTINATIONS = [
+  {
+    href: "/#rechner",
+    title: "Wirtschaftlichkeit rechnen",
+    body: "Drei Szenarien, dokumentierte Annahmen, Bericht als PDF.",
+  },
+  {
+    href: "/#leistungen",
+    title: "Leistungen ansehen",
+    body: "Was die Pilotaufnahme je Stufe umfasst.",
+  },
+  {
+    href: "/#pilot-start",
+    title: "Pilotaufnahme starten",
+    body: "Der nächste Schritt, wenn die Konstellation trägt.",
+  },
+];
 
 export default function NotFound() {
-  const [, setLocation] = useLocation();
-
-  const handleGoHome = () => {
-    setLocation("/");
-  };
-
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100">
-      <Card className="w-full max-w-lg mx-4 shadow-lg border-0 bg-white/80 backdrop-blur-sm">
-        <CardContent className="pt-8 pb-8 text-center">
-          <div className="flex justify-center mb-6">
-            <div className="relative">
-              <div className="absolute inset-0 bg-red-100 rounded-full animate-pulse" />
-              <AlertCircle className="relative h-16 w-16 text-red-500" />
-            </div>
-          </div>
+    <div className="min-h-screen bg-background">
+      <Header />
+      <main id="main" className="mx-auto w-full max-w-3xl px-6 pb-24 pt-32">
+        <p className="text-[0.72rem] font-medium uppercase tracking-[0.22em] text-primary">
+          Fehler 404
+        </p>
+        <h1 className="mt-3 font-display text-3xl font-semibold tracking-[-0.02em] text-foreground sm:text-4xl">
+          Diese Seite gibt es nicht.
+        </h1>
+        <p className="mt-4 max-w-xl text-base leading-8 text-muted-foreground">
+          Die aufgerufene Adresse führt ins Leere — möglicherweise wurde sie geändert
+          oder der Link ist unvollständig. Von hier aus kommen Sie direkt weiter:
+        </p>
 
-          <h1 className="text-4xl font-bold text-slate-900 mb-2">404</h1>
+        <ul className="mt-10 grid gap-3">
+          {DESTINATIONS.map((d) => (
+            <li key={d.href}>
+              <Link
+                href={d.href}
+                className="group flex items-start gap-4 rounded-[20px] border border-border/70 bg-card p-5 transition-colors hover:border-primary/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+              >
+                <Compass
+                  aria-hidden
+                  className="mt-0.5 h-5 w-5 shrink-0 text-primary/70 transition-colors group-hover:text-primary"
+                />
+                <span className="min-w-0">
+                  <span className="block font-display text-base font-semibold text-foreground">
+                    {d.title}
+                  </span>
+                  <span className="mt-1 block text-sm leading-7 text-muted-foreground">
+                    {d.body}
+                  </span>
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
 
-          <h2 className="text-xl font-semibold text-slate-700 mb-4">
-            Page Not Found
-          </h2>
-
-          <p className="text-slate-600 mb-8 leading-relaxed">
-            Sorry, the page you are looking for doesn't exist.
-            <br />
-            It may have been moved or deleted.
-          </p>
-
-          <div className="flex flex-col sm:flex-row gap-3 justify-center">
-            <Button
-              onClick={handleGoHome}
-              className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg transition-all duration-200 shadow-md hover:shadow-lg"
-            >
-              <Home className="w-4 h-4 mr-2" />
-              Go Home
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+        <p className="mt-10 text-sm leading-7 text-muted-foreground">
+          Nichts davon passt?{" "}
+          <Link href="/" className="text-primary underline underline-offset-4">
+            Zur Startseite
+          </Link>
+          .
+        </p>
+      </main>
+      <Footer />
     </div>
   );
 }

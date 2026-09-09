@@ -72,7 +72,14 @@ export function AllocationDayChart({ run }: { run: AllocationResult }) {
         </div>
       </div>
 
-      <div className="overflow-x-auto">
+      {/* Focusable: at narrow widths this scrolls, and a region a keyboard
+          user cannot scroll hides its content from them entirely. */}
+      <div
+        className="overflow-x-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+        tabIndex={0}
+        role="region"
+        aria-label="Tagesverlauf der Zuordnung, horizontal scrollbar"
+      >
         <svg
           viewBox={`0 0 ${W} ${H}`}
           role="img"

@@ -239,7 +239,14 @@ export function MarktkommunikationPanel({ inputs }: { inputs: MieterstromInputs 
                 </p>
                 <p className="text-xs text-muted-foreground">Auszug — Kopf und erste Messwerte</p>
               </div>
-              <pre className="mt-3 max-h-64 overflow-auto rounded-xl border border-border/50 bg-card p-4 font-mono text-[0.7rem] leading-6 text-foreground/85">
+              {/* Scrollable regions need to be focusable, or a keyboard user
+                  cannot reach the content below the fold. */}
+              <pre
+                tabIndex={0}
+                role="region"
+                aria-label="Auszug der erzeugten MSCONS-Nachricht"
+                className="mt-3 max-h-64 overflow-auto rounded-xl border border-border/50 bg-card p-4 font-mono text-[0.7rem] leading-6 text-foreground/85 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+              >
                 {excerpt.replace(/'/g, "'\n")}
               </pre>
               <p className="mt-3 text-xs leading-6 text-muted-foreground">

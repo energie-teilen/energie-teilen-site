@@ -48,6 +48,8 @@ import {
   type PilotOrder,
 } from "../shared/schema.js";
 import { toPilotOrder } from "../shared/pilot-order.js";
+import { LEGAL_ENTITY } from "../shared/legal-entity.js";
+import { securityHeadersMiddleware } from "./security-headers.js";
 import {
   advanceStage,
   nextAction,
@@ -341,6 +343,8 @@ function adminActorTag(): string {
 export async function buildApp(): Promise<Express> {
   const app = express();
   app.disable("x-powered-by");
+  // Applied before anything can respond, so no route can answer without them.
+  app.use(securityHeadersMiddleware());
 
   // Stripe webhook MUST receive the raw body BEFORE express.json runs.
   app.post(
@@ -351,8 +355,15 @@ export async function buildApp(): Promise<Express> {
       const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
       if (!stripe || !webhookSecret) {
+        /*
+         * Answering 200 here would be a fake success: an unauthenticated
+         * caller would receive a confirmation that their event was accepted,
+         * and a genuine Stripe delivery would be silently discarded instead of
+         * being retried. 503 says the endpoint exists but cannot verify
+         * anything yet, which is both true and the status Stripe retries on.
+         */
         console.warn("[stripe] webhook received but stripe is not configured");
-        return res.status(200).send("ok");
+        return res.status(503).send("stripe not configured");
       }
 
       const signature = req.headers["stripe-signature"];
@@ -885,34 +896,72 @@ export async function buildApp(): Promise<Express> {
   mountApiV1(app, { limiter: apiV1Limiter });
 
   // GET /api/health
+  /*
+   * Health.
+   *
+   * A monitor has to be able to tell the difference between "running" and
+   * "able to do its job". Reporting ok:true on a deployment that cannot take a
+   * payment or send an email is a fake success in the one place that exists to
+   * detect failure, so the verdict is DERIVED from what is actually
+   * configured, and the response says which checks decided it.
+   *
+   *   ok       — every capability the funnel needs is present
+   *   degraded — it serves traffic, but at least one revenue-critical
+   *              capability is missing
+   *
+   * The HTTP status stays 200 for both, so an uptime probe still sees the
+   * process as alive; the body carries the verdict.
+   */
   app.get("/api/health", async (_req: Request, res: Response) => {
-    res.json({
-      ok: true,
-      timestamp: new Date().toISOString(),
-      config: {
-        stripe: Boolean(process.env.STRIPE_SECRET_KEY),
-        stripeWebhook: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
-        resend: Boolean(process.env.RESEND_API_KEY),
-        durableKv: Boolean(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN),
-        prices: {
-          et_eligibility: Boolean(process.env.STRIPE_PRICE_ET_ELIGIBILITY),
-          et_structuring: Boolean(process.env.STRIPE_PRICE_ET_STRUCTURING),
-          et_mandate: Boolean(process.env.STRIPE_PRICE_ET_MANDATE),
-        },
-        customerConfirmation: Boolean(
-          process.env.RESEND_API_KEY &&
-            (process.env.ET_CUSTOMER_REPLY_TO || process.env.LEAD_NOTIFICATION_EMAIL),
-        ),
-        responseWindow: process.env.ET_PILOT_RESPONSE_WINDOW || "(unset)",
-        // The launch-blocking one: without this, paid orders are not enumerable.
-        durableOrders: ledgerAvailable(),
-        adminApi: Boolean(
-          process.env.ADMIN_API_TOKEN && process.env.ADMIN_API_TOKEN.length >= 16,
-        ),
-        publicApi: apiKeysConfigured(),
-        publicApiClients: configuredKeyLabels().length,
-        appUrl: process.env.APP_URL || "(unset)",
+    const config = {
+      stripe: Boolean(process.env.STRIPE_SECRET_KEY),
+      stripeWebhook: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
+      resend: Boolean(process.env.RESEND_API_KEY),
+      durableKv: Boolean(
+        process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN,
+      ),
+      prices: {
+        et_eligibility: Boolean(process.env.STRIPE_PRICE_ET_ELIGIBILITY),
+        et_structuring: Boolean(process.env.STRIPE_PRICE_ET_STRUCTURING),
+        et_mandate: Boolean(process.env.STRIPE_PRICE_ET_MANDATE),
       },
+      customerConfirmation: Boolean(
+        process.env.RESEND_API_KEY &&
+          (process.env.ET_CUSTOMER_REPLY_TO || process.env.LEAD_NOTIFICATION_EMAIL),
+      ),
+      responseWindow: process.env.ET_PILOT_RESPONSE_WINDOW || "(unset)",
+      // The launch-blocking one: without this, paid orders are not enumerable.
+      durableOrders: ledgerAvailable(),
+      adminApi: Boolean(
+        process.env.ADMIN_API_TOKEN && process.env.ADMIN_API_TOKEN.length >= 16,
+      ),
+      publicApi: apiKeysConfigured(),
+      publicApiClients: configuredKeyLabels().length,
+      appUrl: process.env.APP_URL || "(unset)",
+      legalEntity: LEGAL_ENTITY.configured,
+    };
+
+    /** Each entry is a capability the product cannot do without. */
+    const checks: { name: string; ok: boolean; impact: string }[] = [
+      { name: "stripe", ok: config.stripe, impact: "Zahlungen können nicht entgegengenommen werden." },
+      { name: "stripe_webhook", ok: config.stripeWebhook, impact: "Zahlungsereignisse können nicht verifiziert werden." },
+      { name: "prices", ok: Object.values(config.prices).every(Boolean), impact: "Mindestens eine Angebotsstufe hat keinen Preis." },
+      { name: "email", ok: config.resend, impact: "Bestätigungen und Berichte können nicht versendet werden." },
+      { name: "durable_orders", ok: config.durableOrders, impact: "Bezahlte Aufträge sind nicht dauerhaft auflistbar." },
+      { name: "legal_entity", ok: config.legalEntity, impact: "Impressumspflichtige Angaben sind nicht hinterlegt." },
+    ];
+
+    const failing = checks.filter((c) => !c.ok);
+    const status: "ok" | "degraded" = failing.length === 0 ? "ok" : "degraded";
+
+    res.setHeader("Cache-Control", "no-store");
+    res.json({
+      status,
+      ok: status === "ok",
+      timestamp: new Date().toISOString(),
+      failing: failing.map((c) => ({ check: c.name, impact: c.impact })),
+      checks: checks.map((c) => ({ check: c.name, ok: c.ok })),
+      config,
     });
   });
 
@@ -927,7 +976,23 @@ export async function buildApp(): Promise<Express> {
 
   app.use(express.static(staticPath));
 
-  app.get("*", (_req: Request, res: Response) => {
+  /*
+   * Asset paths must 404 rather than falling through to the SPA shell.
+   *
+   * A missing font, image or script previously answered 200 with index.html,
+   * which the browser then tried to parse as that asset type — producing a
+   * decode error instead of a missing-file error, and hiding broken paths
+   * behind a page that looks fine. It also lets any URL ending in a known
+   * extension be served as HTML.
+   */
+  const ASSET_EXTENSIONS =
+    /\.(js|mjs|css|map|json|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|otf|eot|pdf|txt|xml|webmanifest|mp4|webm)$/i;
+
+  app.get("*", (req: Request, res: Response) => {
+    if (ASSET_EXTENSIONS.test(req.path)) {
+      res.status(404).type("text/plain").send("Not found");
+      return;
+    }
     res.sendFile(path.join(staticPath, "index.html"));
   });
 

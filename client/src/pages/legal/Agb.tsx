@@ -1,68 +1,138 @@
-import { Link } from "wouter";
+import { LegalLayout, LegalSection, PendingDetail } from "@/components/LegalLayout";
+import {
+  LEGAL_ENTITY,
+  LEGAL_ENTITY_PENDING_DE,
+  legalEntityPublishable,
+} from "../../../../shared/legal-entity";
+import { PILOT_OFFER_FULFILLMENT } from "../../../../shared/pilot-order";
+import { PILOT_OFFER_SERVER_CONFIG } from "../../../../shared/schema";
 
 /**
- * AGB — terms for the paid pilot-intake service.
- * Structured skeleton only. The B2C/B2B distinction (esp. the right of
- * withdrawal, § 312g BGB) materially changes the wording — have a lawyer draft
- * the final version against your actual service description and pricing.
+ * Terms for the paid pilot intake.
+ *
+ * The service description is generated from the same offer definitions the
+ * checkout sells, so what a customer agrees to cannot drift from what they are
+ * charged for.
+ *
+ * Clauses that genuinely need drafting — a limitation of liability below the
+ * statutory standard, for instance — are ABSENT rather than stubbed. Statutory
+ * liability is the safe default; it is a limitation that requires a lawyer, not
+ * its omission. Nothing here instructs the reader to fill something in.
  */
 export default function Agb() {
+  const publishable = legalEntityPublishable();
+  const provider = publishable ? LEGAL_ENTITY.name : null;
+
   return (
-    <main className="mx-auto max-w-3xl px-6 py-16 prose prose-neutral">
-      <Link href="/" className="text-sm no-underline opacity-70 hover:opacity-100">
-        ← Zur Startseite
-      </Link>
-      <h1>Allgemeine Geschäftsbedingungen</h1>
+    <LegalLayout
+      title="Allgemeine Geschäftsbedingungen"
+      lead="Bedingungen für die kostenpflichtige Pilotaufnahme."
+      updated="2026-09-08"
+    >
+      {!publishable ? (
+        <div
+          role="status"
+          className="rounded-2xl border border-amber-500/40 bg-amber-500/8 p-5 text-sm leading-7 text-foreground/90"
+        >
+          {LEGAL_ENTITY_PENDING_DE}
+        </div>
+      ) : null}
 
-      <h2>§ 1 Geltungsbereich</h2>
-      <p>
-        Diese AGB gelten für alle über diese Website geschlossenen Verträge über
-        die bezahlte Pilotaufnahme zwischen [FIRMENNAME] (nachfolgend „Anbieter")
-        und dem Kunden.
-      </p>
+      <LegalSection title="§ 1 Geltungsbereich">
+        <p>
+          Diese Bedingungen gelten für Verträge über die kostenpflichtige Pilotaufnahme,
+          die über diese Website zwischen{" "}
+          {provider ?? <PendingDetail label="dem Anbieter" />} (nachfolgend „Anbieter")
+          und dem Kunden geschlossen werden.
+        </p>
+        <p>
+          Das Angebot richtet sich an Unternehmen, Eigentümergemeinschaften,
+          Projektträger und öffentliche Stellen. Gesetzliche Rechte von Verbrauchern
+          bleiben unberührt, soweit ein Vertrag mit einem Verbraucher zustande kommt.
+        </p>
+      </LegalSection>
 
-      <h2>§ 2 Leistungsgegenstand</h2>
-      <p>
-        Der Anbieter erbringt eine strukturierte Pilotaufnahme für lokale
-        Energieprojekte in drei Stufen (Eligibility Check, Structuring Package,
-        Full Preparation Mandate). Der konkrete Leistungsumfang der jeweiligen
-        Stufe wird vor Vertragsschluss beschrieben. Es wird keine Rechts-,
-        Steuer- oder Anlageberatung geschuldet.
-      </p>
+      <LegalSection title="§ 2 Leistungsgegenstand">
+        <p>
+          Der Anbieter erbringt eine strukturierte Aufnahme des Vorhabens in der jeweils
+          gebuchten Stufe. Der Leistungsumfang jeder Stufe ist:
+        </p>
+        <ul>
+          {Object.values(PILOT_OFFER_SERVER_CONFIG).map((offer) => (
+            <li key={offer.code}>
+              <strong>{offer.label}</strong> — {PILOT_OFFER_FULFILLMENT[offer.code].deliverable}
+            </li>
+          ))}
+        </ul>
+        <p>
+          Geschuldet ist die sorgfältige Erbringung der beschriebenen Leistung, nicht ein
+          bestimmter wirtschaftlicher oder behördlicher Erfolg. Rechts-, Steuer- und
+          Anlageberatung ist nicht Gegenstand des Vertrags.
+        </p>
+      </LegalSection>
 
-      <h2>§ 3 Vertragsschluss und Zahlung</h2>
-      <p>
-        Der Vertrag kommt mit erfolgreicher Bezahlung über den Zahlungsdienst
-        Stripe zustande. Die Vergütung ist im Voraus fällig.
-      </p>
+      <LegalSection title="§ 3 Vertragsschluss">
+        <p>
+          Die Darstellung der Stufen auf dieser Website ist kein bindendes Angebot. Mit
+          dem Absenden des Bezahlvorgangs gibt der Kunde ein Angebot ab. Der Vertrag
+          kommt mit der Bestätigung des Anbieters nach erfolgreicher Zahlung zustande.
+        </p>
+      </LegalSection>
 
-      <h2>§ 4 Mitwirkungspflichten</h2>
-      <p>
-        Der Kunde stellt die für die Bearbeitung erforderlichen Informationen
-        und Unterlagen vollständig und zutreffend bereit.
-      </p>
+      <LegalSection title="§ 4 Vergütung und Zahlung">
+        <p>
+          Die Vergütung der gebuchten Stufe wird vor Leistungsbeginn fällig. Die Zahlung
+          wird über den Zahlungsdienstleister Stripe abgewickelt. Alle Preise verstehen
+          sich zuzüglich der jeweils geltenden Umsatzsteuer.
+        </p>
+      </LegalSection>
 
-      <h2>§ 5 Haftung</h2>
-      <p>
-        Der Anbieter haftet nach den gesetzlichen Bestimmungen. [Haftungs-
-        beschränkungen für einfache Fahrlässigkeit anwaltlich ausgestalten.]
-      </p>
+      <LegalSection title="§ 5 Mitwirkung des Kunden">
+        <p>
+          Der Kunde stellt die für die Bearbeitung erforderlichen Angaben und Unterlagen
+          vollständig und zutreffend bereit. Welche Angaben das je Stufe sind, wird vor
+          Vertragsschluss ausgewiesen. Verzögerungen, die auf fehlender oder
+          unzutreffender Mitwirkung beruhen, gehen nicht zulasten des Anbieters.
+        </p>
+      </LegalSection>
 
-      <h2>§ 6 Widerruf</h2>
-      <p>
-        [Bei Verbrauchern: Widerrufsrecht nach § 312g BGB und entsprechende
-        Belehrung einfügen. Bei reinem B2B-Geschäft anpassen.]
-      </p>
+      <LegalSection title="§ 6 Nutzungsrechte an den Ergebnissen">
+        <p>
+          Der Kunde erhält an den für ihn erstellten Unterlagen ein einfaches, zeitlich
+          und räumlich unbeschränktes Nutzungsrecht für eigene Zwecke einschließlich der
+          Vorlage bei Finanzierungspartnern und Behörden. Die zugrunde liegenden Modelle,
+          Methoden und Werkzeuge des Anbieters bleiben bei diesem.
+        </p>
+      </LegalSection>
 
-      <h2>§ 7 Schlussbestimmungen</h2>
-      <p>
-        Es gilt deutsches Recht. Sollten einzelne Bestimmungen unwirksam sein,
-        bleibt der übrige Vertrag wirksam.
-      </p>
+      <LegalSection title="§ 7 Haftung">
+        <p>
+          Der Anbieter haftet nach den gesetzlichen Bestimmungen. Die auf dieser Website
+          bereitgestellten Berechnungen sind indikativ und beruhen auf den vom Kunden
+          gesetzten sowie den ausgewiesenen voreingestellten Annahmen; sie ersetzen keine
+          projektspezifische fachliche Prüfung.
+        </p>
+      </LegalSection>
 
-      <p className="text-sm opacity-60">
-        Hinweis: Strukturentwurf. Vor Veröffentlichung anwaltlich ausarbeiten.
-      </p>
-    </main>
+      <LegalSection title="§ 8 Datenschutz">
+        <p>
+          Die Verarbeitung personenbezogener Daten richtet sich nach der
+          Datenschutzerklärung dieser Website.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="§ 9 Schlussbestimmungen">
+        <p>
+          Es gilt das Recht der Bundesrepublik Deutschland unter Ausschluss des
+          UN-Kaufrechts. Ist der Kunde Kaufmann, juristische Person des öffentlichen
+          Rechts oder öffentlich-rechtliches Sondervermögen, ist der Sitz des Anbieters
+          ausschließlicher Gerichtsstand.
+        </p>
+        <p>
+          Sollte eine Bestimmung dieser Bedingungen unwirksam sein, bleibt die Wirksamkeit
+          der übrigen Bestimmungen unberührt.
+        </p>
+      </LegalSection>
+    </LegalLayout>
   );
 }
