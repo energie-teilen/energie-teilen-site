@@ -254,15 +254,22 @@
     display: none;
     align-items: center;
     justify-content: center;
-    gap: 0.25rem;
+    gap: 0.1rem;
     min-width: 0;
+    /*
+       The nav carries the page sections AND the tool routes. Without clearance
+       the last link crowds the call to action, and a 2.2 target-size check
+       reports the button as partially obscured — which is also how it looks.
+    */
+    margin-right: 0.75rem;
   }
 
   .header-link {
     position: relative;
     border-radius: 999px;
-    padding: 0.7rem 0.95rem;
-    font-size: 0.9rem;
+    padding: 0.65rem 0.7rem;
+    font-size: 0.85rem;
+    white-space: nowrap;
     color: color-mix(in oklab, var(--foreground) 84%, white 16%);
     transition: background 220ms ease, color 220ms ease, transform 220ms ease;
   }
@@ -689,4 +696,28 @@
 }
 .legal-prose address {
   font-style: normal;
+}
+
+/* Separates page-section anchors from the standalone tool routes in the header. */
+.header-nav-sep {
+  display: inline-block;
+  width: 1px;
+  height: 1rem;
+  background: var(--border);
+  margin: 0 0.45rem;
+  flex: none;
+}
+
+/*
+ * Between the large breakpoint and 1400px the bar cannot hold the page
+ * sections, every tool and the call to action at once — the last link ended up
+ * underneath the button. The tools and the reference are the links worth
+ * keeping there; the sections are still one scroll away on the page they
+ * belong to, and both remain in the mobile menu and the footer.
+ */
+@media (max-width: 1399px) {
+  .header-link--section,
+  .header-nav-sep {
+    display: none;
+  }
 }

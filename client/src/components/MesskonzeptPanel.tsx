@@ -94,7 +94,9 @@ function Chip({
       }`}
     >
       <span className="block text-sm font-medium leading-6">{children}</span>
-      {hint ? <span className="mt-0.5 block text-xs leading-5 opacity-80">{hint}</span> : null}
+      {hint ? (
+        <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{hint}</span>
+      ) : null}
     </button>
   );
 }
@@ -293,7 +295,7 @@ export function MesskonzeptPanel({
                                 </span>
                               ) : null}
                               {m.intervalMetering ? (
-                                <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[0.68rem] text-amber-700">
+                                <span className="rounded-full border border-amber-500/50 bg-amber-500/10 px-2 py-0.5 text-[0.68rem] text-amber-800">
                                   15-Minuten-Werte
                                 </span>
                               ) : null}

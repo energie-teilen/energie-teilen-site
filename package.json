@@ -7,7 +7,7 @@
     "dev": "vite --host",
     "dev:server": "PORT=3001 tsx server/index.ts",
     "dev:all": "concurrently -k -n vite,api -c cyan,magenta \"pnpm dev\" \"pnpm dev:server\"",
-    "build": "vite build && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
+    "build": "vite build && node scripts/build-static.mjs && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
     "start": "NODE_ENV=production node dist/index.js",
     "preview": "vite preview --host",
     "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p api/tsconfig.json",

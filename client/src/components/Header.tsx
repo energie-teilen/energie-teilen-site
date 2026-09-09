@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Menu, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { navRoutes } from "../../../shared/routes";
+
+const tools = navRoutes();
 
 /**
  * Energy Civic Ledger — header.
@@ -17,14 +20,21 @@ import { Button } from "@/components/ui/button";
  *   - Reduced-motion respected for transitions.
  */
 
-const navItems = [
+/*
+ * Two kinds of destination.
+ *
+ * Sections are anchors on the landing page and get the active-section
+ * highlight. Tools are their own routes, so they are ordinary links — and
+ * they belong in the primary navigation, because a tool nobody can reach from
+ * the header is a tool nobody reaches.
+ */
+const sectionItems = [
   { label: "Überblick", href: "#ueberblick", id: "ueberblick" },
-  { label: "Rechner", href: "#rechner", id: "rechner" },
   { label: "Leistungen", href: "#leistungen", id: "leistungen" },
-  { label: "Struktur", href: "#struktur", id: "struktur" },
-  { label: "Stakeholder", href: "#stakeholder", id: "stakeholder" },
   { label: "Pilotstart", href: "#pilot-start", id: "pilot-start" },
 ];
+
+const navItems = sectionItems;
 
 function useScrollDirection() {
   const [isHidden, setIsHidden] = useState(false);
@@ -175,7 +185,7 @@ export default function Header() {
                 <a
                   key={item.href}
                   href={item.href}
-                  className="header-link"
+                  className="header-link header-link--section"
                   aria-current={isActive ? "true" : undefined}
                   data-active={isActive ? "true" : undefined}
                   style={
@@ -188,6 +198,15 @@ export default function Header() {
                 </a>
               );
             })}
+
+            {/* Separator between page sections and the standalone tools. */}
+            <span aria-hidden className="header-nav-sep" />
+
+            {tools.map((tool) => (
+              <a key={tool.path} href={tool.path} className="header-link">
+                {tool.navLabel}
+              </a>
+            ))}
           </nav>
 
           <div className="hidden items-center gap-3 lg:flex">
@@ -228,6 +247,21 @@ export default function Header() {
                   </a>
                 );
               })}
+
+              <span aria-hidden className="my-2 h-px bg-border/70" />
+              <p className="px-1 text-[0.66rem] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                Werkzeuge
+              </p>
+              {tools.map((tool) => (
+                <a
+                  key={tool.path}
+                  href={tool.path}
+                  className="mobile-nav-link"
+                  onClick={() => setMenuOpen(false)}
+                >
+                  {tool.navLabel}
+                </a>
+              ))}
             </nav>
             <Button
               asChild

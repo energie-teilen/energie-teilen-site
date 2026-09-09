@@ -7,11 +7,27 @@ export const ROUTES = [
   { path: "/", name: "Home" },
   { path: "/rechner", name: "Rechner deep link", redirectsTo: "/" },
   { path: "/pilot", name: "Pilot deep link", redirectsTo: "/" },
+  { path: "/messkonzept", name: "Messkonzept-Werkzeug" },
+  { path: "/aufteilungsschluessel", name: "Aufteilungsschlüssel-Werkzeug" },
+  { path: "/marktkommunikation", name: "Marktkommunikation" },
+  { path: "/api", name: "API-Referenz" },
   { path: "/impressum", name: "Impressum" },
   { path: "/datenschutz", name: "Datenschutz" },
   { path: "/agb", name: "AGB" },
   { path: "/404", name: "NotFound" },
   { path: "/gibt-es-nicht", name: "Unknown route falls through to NotFound" },
+] as const;
+
+/** Routes that must be independently indexable. */
+export const INDEXABLE_PATHS = [
+  "/",
+  "/messkonzept",
+  "/aufteilungsschluessel",
+  "/marktkommunikation",
+  "/api",
+  "/impressum",
+  "/datenschutz",
+  "/agb",
 ] as const;
 
 /**

@@ -1,4 +1,5 @@
 import { ArrowUpRight } from "lucide-react";
+import { navRoutes } from "../../../shared/routes";
 
 /**
  * Energy Civic Ledger — footer.
@@ -6,10 +7,9 @@ import { ArrowUpRight } from "lucide-react";
  * Closing page of a professional operating document. Restrained, precise.
  *
  * Upgrades over the previous version:
- *   - Adds a "Werkzeuge" column linking to the new Mieterstrom-Rechner so the
- *     free tool is discoverable from any page-bottom and earns its own SEO weight.
- *   - Adds a "Rechtliches" column for Impressum, Datenschutz, AGB — required
- *     for German B2B compliance and credibility with kommunale Akteure.
+ *   - The "Werkzeuge" column is generated from the route manifest, so every
+ *     tool that exists is linked and none is advertised that does not.
+ *   - A "Rechtliches" column for Impressum, Datenschutz and AGB.
  *   - Final CTA strip routes warm readers directly into the paid pilot intake.
  *   - Adds <address> with email + region for local SEO + machine-readable contact.
  *   - All design tokens, classes, and tone preserved.
@@ -24,11 +24,12 @@ const navigationLinks = [
   { label: "Pilotstart", href: "#pilot-start" },
 ];
 
-const tools = [
-  { label: "Mieterstrom-Rendite-Rechner", href: "#rechner" },
-  { label: "Allokationsrechner Energy Sharing", href: "#rechner", note: "in Vorbereitung" },
-  { label: "Compliance-Kalender", href: "#rechner", note: "in Vorbereitung" },
-];
+/*
+ * Read from the route manifest rather than listed here, so the footer cannot
+ * advertise a tool that does not exist or omit one that does. Two of these
+ * were previously advertised as still in preparation after being built.
+ */
+const tools = navRoutes().map((r) => ({ label: r.navLabel, href: r.path, note: undefined as string | undefined }));
 
 const legal = [
   { label: "Impressum", href: "/impressum" },

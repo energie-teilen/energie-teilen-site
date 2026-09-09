@@ -196,7 +196,7 @@ export function MarktkommunikationPanel({ inputs }: { inputs: MieterstromInputs 
                 key={`${l}-${i}`}
                 className={`rounded-lg border px-2 py-1 font-mono text-xs tabular-nums ${
                   l.endsWith("A") || l.endsWith("B")
-                    ? "border-amber-500/40 bg-amber-500/10 text-amber-700"
+                    ? "border-amber-500/50 bg-amber-500/10 text-amber-800"
                     : "border-border/60 bg-card text-foreground/80"
                 }`}
               >

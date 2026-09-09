@@ -35,6 +35,7 @@ import type {
 } from "express";
 import { createServer } from "http";
 import path from "path";
+import { existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { createHash, randomUUID, timingSafeEqual } from "crypto";
 import {
@@ -974,7 +975,13 @@ export async function buildApp(): Promise<Express> {
       ? path.resolve(__dirname, "public")
       : path.resolve(__dirname, "..", "dist", "public");
 
-  app.use(express.static(staticPath));
+  /*
+   * redirect:false — without it express.static answers "/messkonzept" with a
+   * 301 to "/messkonzept/", which is not the URL the page declares as
+   * canonical. The route handler below serves the document at the path that is
+   * canonical, so the two agree.
+   */
+  app.use(express.static(staticPath, { redirect: false }));
 
   /*
    * Asset paths must 404 rather than falling through to the SPA shell.
@@ -988,12 +995,32 @@ export async function buildApp(): Promise<Express> {
   const ASSET_EXTENSIONS =
     /\.(js|mjs|css|map|json|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|otf|eot|pdf|txt|xml|webmanifest|mp4|webm)$/i;
 
+  /*
+   * Per-route documents.
+   *
+   * The build emits one HTML file per route with that route's own title,
+   * description, canonical URL and structured data. Serving the shared shell
+   * for every path would hand a crawler, a link preview and a chat unfurl the
+   * landing page's metadata for every page on the site — client-side updates
+   * arrive too late for all three.
+   *
+   * The file is served at the path without a trailing slash, so the URL that
+   * is canonical is also the URL that answers.
+   */
+  const routeDocument = (urlPath: string): string | null => {
+    const clean = urlPath.replace(/\/+$/, "");
+    if (clean === "" || clean === "/") return path.join(staticPath, "index.html");
+    if (!/^\/[a-z0-9-]+$/i.test(clean)) return null;
+    const candidate = path.join(staticPath, clean.slice(1), "index.html");
+    return existsSync(candidate) ? candidate : null;
+  };
+
   app.get("*", (req: Request, res: Response) => {
     if (ASSET_EXTENSIONS.test(req.path)) {
       res.status(404).type("text/plain").send("Not found");
       return;
     }
-    res.sendFile(path.join(staticPath, "index.html"));
+    res.sendFile(routeDocument(req.path) ?? path.join(staticPath, "index.html"));
   });
 
   return app;

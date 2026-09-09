@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { initAnalytics } from "@/lib/analytics";
+import { applyHeadForPath } from "@/lib/head";
 import { ThemeProvider } from "./contexts/ThemeContext";
 
 /**
@@ -23,6 +24,10 @@ const NotFound = lazy(() => import("@/pages/NotFound"));
 const Impressum = lazy(() => import("@/pages/legal/Impressum"));
 const Datenschutz = lazy(() => import("@/pages/legal/Datenschutz"));
 const Agb = lazy(() => import("@/pages/legal/Agb"));
+const MesskonzeptTool = lazy(() => import("@/pages/tools/MesskonzeptTool"));
+const AllocationTool = lazy(() => import("@/pages/tools/AllocationTool"));
+const MarktkommunikationTool = lazy(() => import("@/pages/tools/MarktkommunikationTool"));
+const ApiReference = lazy(() => import("@/pages/tools/ApiReference"));
 
 function useScrollManagement() {
   const [location] = useLocation();
@@ -42,6 +47,19 @@ function useScrollManagement() {
   }, [location]);
 }
 
+/**
+ * The build emits a static HTML file per route with the right title,
+ * description and canonical, so a crawler and a link preview get the correct
+ * answer without executing anything. This keeps it correct for the other case:
+ * navigation inside the running application, where no new document is fetched.
+ */
+function useDocumentHead() {
+  const [location] = useLocation();
+  useEffect(() => {
+    applyHeadForPath(location);
+  }, [location]);
+}
+
 function useAnalyticsPageView() {
   const [location] = useLocation();
   // Install the queue stub and load the script before anything can fire.
@@ -56,6 +74,7 @@ function useAnalyticsPageView() {
 
 function RouteShell() {
   useScrollManagement();
+  useDocumentHead();
   useAnalyticsPageView();
 
   return (
@@ -64,6 +83,15 @@ function RouteShell() {
       {/* Deep-link routes for social share — render Home with the right hash */}
       <Route path={"/rechner"} component={Home} />
       <Route path={"/pilot"} component={Home} />
+      {/*
+        Each tool has its own route. A section inside a long page cannot be
+        indexed, cannot be linked to from an answer, and cannot rank for the
+        question it answers — the engines existed, the doors did not.
+      */}
+      <Route path={"/messkonzept"} component={MesskonzeptTool} />
+      <Route path={"/aufteilungsschluessel"} component={AllocationTool} />
+      <Route path={"/marktkommunikation"} component={MarktkommunikationTool} />
+      <Route path={"/api"} component={ApiReference} />
       {/* Legally required pages */}
       <Route path={"/impressum"} component={Impressum} />
       <Route path={"/datenschutz"} component={Datenschutz} />
