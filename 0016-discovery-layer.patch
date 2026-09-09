@@ -1,0 +1,2523 @@
+From f75bed384f9111c9ce985668eceb81a3746ef69f Mon Sep 17 00:00:00 2001
+From: energie-teilen <noreply@energie-teilen.de>
+Date: Wed, 9 Sep 2026 18:17:12 +0000
+Subject: [PATCH] feat(discovery): a route per tool, a documented API, and a
+ real sitemap
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Every engine in this repository was reachable only by scrolling one long
+page. A section inside a page cannot be indexed, cannot be linked to from
+an answer, and cannot rank for the question it answers — so the metering
+generator, the allocation comparison and the market-communication layer
+were, commercially, invisible. Nine API endpoints had no documentation at
+all, which meant nobody outside this repository could evaluate them.
+
+shared/routes.ts is now the single manifest every part reads: the router,
+the per-route document head, the sitemap, the header, the footer and the
+tests that check none of them has drifted. Each route records the question
+it answers, because a page without one has no reason to rank and no reason
+to exist.
+
+Four new routes:
+  /messkonzept            which metering concept, how many meters, which
+                          roles, and the critical path to operation
+  /aufteilungsschluessel  three allocation keys compared on one dataset,
+                          with the difference in self-consumption computed
+  /marktkommunikation     the 92 / 96 / 100 quarter-hour grid and the
+                          generated MSCONS message
+  /api                    all nine endpoints, each with a runnable curl
+                          example, a real response, and what it refuses
+
+Each is a real document, not a client-side title swap. scripts/build-static
+emits one HTML file per route with that route's title, description,
+canonical URL and JSON-LD, so a crawler, a link preview and a chat unfurl
+read the right answer without executing anything; React hydrates over it
+unchanged. The server serves those documents at the path that is canonical
+rather than redirecting to a trailing slash.
+
+The sitemap is generated from the manifest, so it can no longer list a page
+that does not exist or omit one that does. It went from four entries —
+three of them legal pages — to nine.
+
+Also fixed along the way, each found by the browser suite:
+  - the header overflowed once the tools were added, hiding the last link
+    under the call to action
+  - "Rechner" appeared twice in navigation, as an anchor and as a route
+  - the footer advertised two tools as "in Vorbereitung" after they had
+    been built, and now reads from the manifest instead
+  - the API reference was absent from navigation because it is a reference
+    rather than a tool
+  - three contrast failures between 3.45:1 and 4.41:1
+  - parameter tables on the API page could not be scrolled by keyboard
+
+530 unit tests and 357 browser checks pass. Typecheck and build clean.
+---
+ client/src/App.tsx                            |  28 ++
+ client/src/components/Footer.tsx              |  19 +-
+ client/src/components/Header.tsx              |  44 ++-
+ .../components/MarktkommunikationPanel.tsx    |   2 +-
+ client/src/components/MesskonzeptPanel.tsx    |   6 +-
+ client/src/components/ToolInputs.tsx          | 114 +++++++
+ client/src/components/ToolPageLayout.tsx      | 103 ++++++
+ client/src/index.css                          |  37 +-
+ client/src/lib/head.ts                        |  60 ++++
+ client/src/lib/routes.test.ts                 | 188 +++++++++++
+ client/src/pages/tools/AllocationTool.tsx     | 100 ++++++
+ client/src/pages/tools/ApiReference.tsx       | 203 +++++++++++
+ .../pages/tools/MarktkommunikationTool.tsx    |  86 +++++
+ client/src/pages/tools/MesskonzeptTool.tsx    | 111 ++++++
+ e2e/discovery.spec.ts                         | 168 +++++++++
+ e2e/fixtures.ts                               |  16 +
+ package.json                                  |   2 +-
+ scripts/build-static.mjs                      | 206 +++++++++++
+ server/index.ts                               |  31 +-
+ shared/api-reference.ts                       | 319 ++++++++++++++++++
+ shared/routes.ts                              | 299 ++++++++++++++++
+ 21 files changed, 2119 insertions(+), 23 deletions(-)
+ create mode 100644 client/src/components/ToolInputs.tsx
+ create mode 100644 client/src/components/ToolPageLayout.tsx
+ create mode 100644 client/src/lib/head.ts
+ create mode 100644 client/src/lib/routes.test.ts
+ create mode 100644 client/src/pages/tools/AllocationTool.tsx
+ create mode 100644 client/src/pages/tools/ApiReference.tsx
+ create mode 100644 client/src/pages/tools/MarktkommunikationTool.tsx
+ create mode 100644 client/src/pages/tools/MesskonzeptTool.tsx
+ create mode 100644 e2e/discovery.spec.ts
+ create mode 100644 scripts/build-static.mjs
+ create mode 100644 shared/api-reference.ts
+ create mode 100644 shared/routes.ts
+
+diff --git a/client/src/App.tsx b/client/src/App.tsx
+index 55412d5..cd9600e 100644
+--- a/client/src/App.tsx
++++ b/client/src/App.tsx
+@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/sonner";
+ import { TooltipProvider } from "@/components/ui/tooltip";
+ import ErrorBoundary from "./components/ErrorBoundary";
+ import { initAnalytics } from "@/lib/analytics";
++import { applyHeadForPath } from "@/lib/head";
+ import { ThemeProvider } from "./contexts/ThemeContext";
+ 
+ /**
+@@ -23,6 +24,10 @@ const NotFound = lazy(() => import("@/pages/NotFound"));
+ const Impressum = lazy(() => import("@/pages/legal/Impressum"));
+ const Datenschutz = lazy(() => import("@/pages/legal/Datenschutz"));
+ const Agb = lazy(() => import("@/pages/legal/Agb"));
++const MesskonzeptTool = lazy(() => import("@/pages/tools/MesskonzeptTool"));
++const AllocationTool = lazy(() => import("@/pages/tools/AllocationTool"));
++const MarktkommunikationTool = lazy(() => import("@/pages/tools/MarktkommunikationTool"));
++const ApiReference = lazy(() => import("@/pages/tools/ApiReference"));
+ 
+ function useScrollManagement() {
+   const [location] = useLocation();
+@@ -42,6 +47,19 @@ function useScrollManagement() {
+   }, [location]);
+ }
+ 
++/**
++ * The build emits a static HTML file per route with the right title,
++ * description and canonical, so a crawler and a link preview get the correct
++ * answer without executing anything. This keeps it correct for the other case:
++ * navigation inside the running application, where no new document is fetched.
++ */
++function useDocumentHead() {
++  const [location] = useLocation();
++  useEffect(() => {
++    applyHeadForPath(location);
++  }, [location]);
++}
++
+ function useAnalyticsPageView() {
+   const [location] = useLocation();
+   // Install the queue stub and load the script before anything can fire.
+@@ -56,6 +74,7 @@ function useAnalyticsPageView() {
+ 
+ function RouteShell() {
+   useScrollManagement();
++  useDocumentHead();
+   useAnalyticsPageView();
+ 
+   return (
+@@ -64,6 +83,15 @@ function RouteShell() {
+       {/* Deep-link routes for social share — render Home with the right hash */}
+       <Route path={"/rechner"} component={Home} />
+       <Route path={"/pilot"} component={Home} />
++      {/*
++        Each tool has its own route. A section inside a long page cannot be
++        indexed, cannot be linked to from an answer, and cannot rank for the
++        question it answers — the engines existed, the doors did not.
++      */}
++      <Route path={"/messkonzept"} component={MesskonzeptTool} />
++      <Route path={"/aufteilungsschluessel"} component={AllocationTool} />
++      <Route path={"/marktkommunikation"} component={MarktkommunikationTool} />
++      <Route path={"/api"} component={ApiReference} />
+       {/* Legally required pages */}
+       <Route path={"/impressum"} component={Impressum} />
+       <Route path={"/datenschutz"} component={Datenschutz} />
+diff --git a/client/src/components/Footer.tsx b/client/src/components/Footer.tsx
+index 2f05fe0..8766271 100644
+--- a/client/src/components/Footer.tsx
++++ b/client/src/components/Footer.tsx
+@@ -1,4 +1,5 @@
+ import { ArrowUpRight } from "lucide-react";
++import { navRoutes } from "../../../shared/routes";
+ 
+ /**
+  * Energy Civic Ledger — footer.
+@@ -6,10 +7,9 @@ import { ArrowUpRight } from "lucide-react";
+  * Closing page of a professional operating document. Restrained, precise.
+  *
+  * Upgrades over the previous version:
+- *   - Adds a "Werkzeuge" column linking to the new Mieterstrom-Rechner so the
+- *     free tool is discoverable from any page-bottom and earns its own SEO weight.
+- *   - Adds a "Rechtliches" column for Impressum, Datenschutz, AGB — required
+- *     for German B2B compliance and credibility with kommunale Akteure.
++ *   - The "Werkzeuge" column is generated from the route manifest, so every
++ *     tool that exists is linked and none is advertised that does not.
++ *   - A "Rechtliches" column for Impressum, Datenschutz and AGB.
+  *   - Final CTA strip routes warm readers directly into the paid pilot intake.
+  *   - Adds <address> with email + region for local SEO + machine-readable contact.
+  *   - All design tokens, classes, and tone preserved.
+@@ -24,11 +24,12 @@ const navigationLinks = [
+   { label: "Pilotstart", href: "#pilot-start" },
+ ];
+ 
+-const tools = [
+-  { label: "Mieterstrom-Rendite-Rechner", href: "#rechner" },
+-  { label: "Allokationsrechner Energy Sharing", href: "#rechner", note: "in Vorbereitung" },
+-  { label: "Compliance-Kalender", href: "#rechner", note: "in Vorbereitung" },
+-];
++/*
++ * Read from the route manifest rather than listed here, so the footer cannot
++ * advertise a tool that does not exist or omit one that does. Two of these
++ * were previously advertised as still in preparation after being built.
++ */
++const tools = navRoutes().map((r) => ({ label: r.navLabel, href: r.path, note: undefined as string | undefined }));
+ 
+ const legal = [
+   { label: "Impressum", href: "/impressum" },
+diff --git a/client/src/components/Header.tsx b/client/src/components/Header.tsx
+index 31b126f..0456cc6 100644
+--- a/client/src/components/Header.tsx
++++ b/client/src/components/Header.tsx
+@@ -1,6 +1,9 @@
+ import { useEffect, useMemo, useState } from "react";
+ import { Menu, X } from "lucide-react";
+ import { Button } from "@/components/ui/button";
++import { navRoutes } from "../../../shared/routes";
++
++const tools = navRoutes();
+ 
+ /**
+  * Energy Civic Ledger — header.
+@@ -17,15 +20,22 @@ import { Button } from "@/components/ui/button";
+  *   - Reduced-motion respected for transitions.
+  */
+ 
+-const navItems = [
++/*
++ * Two kinds of destination.
++ *
++ * Sections are anchors on the landing page and get the active-section
++ * highlight. Tools are their own routes, so they are ordinary links — and
++ * they belong in the primary navigation, because a tool nobody can reach from
++ * the header is a tool nobody reaches.
++ */
++const sectionItems = [
+   { label: "Überblick", href: "#ueberblick", id: "ueberblick" },
+-  { label: "Rechner", href: "#rechner", id: "rechner" },
+   { label: "Leistungen", href: "#leistungen", id: "leistungen" },
+-  { label: "Struktur", href: "#struktur", id: "struktur" },
+-  { label: "Stakeholder", href: "#stakeholder", id: "stakeholder" },
+   { label: "Pilotstart", href: "#pilot-start", id: "pilot-start" },
+ ];
+ 
++const navItems = sectionItems;
++
+ function useScrollDirection() {
+   const [isHidden, setIsHidden] = useState(false);
+ 
+@@ -175,7 +185,7 @@ export default function Header() {
+                 <a
+                   key={item.href}
+                   href={item.href}
+-                  className="header-link"
++                  className="header-link header-link--section"
+                   aria-current={isActive ? "true" : undefined}
+                   data-active={isActive ? "true" : undefined}
+                   style={
+@@ -188,6 +198,15 @@ export default function Header() {
+                 </a>
+               );
+             })}
++
++            {/* Separator between page sections and the standalone tools. */}
++            <span aria-hidden className="header-nav-sep" />
++
++            {tools.map((tool) => (
++              <a key={tool.path} href={tool.path} className="header-link">
++                {tool.navLabel}
++              </a>
++            ))}
+           </nav>
+ 
+           <div className="hidden items-center gap-3 lg:flex">
+@@ -228,6 +247,21 @@ export default function Header() {
+                   </a>
+                 );
+               })}
++
++              <span aria-hidden className="my-2 h-px bg-border/70" />
++              <p className="px-1 text-[0.66rem] font-medium uppercase tracking-[0.16em] text-muted-foreground">
++                Werkzeuge
++              </p>
++              {tools.map((tool) => (
++                <a
++                  key={tool.path}
++                  href={tool.path}
++                  className="mobile-nav-link"
++                  onClick={() => setMenuOpen(false)}
++                >
++                  {tool.navLabel}
++                </a>
++              ))}
+             </nav>
+             <Button
+               asChild
+diff --git a/client/src/components/MarktkommunikationPanel.tsx b/client/src/components/MarktkommunikationPanel.tsx
+index b2fc2c3..64fa7ba 100644
+--- a/client/src/components/MarktkommunikationPanel.tsx
++++ b/client/src/components/MarktkommunikationPanel.tsx
+@@ -196,7 +196,7 @@ export function MarktkommunikationPanel({ inputs }: { inputs: MieterstromInputs
+                 key={`${l}-${i}`}
+                 className={`rounded-lg border px-2 py-1 font-mono text-xs tabular-nums ${
+                   l.endsWith("A") || l.endsWith("B")
+-                    ? "border-amber-500/40 bg-amber-500/10 text-amber-700"
++                    ? "border-amber-500/50 bg-amber-500/10 text-amber-800"
+                     : "border-border/60 bg-card text-foreground/80"
+                 }`}
+               >
+diff --git a/client/src/components/MesskonzeptPanel.tsx b/client/src/components/MesskonzeptPanel.tsx
+index 7c3e150..870c924 100644
+--- a/client/src/components/MesskonzeptPanel.tsx
++++ b/client/src/components/MesskonzeptPanel.tsx
+@@ -94,7 +94,9 @@ function Chip({
+       }`}
+     >
+       <span className="block text-sm font-medium leading-6">{children}</span>
+-      {hint ? <span className="mt-0.5 block text-xs leading-5 opacity-80">{hint}</span> : null}
++      {hint ? (
++        <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{hint}</span>
++      ) : null}
+     </button>
+   );
+ }
+@@ -293,7 +295,7 @@ export function MesskonzeptPanel({
+                                 </span>
+                               ) : null}
+                               {m.intervalMetering ? (
+-                                <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[0.68rem] text-amber-700">
++                                <span className="rounded-full border border-amber-500/50 bg-amber-500/10 px-2 py-0.5 text-[0.68rem] text-amber-800">
+                                   15-Minuten-Werte
+                                 </span>
+                               ) : null}
+diff --git a/client/src/components/ToolInputs.tsx b/client/src/components/ToolInputs.tsx
+new file mode 100644
+index 0000000..2855a68
+--- /dev/null
++++ b/client/src/components/ToolInputs.tsx
+@@ -0,0 +1,114 @@
++import type { ReactNode } from "react";
++
++/**
++ * The small input cluster each standalone tool page needs.
++ *
++ * The tools were previously reachable only from the calculator's own state.
++ * On their own routes they need to be usable immediately, by someone who
++ * arrived from a search result and has one question — so each page owns a
++ * minimal set of inputs rather than the full economic model.
++ */
++
++export function ToolInputGrid({ children }: { children: ReactNode }) {
++  return (
++    <div className="rounded-[24px] border border-border/70 bg-card p-5 sm:p-6">
++      <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
++        Ihre Konstellation
++      </p>
++      <div className="mt-4 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">{children}</div>
++    </div>
++  );
++}
++
++export function NumberField({
++  id,
++  label,
++  value,
++  min,
++  max,
++  step = 1,
++  unit,
++  onChange,
++}: {
++  id: string;
++  label: string;
++  value: number;
++  min: number;
++  max: number;
++  step?: number;
++  unit: string;
++  onChange: (v: number) => void;
++}) {
++  return (
++    <div className="space-y-2">
++      <label
++        htmlFor={id}
++        className="flex items-baseline justify-between gap-2 text-sm font-medium text-foreground"
++      >
++        <span>{label}</span>
++        <span className="font-display text-base font-semibold tabular-nums">
++          {value.toLocaleString("de-DE")}{" "}
++          <span className="text-xs font-normal text-muted-foreground">{unit}</span>
++        </span>
++      </label>
++      <input
++        id={id}
++        type="range"
++        min={min}
++        max={max}
++        step={step}
++        value={value}
++        aria-valuetext={`${value} ${unit}`}
++        onChange={(e) => onChange(Number(e.target.value))}
++        className="w-full accent-primary"
++      />
++    </div>
++  );
++}
++
++export function SelectField<T extends string>({
++  id,
++  label,
++  value,
++  options,
++  onChange,
++}: {
++  id: string;
++  label: string;
++  value: T | undefined;
++  options: { value: T; label: string }[];
++  onChange: (v: T | undefined) => void;
++}) {
++  return (
++    <div className="space-y-2">
++      <label htmlFor={id} className="block text-sm font-medium text-foreground">
++        {label}
++      </label>
++      <select
++        id={id}
++        value={value ?? ""}
++        onChange={(e) => onChange((e.target.value || undefined) as T | undefined)}
++        className="w-full rounded-xl border border-border/70 bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
++      >
++        <option value="">Keine Angabe</option>
++        {options.map((o) => (
++          <option key={o.value} value={o.value}>
++            {o.label}
++          </option>
++        ))}
++      </select>
++    </div>
++  );
++}
++
++/** A short method note. Every tool page carries one; none of them is decorative. */
++export function MethodNote({ title, children }: { title: string; children: ReactNode }) {
++  return (
++    <section className="rounded-[20px] border border-border/60 bg-card/60 p-6">
++      <h2 className="font-display text-lg font-semibold tracking-[-0.01em] text-foreground">
++        {title}
++      </h2>
++      <div className="mt-3 space-y-3 text-sm leading-7 text-muted-foreground">{children}</div>
++    </section>
++  );
++}
+diff --git a/client/src/components/ToolPageLayout.tsx b/client/src/components/ToolPageLayout.tsx
+new file mode 100644
+index 0000000..1e32eaf
+--- /dev/null
++++ b/client/src/components/ToolPageLayout.tsx
+@@ -0,0 +1,103 @@
++import { Link } from "wouter";
++import { ArrowRight } from "lucide-react";
++import Header from "@/components/Header";
++import Footer from "@/components/Footer";
++import { routeFor, type RouteDefinition } from "../../../shared/routes";
++
++/**
++ * ToolPageLayout
++ *
++ * The shell every standalone tool page sits in.
++ *
++ * Each tool has its own route because a section inside a long page cannot be
++ * indexed, cannot be linked to from an answer, and cannot rank for the question
++ * it answers. That only pays off if the page around the tool is a real page:
++ * a heading that states the question, the tool itself, and a way onward that is
++ * not the browser's back button.
++ */
++export function ToolPageLayout({
++  path,
++  kicker,
++  heading,
++  lede,
++  children,
++  aside,
++}: {
++  path: string;
++  kicker: string;
++  heading: string;
++  lede: string;
++  children: React.ReactNode;
++  /** Optional block below the tool: method, caveats, definitions. */
++  aside?: React.ReactNode;
++}) {
++  const route = routeFor(path);
++  const related = (route?.relatedPaths ?? [])
++    .map((p) => routeFor(p))
++    .filter((r): r is RouteDefinition => r !== null);
++
++  return (
++    <div className="min-h-screen bg-background">
++      <Header />
++      <main id="main" className="mx-auto w-full max-w-6xl px-6 pb-24 pt-28 sm:pt-32">
++        <nav aria-label="Brotkrumen" className="mb-8">
++          <ol className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
++            <li>
++              <Link href="/" className="underline-offset-4 hover:text-foreground hover:underline">
++                Startseite
++              </Link>
++            </li>
++            <li aria-hidden>·</li>
++            <li aria-current="page" className="text-foreground">
++              {route?.navLabel ?? heading}
++            </li>
++          </ol>
++        </nav>
++
++        <header className="max-w-3xl space-y-4 border-b border-border/60 pb-10">
++          <p className="text-[0.72rem] font-medium uppercase tracking-[0.2em] text-primary">
++            {kicker}
++          </p>
++          <h1 className="font-display text-3xl font-semibold tracking-[-0.025em] text-foreground sm:text-[2.6rem] sm:leading-[1.1]">
++            {heading}
++          </h1>
++          <p className="text-base leading-8 text-muted-foreground sm:text-lg">{lede}</p>
++        </header>
++
++        <div className="mt-10">{children}</div>
++
++        {aside ? <div className="mt-14 max-w-3xl">{aside}</div> : null}
++
++        {related.length > 0 ? (
++          <section className="mt-16 border-t border-border/60 pt-10">
++            <h2 className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
++              Weiter
++            </h2>
++            <ul className="mt-5 grid gap-3 sm:grid-cols-3">
++              {related.map((r) => (
++                <li key={r.path}>
++                  <Link
++                    href={r.path}
++                    className="group flex h-full flex-col gap-2 rounded-[20px] border border-border/70 bg-card p-5 transition-colors hover:border-primary/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
++                  >
++                    <span className="font-display text-base font-semibold text-foreground">
++                      {r.navLabel}
++                    </span>
++                    <span className="text-sm leading-6 text-muted-foreground">{r.answers}</span>
++                    <span className="mt-auto inline-flex items-center gap-1.5 pt-2 text-xs font-medium text-primary">
++                      Öffnen
++                      <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
++                    </span>
++                  </Link>
++                </li>
++              ))}
++            </ul>
++          </section>
++        ) : null}
++      </main>
++      <Footer />
++    </div>
++  );
++}
++
++export default ToolPageLayout;
+diff --git a/client/src/index.css b/client/src/index.css
+index f0883e0..0ad08d7 100644
+--- a/client/src/index.css
++++ b/client/src/index.css
+@@ -254,15 +254,22 @@
+     display: none;
+     align-items: center;
+     justify-content: center;
+-    gap: 0.25rem;
++    gap: 0.1rem;
+     min-width: 0;
++    /*
++       The nav carries the page sections AND the tool routes. Without clearance
++       the last link crowds the call to action, and a 2.2 target-size check
++       reports the button as partially obscured — which is also how it looks.
++    */
++    margin-right: 0.75rem;
+   }
+ 
+   .header-link {
+     position: relative;
+     border-radius: 999px;
+-    padding: 0.7rem 0.95rem;
+-    font-size: 0.9rem;
++    padding: 0.65rem 0.7rem;
++    font-size: 0.85rem;
++    white-space: nowrap;
+     color: color-mix(in oklab, var(--foreground) 84%, white 16%);
+     transition: background 220ms ease, color 220ms ease, transform 220ms ease;
+   }
+@@ -690,3 +697,27 @@
+ .legal-prose address {
+   font-style: normal;
+ }
++
++/* Separates page-section anchors from the standalone tool routes in the header. */
++.header-nav-sep {
++  display: inline-block;
++  width: 1px;
++  height: 1rem;
++  background: var(--border);
++  margin: 0 0.45rem;
++  flex: none;
++}
++
++/*
++ * Between the large breakpoint and 1400px the bar cannot hold the page
++ * sections, every tool and the call to action at once — the last link ended up
++ * underneath the button. The tools and the reference are the links worth
++ * keeping there; the sections are still one scroll away on the page they
++ * belong to, and both remain in the mobile menu and the footer.
++ */
++@media (max-width: 1399px) {
++  .header-link--section,
++  .header-nav-sep {
++    display: none;
++  }
++}
+diff --git a/client/src/lib/head.ts b/client/src/lib/head.ts
+new file mode 100644
+index 0000000..f7a2ada
+--- /dev/null
++++ b/client/src/lib/head.ts
+@@ -0,0 +1,60 @@
++/**
++ * client/src/lib/head.ts
++ *
++ * Per-route document head.
++ *
++ * The build emits a static HTML file per route with the correct title,
++ * description, canonical and structured data, so a crawler or a link preview
++ * gets the right answer without executing anything. This module keeps the head
++ * correct for the OTHER path: navigation inside the running application, where
++ * no new document is fetched.
++ *
++ * Both sides read shared/routes.ts, so they cannot disagree about what a page
++ * is called.
++ */
++
++import { absoluteUrl, routeFor, type RouteDefinition } from "../../../shared/routes";
++
++const OG_IMAGE = "/og-image.png";
++
++function setMeta(selector: string, attr: "name" | "property", key: string, content: string): void {
++  let el = document.head.querySelector<HTMLMetaElement>(selector);
++  if (!el) {
++    el = document.createElement("meta");
++    el.setAttribute(attr, key);
++    document.head.appendChild(el);
++  }
++  el.setAttribute("content", content);
++}
++
++function setLink(rel: string, href: string): void {
++  let el = document.head.querySelector<HTMLLinkElement>(`link[rel="${rel}"]`);
++  if (!el) {
++    el = document.createElement("link");
++    el.setAttribute("rel", rel);
++    document.head.appendChild(el);
++  }
++  el.setAttribute("href", href);
++}
++
++/** Apply a route's metadata to the live document. */
++export function applyRouteHead(route: RouteDefinition): void {
++  document.title = route.title;
++
++  setMeta('meta[name="description"]', "name", "description", route.description);
++  setMeta('meta[property="og:title"]', "property", "og:title", route.title);
++  setMeta('meta[property="og:description"]', "property", "og:description", route.description);
++  setMeta('meta[property="og:url"]', "property", "og:url", absoluteUrl(route.path));
++  setMeta('meta[property="og:image"]', "property", "og:image", absoluteUrl(OG_IMAGE));
++  setMeta('meta[property="og:type"]', "property", "og:type", route.kind === "landing" ? "website" : "article");
++  setMeta('meta[name="twitter:title"]', "name", "twitter:title", route.title);
++  setMeta('meta[name="twitter:description"]', "name", "twitter:description", route.description);
++
++  setLink("canonical", absoluteUrl(route.path));
++}
++
++/** Apply the head for a path, falling back to the landing route. */
++export function applyHeadForPath(path: string): void {
++  const route = routeFor(path) ?? routeFor("/");
++  if (route) applyRouteHead(route);
++}
+diff --git a/client/src/lib/routes.test.ts b/client/src/lib/routes.test.ts
+new file mode 100644
+index 0000000..74ee1b4
+--- /dev/null
++++ b/client/src/lib/routes.test.ts
+@@ -0,0 +1,188 @@
++import { describe, it, expect } from "vitest";
++import { readFileSync } from "fs";
++import { join } from "path";
++import {
++  ROUTES,
++  ROUTE_BY_PATH,
++  absoluteUrl,
++  buildRobots,
++  buildSitemap,
++  indexableRoutes,
++  routeFor,
++  navRoutes,
++  toolRoutes,
++} from "../../../shared/routes";
++import { API_ENDPOINTS, documentedPaths } from "../../../shared/api-reference";
++
++const ROOT = join(__dirname, "..", "..", "..");
++
++describe("the route manifest", () => {
++  it("has a unique path per route", () => {
++    const paths = ROUTES.map((r) => r.path);
++    expect(new Set(paths).size).toBe(paths.length);
++  });
++
++  it("gives every route a title that will not be truncated in a result", () => {
++    for (const r of ROUTES) {
++      expect(r.title.length, `${r.path} title length`).toBeGreaterThan(8);
++      expect(r.title.length, `${r.path} title: "${r.title}"`).toBeLessThanOrEqual(70);
++    }
++  });
++
++  it("gives every route a description of usable length", () => {
++    for (const r of ROUTES) {
++      expect(r.description.length, `${r.path} description`).toBeGreaterThanOrEqual(50);
++      expect(r.description.length, `${r.path} description`).toBeLessThanOrEqual(230);
++    }
++  });
++
++  /*
++   * A page without a question it answers is a page with no reason to rank and
++   * no reason to exist. Writing it down is what stops one being added anyway.
++   */
++  it("makes every route state the question it answers", () => {
++    for (const r of ROUTES) {
++      if (r.kind === "system") continue;
++      expect(r.answers.length, `${r.path} answers`).toBeGreaterThan(12);
++    }
++  });
++
++  it("only links to routes that exist", () => {
++    for (const r of ROUTES) {
++      for (const related of r.relatedPaths) {
++        expect(ROUTE_BY_PATH[related], `${r.path} links to ${related}`).toBeDefined();
++      }
++    }
++  });
++
++  it("never links a route to itself", () => {
++    for (const r of ROUTES) expect(r.relatedPaths).not.toContain(r.path);
++  });
++
++  it("keeps the 404 route out of the index", () => {
++    expect(routeFor("/404")?.indexable).toBe(false);
++    expect(indexableRoutes().map((r) => r.path)).not.toContain("/404");
++  });
++
++  it("resolves a trailing slash to the same route", () => {
++    expect(routeFor("/messkonzept/")?.path).toBe("/messkonzept");
++    expect(routeFor("/")?.path).toBe("/");
++  });
++
++  it("returns null for an unknown path rather than guessing", () => {
++    expect(routeFor("/gibt-es-nicht")).toBeNull();
++  });
++});
++
++describe("the tools are reachable", () => {
++  it("exposes every tool as its own route", () => {
++    const paths = toolRoutes().map((r) => r.path);
++    expect(paths).toEqual(
++      expect.arrayContaining(["/rechner", "/messkonzept", "/aufteilungsschluessel", "/marktkommunikation"]),
++    );
++  });
++
++  /*
++   * Each tool exists as a route so it can be indexed and linked to. That only
++   * holds if the router actually mounts it.
++   */
++  it("mounts every manifest route in the router", () => {
++    const app = readFileSync(join(ROOT, "client", "src", "App.tsx"), "utf8");
++    for (const r of ROUTES) {
++      if (r.path === "/404") continue;
++      expect(app, `App.tsx mounts ${r.path}`).toContain(`path={"${r.path}"}`);
++    }
++  });
++
++  it("links every tool from the footer via the manifest", () => {
++    const footer = readFileSync(join(ROOT, "client", "src", "components", "Footer.tsx"), "utf8");
++    expect(footer, "footer reads the manifest rather than a hand-kept list").toContain("navRoutes()");
++    expect(footer).not.toContain("in Vorbereitung");
++  });
++
++  it("offers the reference in navigation, not only the tools", () => {
++    // The API reference is not a tool but is exactly what a technical
++    // evaluator looks for; leaving it out made it reachable only by URL.
++    expect(navRoutes().map((r) => r.path)).toContain("/api");
++  });
++
++  it("uses each navigation label exactly once", () => {
++    const labels = navRoutes().map((r) => r.navLabel);
++    expect(new Set(labels).size, `duplicate label in ${labels.join(", ")}`).toBe(labels.length);
++  });
++
++  it("links the tools from the header", () => {
++    const header = readFileSync(join(ROOT, "client", "src", "components", "Header.tsx"), "utf8");
++    expect(header).toContain("navRoutes()");
++  });
++});
++
++describe("sitemap and robots", () => {
++  it("lists every indexable route and nothing else", () => {
++    const xml = buildSitemap("2026-09-09");
++    for (const r of ROUTES) {
++      const url = absoluteUrl(r.path);
++      if (r.indexable) expect(xml, `${r.path} in sitemap`).toContain(`<loc>${url}</loc>`);
++      else expect(xml, `${r.path} not in sitemap`).not.toContain(`<loc>${url}</loc>`);
++    }
++  });
++
++  it("covers more than the legal pages", () => {
++    const nonLegal = indexableRoutes().filter((r) => r.kind !== "legal");
++    expect(nonLegal.length, "indexable pages that are not legal boilerplate").toBeGreaterThanOrEqual(6);
++  });
++
++  it("is well-formed and carries a lastmod on every entry", () => {
++    const xml = buildSitemap("2026-09-09");
++    expect(xml.startsWith('<?xml version="1.0" encoding="UTF-8"?>')).toBe(true);
++    expect((xml.match(/<url>/g) ?? []).length).toBe(indexableRoutes().length);
++    expect((xml.match(/<lastmod>/g) ?? []).length).toBe(indexableRoutes().length);
++  });
++
++  it("points robots.txt at the sitemap", () => {
++    expect(buildRobots()).toContain(absoluteUrl("/sitemap.xml"));
++  });
++});
++
++describe("the API reference matches the API", () => {
++  /*
++   * Nine endpoints existed with no documentation, so nobody outside this
++   * repository could evaluate them. These two tests keep the reference and the
++   * server from drifting apart in either direction.
++   */
++  const server = readFileSync(join(ROOT, "server", "api-v1.ts"), "utf8");
++
++  it("documents every endpoint the server mounts", () => {
++    const mounted = [...server.matchAll(/app\.(get|post)\(\s*`\$\{(API_PREFIX|MAKO_PREFIX)\}([^`]+)`/g)].map(
++      (m) => (m[2] === "API_PREFIX" ? "/api/v1" : "/api/v1/mako") + m[3],
++    );
++    expect(mounted.length).toBeGreaterThanOrEqual(9);
++    for (const path of mounted) {
++      expect(documentedPaths(), `${path} is documented`).toContain(path);
++    }
++  });
++
++  it("documents no endpoint the server does not mount", () => {
++    for (const doc of API_ENDPOINTS) {
++      // Mounted as `${API_PREFIX}/x` or `${MAKO_PREFIX}/x`; either way the
++      // literal after the interpolation is what appears in the source.
++      const suffix = doc.path.startsWith("/api/v1/mako")
++        ? doc.path.replace("/api/v1/mako", "")
++        : doc.path.replace("/api/v1", "");
++      expect(server, `${doc.path} is mounted`).toContain(`}${suffix}\``);
++    }
++  });
++
++  it("gives every endpoint a runnable example and a stated refusal", () => {
++    for (const doc of API_ENDPOINTS) {
++      expect(doc.example, `${doc.path} example`).toContain("curl");
++      expect(doc.responseExample.length, `${doc.path} response`).toBeGreaterThan(40);
++      expect(doc.refuses.length, `${doc.path} states what it refuses`).toBeGreaterThan(0);
++    }
++  });
++
++  it("marks required parameters as required", () => {
++    const calculate = API_ENDPOINTS.find((e) => e.path.endsWith("/calculate"))!;
++    expect(calculate.parameters.find((p) => p.name === "inputs.kwp")?.required).toBe(true);
++  });
++});
+diff --git a/client/src/pages/tools/AllocationTool.tsx b/client/src/pages/tools/AllocationTool.tsx
+new file mode 100644
+index 0000000..9a9eea5
+--- /dev/null
++++ b/client/src/pages/tools/AllocationTool.tsx
+@@ -0,0 +1,100 @@
++import { useState } from "react";
++import ToolPageLayout from "@/components/ToolPageLayout";
++import { AllocationPanel } from "@/components/AllocationPanel";
++import { MethodNote, NumberField, ToolInputGrid } from "@/components/ToolInputs";
++import { DEFAULTS } from "@/lib/mieterstrom";
++import type { MieterstromInputs } from "../../../../shared/schema";
++
++/**
++ * /aufteilungsschluessel
++ *
++ * The allocation-key comparison on its own route.
++ *
++ * The choice of key is worth a measurable amount of money per year, and until
++ * now the only way to see that was to scroll past the whole economic model.
++ */
++export default function AllocationTool() {
++  const [units, setUnits] = useState(DEFAULTS.anzahlWohneinheiten);
++  const [kwp, setKwp] = useState(DEFAULTS.kwp);
++  const [preis, setPreis] = useState(DEFAULTS.strompreisMieterCtPerKwh);
++
++  const inputs: MieterstromInputs = {
++    ...DEFAULTS,
++    anzahlWohneinheiten: units,
++    kwp,
++    strompreisMieterCtPerKwh: preis,
++  };
++
++  return (
++    <ToolPageLayout
++      path="/aufteilungsschluessel"
++      kicker="Kostenloses Werkzeug"
++      heading="Welcher Aufteilungsschlüssel lässt am meisten Strom im Haus?"
++      lede="Der Schlüssel wird in jeder Viertelstunde angewendet. Er entscheidet, wie viel der Erzeugung bei den Teilnehmern bleibt statt eingespeist zu werden — und das ist ein Betrag, kein Detail. Drei Schlüssel, dieselben Daten, der Unterschied gerechnet."
++      aside={
++        <div className="space-y-6">
++          <MethodNote title="Die drei Schlüssel">
++            <p>
++              <strong className="text-foreground">Statisch</strong> — feste Anteile. Einfach zu
++              vereinbaren, lässt aber Energie ungenutzt, sobald der Anteil eines Teilnehmers dessen
++              Bedarf in einer Viertelstunde übersteigt.
++            </p>
++            <p>
++              <strong className="text-foreground">Dynamisch</strong> — verbrauchsanteilig je
++              Viertelstunde. Alle Teilnehmer erreichen denselben Deckungsgrad.
++            </p>
++            <p>
++              <strong className="text-foreground">Mit Nachverteilung</strong> — zunächst der feste
++              Anteil, anschließend wird der nicht genutzte Rest unter den Teilnehmern mit offenem
++              Bedarf weiterverteilt. Höchste Eigennutzung bei erhaltener Anteilslogik.
++            </p>
++          </MethodNote>
++          <MethodNote title="Warum die Energiebilanz exakt aufgeht">
++            <p>
++              Die Einspeisung wird als Erzeugung minus Zuordnung berechnet, nicht unabhängig
++              ermittelt. Damit schließt die Bilanz in jeder Viertelstunde konstruktionsbedingt und
++              nicht näherungsweise: kein Teilnehmer erhält mehr, als er verbraucht hat, und keine
++              Kilowattstunde wird zweimal zugeordnet. Beides ist über ein volles Jahr an
++              Viertelstunden geprüft.
++            </p>
++          </MethodNote>
++        </div>
++      }
++    >
++      <div className="space-y-6">
++        <ToolInputGrid>
++          <NumberField
++            id="al-units"
++            label="Teilnehmer"
++            value={units}
++            min={2}
++            max={60}
++            unit="WE"
++            onChange={setUnits}
++          />
++          <NumberField
++            id="al-kwp"
++            label="Anlagengröße"
++            value={kwp}
++            min={5}
++            max={300}
++            unit="kWp"
++            onChange={setKwp}
++          />
++          <NumberField
++            id="al-preis"
++            label="Strompreis Mieter"
++            value={preis}
++            min={20}
++            max={50}
++            step={0.5}
++            unit="ct/kWh"
++            onChange={setPreis}
++          />
++        </ToolInputGrid>
++
++        <AllocationPanel inputs={inputs} />
++      </div>
++    </ToolPageLayout>
++  );
++}
+diff --git a/client/src/pages/tools/ApiReference.tsx b/client/src/pages/tools/ApiReference.tsx
+new file mode 100644
+index 0000000..d906695
+--- /dev/null
++++ b/client/src/pages/tools/ApiReference.tsx
+@@ -0,0 +1,203 @@
++import { useState } from "react";
++import { KeyRound, ShieldCheck } from "lucide-react";
++import ToolPageLayout from "@/components/ToolPageLayout";
++import {
++  API_AUTH_DOC,
++  API_ENDPOINTS,
++  API_GUARANTEES,
++  type ApiEndpointDoc,
++} from "../../../../shared/api-reference";
++import { API_VERSION } from "../../../../shared/api-contract";
++
++/**
++ * /api
++ *
++ * The API reference.
++ *
++ * Nine endpoints existed with no documentation at all, which meant nobody
++ * outside this repository could evaluate them. Everything on this page is
++ * rendered from shared/api-reference.ts, and a test checks that every
++ * documented path is actually mounted and every mounted path is documented.
++ */
++
++function MethodBadge({ method }: { method: ApiEndpointDoc["method"] }) {
++  return (
++    <span
++      className={`shrink-0 rounded-md px-2 py-0.5 font-mono text-[0.68rem] font-semibold tracking-wide ${
++        method === "GET"
++          ? "bg-primary/10 text-primary"
++          : "bg-amber-500/15 text-amber-800"
++      }`}
++    >
++      {method}
++    </span>
++  );
++}
++
++function CodeBlock({ children, label }: { children: string; label?: string }) {
++  return (
++    <div className="mt-3">
++      {label ? (
++        <p className="mb-1.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-muted-foreground">
++          {label}
++        </p>
++      ) : null}
++      <pre
++        tabIndex={0}
++        role="region"
++        aria-label={label ?? "Codebeispiel"}
++        className="overflow-x-auto rounded-xl border border-border/60 bg-background/80 p-4 font-mono text-[0.72rem] leading-6 text-foreground/85 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
++      >
++        {children}
++      </pre>
++    </div>
++  );
++}
++
++function Endpoint({ doc }: { doc: ApiEndpointDoc }) {
++  const [open, setOpen] = useState(false);
++  const id = doc.path.replace(/\W+/g, "-").replace(/^-|-$/g, "");
++
++  return (
++    <article id={id} className="rounded-[22px] border border-border/70 bg-card p-5 sm:p-6">
++      <div className="flex flex-wrap items-baseline gap-3">
++        <MethodBadge method={doc.method} />
++        <code className="font-mono text-sm font-medium text-foreground">{doc.path}</code>
++      </div>
++      <h3 className="mt-3 font-display text-lg font-semibold tracking-[-0.01em] text-foreground">
++        {doc.summary}
++      </h3>
++      <p className="mt-2 max-w-2xl text-sm leading-7 text-muted-foreground">{doc.purpose}</p>
++
++      {/* The parameter table scrolls on narrow viewports; a region a keyboard
++          user cannot scroll hides its columns from them entirely. */}
++      {doc.parameters.length > 0 ? (
++        <div
++          className="mt-5 overflow-x-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
++          tabIndex={0}
++          role="region"
++          aria-label={`Parameter von ${doc.method} ${doc.path}`}
++        >
++          <table className="w-full min-w-[32rem] text-left text-sm">
++            <thead>
++              <tr className="text-[0.66rem] uppercase tracking-[0.14em] text-muted-foreground">
++                <th className="pb-2 pr-4 font-medium">Feld</th>
++                <th className="pb-2 pr-4 font-medium">Typ</th>
++                <th className="pb-2 pr-4 font-medium">Pflicht</th>
++                <th className="pb-2 font-medium">Bedeutung</th>
++              </tr>
++            </thead>
++            <tbody className="align-top">
++              {doc.parameters.map((p) => (
++                <tr key={p.name} className="border-t border-border/50">
++                  <td className="py-2.5 pr-4 font-mono text-xs text-foreground">{p.name}</td>
++                  <td className="py-2.5 pr-4 font-mono text-xs text-muted-foreground">{p.type}</td>
++                  <td className="py-2.5 pr-4 text-xs">
++                    {p.required ? (
++                      <span className="text-foreground">ja</span>
++                    ) : (
++                      <span className="text-muted-foreground">nein</span>
++                    )}
++                  </td>
++                  <td className="py-2.5 text-sm leading-6 text-muted-foreground">{p.description}</td>
++                </tr>
++              ))}
++            </tbody>
++          </table>
++        </div>
++      ) : null}
++
++      <CodeBlock label="Anfrage">{doc.example}</CodeBlock>
++
++      <button
++        type="button"
++        onClick={() => setOpen((v) => !v)}
++        aria-expanded={open}
++        className="mt-4 text-sm text-primary underline-offset-4 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
++      >
++        {open ? "Antwort ausblenden" : "Antwort und Verweigerungen anzeigen"}
++      </button>
++
++      {open ? (
++        <div className="mt-2">
++          <CodeBlock label="Antwort (gekürzt)">{doc.responseExample}</CodeBlock>
++          {doc.refuses.length > 0 ? (
++            <div className="mt-4">
++              <p className="text-[0.66rem] font-medium uppercase tracking-[0.14em] text-muted-foreground">
++                Wird abgelehnt
++              </p>
++              <ul className="mt-2 space-y-1.5">
++                {doc.refuses.map((r) => (
++                  <li key={r.when} className="flex flex-wrap items-baseline gap-2 text-sm">
++                    <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-foreground">
++                      {r.code}
++                    </code>
++                    <span className="text-muted-foreground">{r.when}</span>
++                  </li>
++                ))}
++              </ul>
++            </div>
++          ) : null}
++        </div>
++      ) : null}
++    </article>
++  );
++}
++
++export default function ApiReference() {
++  return (
++    <ToolPageLayout
++      path="/api"
++      kicker={`API v${API_VERSION}`}
++      heading="Dieselbe Engine, hinter einem Schlüssel."
++      lede="Neun Endpunkte für Wirtschaftlichkeit, Qualifizierung, Messkonzept, Aufteilung, Abrechnung und Marktkommunikation. Jede Antwort trägt einen Modellstempel und die Herkunft jedes Eingabewerts, und die Engine verweigert die Antwort, wo sie sie nur schätzen könnte."
++    >
++      <div className="space-y-8">
++        {/* What an integrator gets, before the endpoint list */}
++        <section className="rounded-[24px] border border-primary/25 bg-primary/5 p-6">
++          <h2 className="flex items-center gap-2 font-display text-lg font-semibold text-foreground">
++            <ShieldCheck className="h-5 w-5 text-primary" />
++            Was auf jeder Antwort steht
++          </h2>
++          <dl className="mt-5 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
++            {API_GUARANTEES.map((g) => (
++              <div key={g.title}>
++                <dt className="text-sm font-semibold text-foreground">{g.title}</dt>
++                <dd className="mt-1.5 text-sm leading-6 text-muted-foreground">{g.body}</dd>
++              </div>
++            ))}
++          </dl>
++        </section>
++
++        <section className="rounded-[22px] border border-border/70 bg-card p-5 sm:p-6">
++          <h2 className="flex items-center gap-2 font-display text-lg font-semibold text-foreground">
++            <KeyRound className="h-5 w-5 text-primary" />
++            Authentifizierung
++          </h2>
++          <p className="mt-2 max-w-2xl text-sm leading-7 text-muted-foreground">
++            {API_AUTH_DOC.description}
++          </p>
++          <CodeBlock label="Beispiel">{API_AUTH_DOC.example}</CodeBlock>
++        </section>
++
++        <section className="space-y-4">
++          <h2 className="font-display text-xl font-semibold tracking-[-0.015em] text-foreground">
++            Endpunkte
++          </h2>
++          {API_ENDPOINTS.map((doc) => (
++            <Endpoint key={`${doc.method} ${doc.path}`} doc={doc} />
++          ))}
++        </section>
++
++        <section className="rounded-[22px] border border-border/70 bg-card p-5 sm:p-6">
++          <h2 className="font-display text-lg font-semibold text-foreground">Zugang</h2>
++          <p className="mt-2 max-w-2xl text-sm leading-7 text-muted-foreground">
++            Schlüssel werden je Integration ausgegeben und sind einzeln widerrufbar. Für einen
++            Zugang genügt eine Nachricht mit dem vorgesehenen Einsatzzweck; der Schlüssel wird
++            einmal im Klartext übergeben und danach nur noch als Hash gehalten.
++          </p>
++        </section>
++      </div>
++    </ToolPageLayout>
++  );
++}
+diff --git a/client/src/pages/tools/MarktkommunikationTool.tsx b/client/src/pages/tools/MarktkommunikationTool.tsx
+new file mode 100644
+index 0000000..5cc9c65
+--- /dev/null
++++ b/client/src/pages/tools/MarktkommunikationTool.tsx
+@@ -0,0 +1,86 @@
++import { useState } from "react";
++import ToolPageLayout from "@/components/ToolPageLayout";
++import { MarktkommunikationPanel } from "@/components/MarktkommunikationPanel";
++import { MethodNote, NumberField, ToolInputGrid } from "@/components/ToolInputs";
++import { DEFAULTS } from "@/lib/mieterstrom";
++import type { MieterstromInputs } from "../../../../shared/schema";
++
++/**
++ * /marktkommunikation
++ *
++ * The metering-message page.
++ *
++ * This is the strongest technical claim the product makes, and it was buried
++ * three quarters of the way down the landing page: the German market settles on
++ * a LOCAL quarter-hour grid, two days a year that grid is not 96 intervals
++ * long, and an implementation that assumes otherwise files wrong quantities
++ * twice a year.
++ */
++export default function MarktkommunikationTool() {
++  const [units, setUnits] = useState(DEFAULTS.anzahlWohneinheiten);
++  const [kwp, setKwp] = useState(DEFAULTS.kwp);
++
++  const inputs: MieterstromInputs = { ...DEFAULTS, anzahlWohneinheiten: units, kwp };
++
++  return (
++    <ToolPageLayout
++      path="/marktkommunikation"
++      kicker="Marktkommunikation"
++      heading="Zweimal im Jahr hat ein Tag nicht 96 Viertelstunden."
++      lede="Am letzten Sonntag im März hat der Tag 92, am letzten Sonntag im Oktober 100. Jede Umsetzung, die 96 fest verdrahtet, verliert im Frühjahr vier Werte und zählt im Herbst vier doppelt — und der Fehler landet in einer Rechnung. Hier ist das Raster, und hier ist die Nachricht."
++      aside={
++        <div className="space-y-6">
++          <MethodNote title="Warum die Jahressumme nichts beweist">
++            <p>
++              Ein volles Jahr ergibt weiterhin 35 040 Viertelstunden, weil sich die beiden
++              Umstellungen gegenseitig aufheben. Genau das ist die Falle: die Jahreszahl sieht
++              richtig aus, während zwei einzelne Tage falsch sind. Eine Prüfung auf Jahresebene
++              zeigt den Fehler nicht.
++            </p>
++          </MethodNote>
++          <MethodNote title="Geprüft und nicht geprüft">
++            <p>
++              <strong className="text-foreground">Geprüft ist die Syntax.</strong> Freigabezeichen,
++              Segmentzählung in UNT und Kontrollreferenz in UNZ werden aus dem Inhalt berechnet und
++              anschließend aus der erzeugten Nachricht heraus nachgeprüft — nicht aus dem Code
++              angenommen. Der OBIS-Code enthält den Komponententrenner und wird maskiert; ohne diese
++              Maskierung zerfällt das Element und die Nachricht meldet eine andere Messgröße als
++              gemeint.
++            </p>
++            <p>
++              <strong className="text-foreground">Nicht geprüft ist die Profilfassung.</strong>{" "}
++              Segmentverwendung, Qualifier und Verzeichnisstand sind nicht gegen die aktuelle
++              Formatbeschreibung des BDEW abgeglichen. Bis dahin ist die erzeugte Nachricht für
++              Test- und Abstimmungszwecke bestimmt, und sie sagt das selbst.
++            </p>
++          </MethodNote>
++        </div>
++      }
++    >
++      <div className="space-y-6">
++        <ToolInputGrid>
++          <NumberField
++            id="mako-units"
++            label="Teilnehmer"
++            value={units}
++            min={2}
++            max={60}
++            unit="WE"
++            onChange={setUnits}
++          />
++          <NumberField
++            id="mako-kwp"
++            label="Anlagengröße"
++            value={kwp}
++            min={5}
++            max={300}
++            unit="kWp"
++            onChange={setKwp}
++          />
++        </ToolInputGrid>
++
++        <MarktkommunikationPanel inputs={inputs} />
++      </div>
++    </ToolPageLayout>
++  );
++}
+diff --git a/client/src/pages/tools/MesskonzeptTool.tsx b/client/src/pages/tools/MesskonzeptTool.tsx
+new file mode 100644
+index 0000000..4608dc5
+--- /dev/null
++++ b/client/src/pages/tools/MesskonzeptTool.tsx
+@@ -0,0 +1,111 @@
++import { useState } from "react";
++import ToolPageLayout from "@/components/ToolPageLayout";
++import { MesskonzeptPanel, type MesskonzeptAnswers } from "@/components/MesskonzeptPanel";
++import { MethodNote, NumberField, SelectField, ToolInputGrid } from "@/components/ToolInputs";
++import { DEFAULTS } from "@/lib/mieterstrom";
++import type { QualificationFacts } from "../../../../shared/eligibility";
++import type { MieterstromInputs } from "../../../../shared/schema";
++
++/**
++ * /messkonzept
++ *
++ * The metering-concept generator on its own route.
++ *
++ * It answers a question people actually type — which metering concept a given
++ * constellation needs and how many meters that is — and it was previously only
++ * reachable by scrolling most of the way down the landing page.
++ */
++export default function MesskonzeptTool() {
++  const [units, setUnits] = useState(DEFAULTS.anzahlWohneinheiten);
++  const [kwp, setKwp] = useState(DEFAULTS.kwp);
++  const [facts, setFacts] = useState<QualificationFacts>({});
++  const [answers, setAnswers] = useState<MesskonzeptAnswers>({});
++
++  const inputs: MieterstromInputs = { ...DEFAULTS, anzahlWohneinheiten: units, kwp };
++
++  return (
++    <ToolPageLayout
++      path="/messkonzept"
++      kicker="Kostenloses Werkzeug"
++      heading="Welches Messkonzept braucht Ihr Projekt?"
++      lede="Die Wirtschaftlichkeit entscheidet, ob sich ein Vorhaben lohnt. Das Messkonzept entscheidet, ob es gebaut werden kann. Geben Sie die Konstellation an und Sie erhalten Variante, Zählerinventar, Marktrollen und den kritischen Pfad bis zur Inbetriebnahme."
++      aside={
++        <div className="space-y-6">
++          <MethodNote title="Wie das abgeleitet wird">
++            <p>
++              Ausschlaggebend ist die Netzanschlusssituation. Liegen alle Einheiten hinter einem
++              Hausanschluss, kommt eine Summenzählung in Betracht; hat jede Einheit einen eigenen
++              Anschluss, entfällt sie; liegen die Beteiligten an verschiedenen Netzanschlusspunkten,
++              erfolgt die Zuordnung rechnerisch aus viertelstündlichen Messwerten.
++            </p>
++            <p>
++              Ohne diese Angabe wird nichts geraten. Das Ergebnis lautet dann „nicht bestimmbar“ und
++              nennt die Klärung als einzige Aufgabe — ein plausibles, aber falsches Schema wäre
++              teurer als gar keines.
++            </p>
++          </MethodNote>
++          <MethodNote title="Was dieses Werkzeug nicht leistet">
++            <p>
++              Es erstellt einen Vorschlag für die technische Ausgestaltung. Das Messkonzept ist mit
++              dem zuständigen Netzbetreiber und Messstellenbetreiber abzustimmen; deren Freigabe ist
++              maßgeblich. Eine Aussage über die rechtliche Zulässigkeit einer Konstellation ist damit
++              nicht verbunden.
++            </p>
++          </MethodNote>
++        </div>
++      }
++    >
++      <div className="space-y-6">
++        <ToolInputGrid>
++          <NumberField
++            id="mk-units"
++            label="Einheiten"
++            value={units}
++            min={2}
++            max={200}
++            unit="WE"
++            onChange={setUnits}
++          />
++          <NumberField
++            id="mk-kwp"
++            label="Anlagengröße"
++            value={kwp}
++            min={5}
++            max={300}
++            unit="kWp"
++            onChange={setKwp}
++          />
++          <SelectField
++            id="mk-owner"
++            label="Eigentümerkonstellation"
++            value={facts.ownerConstellation}
++            options={[
++              { value: "single_owner", label: "Ein Eigentümer" },
++              { value: "weg", label: "Eigentümergemeinschaft (WEG)" },
++              { value: "multiple_owners", label: "Mehrere Eigentümer" },
++            ]}
++            onChange={(v) => setFacts({ ...facts, ownerConstellation: v })}
++          />
++          <SelectField
++            id="mk-scope"
++            label="Räumlicher Zuschnitt"
++            value={facts.buildingScope}
++            options={[
++              { value: "single_building", label: "Ein Gebäude" },
++              { value: "multiple_buildings_same_site", label: "Mehrere Gebäude, ein Grundstück" },
++              { value: "across_grid", label: "Über mehrere Standorte" },
++            ]}
++            onChange={(v) => setFacts({ ...facts, buildingScope: v })}
++          />
++        </ToolInputGrid>
++
++        <MesskonzeptPanel
++          inputs={inputs}
++          facts={facts}
++          answers={answers}
++          onAnswersChange={setAnswers}
++        />
++      </div>
++    </ToolPageLayout>
++  );
++}
+diff --git a/e2e/discovery.spec.ts b/e2e/discovery.spec.ts
+new file mode 100644
+index 0000000..559e9f1
+--- /dev/null
++++ b/e2e/discovery.spec.ts
+@@ -0,0 +1,168 @@
++import { test, expect, waitForApp, INDEXABLE_PATHS } from "./fixtures";
++
++/**
++ * Discovery.
++ *
++ * A capability nobody can find does not exist commercially. Every engine in
++ * this repository was previously reachable only by scrolling one long page,
++ * which meant none of them could be indexed, linked to from an answer, or rank
++ * for the question it answers.
++ *
++ * These checks are about the SERVED document, before any JavaScript runs:
++ * that is what a crawler, a link preview and a chat unfurl actually read.
++ */
++
++test.describe("each route is its own document", () => {
++  for (const path of INDEXABLE_PATHS) {
++    test(`${path} is served with its own title and canonical`, async ({ request }) => {
++      const res = await request.get(path);
++      expect(res.status(), `${path} status`).toBe(200);
++      const html = await res.text();
++
++      const title = /<title>([\s\S]*?)<\/title>/.exec(html)?.[1]?.trim() ?? "";
++      const canonical = /rel="canonical"\s+href="([^"]+)"/.exec(html)?.[1] ?? "";
++      const description = /name="description"\s+content="([^"]*)"/.exec(html)?.[1] ?? "";
++
++      expect(title.length, `${path} has a title`).toBeGreaterThan(8);
++      expect(canonical, `${path} canonical`).toMatch(new RegExp(`${path === "/" ? "/" : path}$`));
++      expect(description.length, `${path} description`).toBeGreaterThan(40);
++    });
++  }
++
++  test("no two pages claim the same title", async ({ request }) => {
++    const titles = new Map<string, string>();
++    for (const path of INDEXABLE_PATHS) {
++      const html = await (await request.get(path)).text();
++      const title = /<title>([\s\S]*?)<\/title>/.exec(html)?.[1]?.trim() ?? "";
++      const existing = titles.get(title);
++      expect(existing, `${path} and ${existing} share the title "${title}"`).toBeUndefined();
++      titles.set(title, path);
++    }
++  });
++
++  test("no two pages claim the same canonical URL", async ({ request }) => {
++    const seen = new Set<string>();
++    for (const path of INDEXABLE_PATHS) {
++      const html = await (await request.get(path)).text();
++      const canonical = /rel="canonical"\s+href="([^"]+)"/.exec(html)?.[1] ?? path;
++      expect(seen.has(canonical), `${canonical} claimed twice`).toBe(false);
++      seen.add(canonical);
++    }
++  });
++
++  test("every page carries structured data", async ({ request }) => {
++    for (const path of INDEXABLE_PATHS) {
++      const html = await (await request.get(path)).text();
++      const blocks = [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)];
++      expect(blocks.length, `${path} JSON-LD blocks`).toBeGreaterThanOrEqual(1);
++      for (const [, body] of blocks) {
++        // Invalid JSON-LD is worse than none: it is ignored silently.
++        expect(() => JSON.parse(body), `${path} JSON-LD parses`).not.toThrow();
++      }
++    }
++  });
++
++  test("the served page does not point at the landing page's URL", async ({ request }) => {
++    // The failure this guards against: one shell for every route, so every
++    // page advertised the landing page's title and canonical.
++    const html = await (await request.get("/messkonzept")).text();
++    expect(html).not.toMatch(/rel="canonical"\s+href="[^"]*\.app\/"/);
++  });
++});
++
++test.describe("sitemap and robots", () => {
++  test("the sitemap lists every indexable route", async ({ request }) => {
++    const xml = await (await request.get("/sitemap.xml")).text();
++    for (const path of INDEXABLE_PATHS) {
++      expect(xml, `${path} in sitemap`).toContain(path === "/" ? ".app/</loc>" : `${path}</loc>`);
++    }
++    expect((xml.match(/<url>/g) ?? []).length).toBeGreaterThanOrEqual(8);
++  });
++
++  test("the sitemap does not list the 404 page", async ({ request }) => {
++    const xml = await (await request.get("/sitemap.xml")).text();
++    expect(xml).not.toContain("/404</loc>");
++  });
++
++  test("robots.txt points at the sitemap", async ({ request }) => {
++    const txt = await (await request.get("/robots.txt")).text();
++    expect(txt).toContain("Sitemap:");
++    expect(txt).toContain("/sitemap.xml");
++  });
++});
++
++test.describe("the tools work on their own routes", () => {
++  test("the metering tool computes from its own inputs", async ({ page }) => {
++    await page.goto("/messkonzept");
++    await waitForApp(page);
++    await expect(page.getByRole("heading", { level: 1 })).toContainText(/Messkonzept/i);
++    await page.getByRole("button", { name: /Ein gemeinsamer Hausanschluss/i }).click();
++    await expect(page.getByText(/Summenzählermodell/i).first()).toBeVisible();
++    await expect(page.locator('svg[aria-label^="Schema"]')).toBeVisible();
++  });
++
++  test("the allocation tool compares the keys", async ({ page }) => {
++    await page.goto("/aufteilungsschluessel");
++    await waitForApp(page);
++    await expect(page.getByRole("heading", { level: 1 })).toContainText(/Aufteilungsschlüssel/i);
++    await expect(page.getByRole("button", { name: /Nachverteilung/ }).first()).toBeVisible();
++    await expect(page.locator('svg[aria-label^="Zuordnung"]')).toBeVisible();
++  });
++
++  test("the market-communication page shows the clock-change grid", async ({ page }) => {
++    await page.goto("/marktkommunikation");
++    await waitForApp(page);
++    await page.getByRole("button", { name: /Zeitumstellung Oktober/ }).click();
++    await expect(page.getByText("100 Viertelstunden").first()).toBeVisible();
++    await expect(page.getByText(/Syntaxprüfung/i).first()).toBeVisible();
++  });
++
++  test("the API reference documents every endpoint with a runnable example", async ({ page }) => {
++    await page.goto("/api");
++    await waitForApp(page);
++    const body = await page.locator("main").innerText();
++    for (const path of [
++      "/api/v1/meta",
++      "/api/v1/calculate",
++      "/api/v1/eligibility",
++      "/api/v1/messkonzept",
++      "/api/v1/allocation",
++      "/api/v1/billing",
++      "/api/v1/mako/grid",
++      "/api/v1/mako/identifiers",
++      "/api/v1/mako/mscons",
++    ]) {
++      expect(body, `${path} documented`).toContain(path);
++    }
++    expect(body).toContain("curl");
++  });
++
++  test("every tool page links onward", async ({ page }) => {
++    for (const path of ["/messkonzept", "/aufteilungsschluessel", "/marktkommunikation", "/api"]) {
++      await page.goto(path);
++      await waitForApp(page);
++      const related = page.locator("main").getByRole("link", { name: /Öffnen/ });
++      expect(await related.count(), `${path} offers a next step`).toBeGreaterThan(0);
++    }
++  });
++
++  test("the tools are reachable from the header on every viewport", async ({ page }) => {
++    await page.goto("/");
++    await waitForApp(page);
++
++    // Below the large breakpoint the links live behind the menu button, which
++    // is a valid pattern — but they still have to be reachable.
++    const banner = page.getByRole("banner");
++    const desktopNav = banner.getByRole("navigation", { name: /Primäre Navigation/i });
++    if (!(await desktopNav.isVisible())) {
++      await banner.getByRole("button", { name: /Navigation öffnen/i }).click();
++    }
++
++    for (const label of [/Messkonzept/, /Aufteilung/, /Marktkommunikation/, /API/]) {
++      await expect(
++        banner.getByRole("link", { name: label }).first(),
++        `header offers ${label}`,
++      ).toBeVisible();
++    }
++  });
++});
+diff --git a/e2e/fixtures.ts b/e2e/fixtures.ts
+index 183c577..341d5bf 100644
+--- a/e2e/fixtures.ts
++++ b/e2e/fixtures.ts
+@@ -7,6 +7,10 @@ export const ROUTES = [
+   { path: "/", name: "Home" },
+   { path: "/rechner", name: "Rechner deep link", redirectsTo: "/" },
+   { path: "/pilot", name: "Pilot deep link", redirectsTo: "/" },
++  { path: "/messkonzept", name: "Messkonzept-Werkzeug" },
++  { path: "/aufteilungsschluessel", name: "Aufteilungsschlüssel-Werkzeug" },
++  { path: "/marktkommunikation", name: "Marktkommunikation" },
++  { path: "/api", name: "API-Referenz" },
+   { path: "/impressum", name: "Impressum" },
+   { path: "/datenschutz", name: "Datenschutz" },
+   { path: "/agb", name: "AGB" },
+@@ -14,6 +18,18 @@ export const ROUTES = [
+   { path: "/gibt-es-nicht", name: "Unknown route falls through to NotFound" },
+ ] as const;
+ 
++/** Routes that must be independently indexable. */
++export const INDEXABLE_PATHS = [
++  "/",
++  "/messkonzept",
++  "/aufteilungsschluessel",
++  "/marktkommunikation",
++  "/api",
++  "/impressum",
++  "/datenschutz",
++  "/agb",
++] as const;
++
+ /**
+  * Console and page errors are collected for EVERY test and asserted at
+  * teardown. A page that renders correctly while throwing in the console is not
+diff --git a/package.json b/package.json
+index e22e742..9f536b7 100644
+--- a/package.json
++++ b/package.json
+@@ -7,7 +7,7 @@
+     "dev": "vite --host",
+     "dev:server": "PORT=3001 tsx server/index.ts",
+     "dev:all": "concurrently -k -n vite,api -c cyan,magenta \"pnpm dev\" \"pnpm dev:server\"",
+-    "build": "vite build && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
++    "build": "vite build && node scripts/build-static.mjs && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
+     "start": "NODE_ENV=production node dist/index.js",
+     "preview": "vite preview --host",
+     "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p api/tsconfig.json",
+diff --git a/scripts/build-static.mjs b/scripts/build-static.mjs
+new file mode 100644
+index 0000000..b29fe0d
+--- /dev/null
++++ b/scripts/build-static.mjs
+@@ -0,0 +1,206 @@
++/**
++ * scripts/build-static.mjs
++ *
++ * Emits one real HTML document per route, plus the sitemap and robots.txt.
++ *
++ * Why this exists: the application is a single-page app, so every route was
++ * served the same index.html — the same <title>, the same description, the same
++ * canonical URL. A crawler, a link preview and a chat unfurl all read the
++ * served document, and all of them therefore saw the landing page's metadata
++ * for every page on the site. Client-side title updates arrive too late for
++ * most of them and not at all for some.
++ *
++ * Each generated file is the built shell with that route's head substituted and
++ * its own JSON-LD appended. React still hydrates and takes over exactly as
++ * before; nothing about the runtime changes.
++ *
++ * The sitemap is generated from the same manifest as the router, so the two
++ * cannot disagree about which pages exist.
++ *
++ * Run after `vite build`:  node scripts/build-static.mjs
++ */
++
++import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
++import { join, dirname } from "path";
++
++const DIST = join(process.cwd(), "dist", "public");
++const SHELL = join(DIST, "index.html");
++
++if (!existsSync(SHELL)) {
++  console.error("dist/public/index.html not found — run `vite build` first.");
++  process.exit(1);
++}
++
++// The manifest is TypeScript; read the fields we need without a compile step.
++const routesSource = readFileSync(join(process.cwd(), "shared", "routes.ts"), "utf8");
++
++const ORIGIN = (process.env.APP_URL || "https://energie-teilen-site.vercel.app").replace(/\/+$/, "");
++
++/** Parse the ROUTES array out of the manifest. */
++function parseRoutes() {
++  const body = routesSource.slice(
++    routesSource.indexOf("export const ROUTES: RouteDefinition[] = ["),
++  );
++  const routes = [];
++  const blockRe = /\{\s*\n\s*path: "([^"]+)",([\s\S]*?)\n  \},/g;
++  let m;
++  while ((m = blockRe.exec(body)) !== null) {
++    const [, path, rest] = m;
++    const field = (name) => {
++      const r = new RegExp(`${name}:\\s*(?:\\n\\s*)?"((?:[^"\\\\]|\\\\.)*)"`);
++      const hit = r.exec(rest);
++      return hit ? hit[1].replace(/\\"/g, '"') : null;
++    };
++    const bool = (name) => new RegExp(`${name}: (true|false)`).exec(rest)?.[1] === "true";
++    routes.push({
++      path,
++      title: field("title"),
++      description: field("description"),
++      navLabel: field("navLabel"),
++      answers: field("answers"),
++      indexable: bool("indexable"),
++      changefreq: field("changefreq") ?? "monthly",
++      priority: Number(/priority: ([\d.]+)/.exec(rest)?.[1] ?? "0.5"),
++      kind: field("kind") ?? "tool",
++    });
++    if (routes.length > 40) break;
++  }
++  return routes;
++}
++
++const routes = parseRoutes();
++if (routes.length < 5) {
++  console.error(`Only parsed ${routes.length} routes from shared/routes.ts — refusing to continue.`);
++  process.exit(1);
++}
++
++const shell = readFileSync(SHELL, "utf8");
++
++const escapeAttr = (s) =>
++  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
++
++function replaceTitle(html, title) {
++  return html.replace(/<title>[\s\S]*?<\/title>/, `<title>${escapeAttr(title)}</title>`);
++}
++
++function replaceMeta(html, matcher, attr, key, content) {
++  const re = new RegExp(`<meta\\s+${attr}="${key}"[^>]*>`, "i");
++  const tag = `<meta ${attr}="${key}" content="${escapeAttr(content)}" />`;
++  if (re.test(html)) return html.replace(re, tag);
++  // Some tags are written across several lines; fall back to a targeted insert.
++  return html.replace("</head>", `    ${tag}\n  </head>`);
++}
++
++function replaceMultilineMeta(html, attr, key, content) {
++  const re = new RegExp(`<meta\\s+${attr}="${key}"\\s*\\n?\\s*content="[^"]*"\\s*/?>`, "i");
++  const tag = `<meta ${attr}="${key}" content="${escapeAttr(content)}" />`;
++  if (re.test(html)) return html.replace(re, tag);
++  return replaceMeta(html, null, attr, key, content);
++}
++
++function setCanonical(html, url) {
++  const tag = `<link rel="canonical" href="${escapeAttr(url)}" />`;
++  if (/<link rel="canonical"[^>]*>/i.test(html)) {
++    return html.replace(/<link rel="canonical"[^>]*>/i, tag);
++  }
++  return html.replace("</head>", `    ${tag}\n  </head>`);
++}
++
++/** Page-level JSON-LD: breadcrumb plus whatever the route declares. */
++function structuredDataFor(route) {
++  const graph = [
++    {
++      "@type": "WebPage",
++      "@id": `${ORIGIN}${route.path}#webpage`,
++      url: `${ORIGIN}${route.path}`,
++      name: route.title,
++      description: route.description,
++      inLanguage: "de-DE",
++      isPartOf: { "@id": `${ORIGIN}/#website` },
++    },
++  ];
++
++  if (route.path !== "/") {
++    graph.push({
++      "@type": "BreadcrumbList",
++      itemListElement: [
++        { "@type": "ListItem", position: 1, name: "Startseite", item: `${ORIGIN}/` },
++        { "@type": "ListItem", position: 2, name: route.navLabel, item: `${ORIGIN}${route.path}` },
++      ],
++    });
++  }
++
++  return { "@context": "https://schema.org", "@graph": graph };
++}
++
++/**
++ * Content a crawler sees without executing anything.
++ *
++ * Not a rendering of the application — a short, accurate summary of what the
++ * page is, replaced the moment React hydrates. Empty for the landing page,
++ * which already ships its content.
++ */
++function noscriptSummary(route) {
++  if (route.path === "/") return "";
++  return (
++    `\n    <noscript>\n` +
++    `      <h1>${escapeAttr(route.navLabel)}</h1>\n` +
++    `      <p>${escapeAttr(route.description)}</p>\n` +
++    `      <p>${escapeAttr(route.answers)}</p>\n` +
++    `    </noscript>\n`
++  );
++}
++
++let written = 0;
++for (const route of routes) {
++  const url = `${ORIGIN}${route.path}`;
++  let html = shell;
++
++  html = replaceTitle(html, route.title);
++  html = replaceMultilineMeta(html, "name", "description", route.description);
++  html = replaceMultilineMeta(html, "property", "og:title", route.title);
++  html = replaceMultilineMeta(html, "property", "og:description", route.description);
++  html = replaceMultilineMeta(html, "property", "og:url", url);
++  html = replaceMultilineMeta(html, "name", "twitter:title", route.title);
++  html = replaceMultilineMeta(html, "name", "twitter:description", route.description);
++  html = setCanonical(html, url);
++
++  html = html.replace(
++    "</head>",
++    `    <script type="application/ld+json">\n${JSON.stringify(structuredDataFor(route), null, 2)}\n    </script>\n  </head>`,
++  );
++
++  html = html.replace("<body>", `<body>${noscriptSummary(route)}`);
++
++  // "/" is the shell itself; everything else becomes <path>/index.html so a
++  // static host serves it for that URL without a rewrite rule.
++  const target = route.path === "/" ? SHELL : join(DIST, route.path.slice(1), "index.html");
++  mkdirSync(dirname(target), { recursive: true });
++  writeFileSync(target, html);
++  written++;
++}
++
++const today = new Date().toISOString().slice(0, 10);
++const sitemap =
++  `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
++  routes
++    .filter((r) => r.indexable)
++    .map(
++      (r) =>
++        `  <url>\n    <loc>${ORIGIN}${r.path}</loc>\n    <lastmod>${today}</lastmod>\n` +
++        `    <changefreq>${r.changefreq}</changefreq>\n    <priority>${r.priority.toFixed(1)}</priority>\n  </url>`,
++    )
++    .join("\n") +
++  `\n</urlset>\n`;
++
++writeFileSync(join(DIST, "sitemap.xml"), sitemap);
++writeFileSync(
++  join(DIST, "robots.txt"),
++  ["User-agent: *", "Allow: /", "", `Sitemap: ${ORIGIN}/sitemap.xml`, ""].join("\n"),
++);
++
++const indexable = routes.filter((r) => r.indexable).length;
++console.log(
++  `static: ${written} documents, ${indexable} in the sitemap` +
++    ` (was 1 document and 4 sitemap entries, three of them legal pages)`,
++);
+diff --git a/server/index.ts b/server/index.ts
+index ac855d5..b420a93 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -35,6 +35,7 @@ import type {
+ } from "express";
+ import { createServer } from "http";
+ import path from "path";
++import { existsSync } from "fs";
+ import { fileURLToPath } from "url";
+ import { createHash, randomUUID, timingSafeEqual } from "crypto";
+ import {
+@@ -974,7 +975,13 @@ export async function buildApp(): Promise<Express> {
+       ? path.resolve(__dirname, "public")
+       : path.resolve(__dirname, "..", "dist", "public");
+ 
+-  app.use(express.static(staticPath));
++  /*
++   * redirect:false — without it express.static answers "/messkonzept" with a
++   * 301 to "/messkonzept/", which is not the URL the page declares as
++   * canonical. The route handler below serves the document at the path that is
++   * canonical, so the two agree.
++   */
++  app.use(express.static(staticPath, { redirect: false }));
+ 
+   /*
+    * Asset paths must 404 rather than falling through to the SPA shell.
+@@ -988,12 +995,32 @@ export async function buildApp(): Promise<Express> {
+   const ASSET_EXTENSIONS =
+     /\.(js|mjs|css|map|json|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|otf|eot|pdf|txt|xml|webmanifest|mp4|webm)$/i;
+ 
++  /*
++   * Per-route documents.
++   *
++   * The build emits one HTML file per route with that route's own title,
++   * description, canonical URL and structured data. Serving the shared shell
++   * for every path would hand a crawler, a link preview and a chat unfurl the
++   * landing page's metadata for every page on the site — client-side updates
++   * arrive too late for all three.
++   *
++   * The file is served at the path without a trailing slash, so the URL that
++   * is canonical is also the URL that answers.
++   */
++  const routeDocument = (urlPath: string): string | null => {
++    const clean = urlPath.replace(/\/+$/, "");
++    if (clean === "" || clean === "/") return path.join(staticPath, "index.html");
++    if (!/^\/[a-z0-9-]+$/i.test(clean)) return null;
++    const candidate = path.join(staticPath, clean.slice(1), "index.html");
++    return existsSync(candidate) ? candidate : null;
++  };
++
+   app.get("*", (req: Request, res: Response) => {
+     if (ASSET_EXTENSIONS.test(req.path)) {
+       res.status(404).type("text/plain").send("Not found");
+       return;
+     }
+-    res.sendFile(path.join(staticPath, "index.html"));
++    res.sendFile(routeDocument(req.path) ?? path.join(staticPath, "index.html"));
+   });
+ 
+   return app;
+diff --git a/shared/api-reference.ts b/shared/api-reference.ts
+new file mode 100644
+index 0000000..b0c78d0
+--- /dev/null
++++ b/shared/api-reference.ts
+@@ -0,0 +1,319 @@
++/**
++ * shared/api-reference.ts
++ *
++ * The public description of the v1 API.
++ *
++ * Written here rather than in the page that renders it, so the documentation
++ * and the server read from the same module for paths and version, and a test
++ * can check that every documented endpoint is actually mounted and that every
++ * mounted endpoint is documented. Undocumented endpoints are the reason APIs
++ * get evaluated and then abandoned.
++ */
++
++import { API_PREFIX, API_VERSION, MAKO_PREFIX } from "./api-contract.js";
++
++export type ApiParameter = {
++  name: string;
++  type: string;
++  required: boolean;
++  description: string;
++};
++
++export type ApiEndpointDoc = {
++  method: "GET" | "POST";
++  path: string;
++  summary: string;
++  /** What problem this solves, in the reader's terms. */
++  purpose: string;
++  parameters: ApiParameter[];
++  /** A request body or query that actually works. */
++  example: string;
++  /** An abbreviated but real response shape. */
++  responseExample: string;
++  /** What it refuses to do, and with which code. */
++  refuses: { code: string; when: string }[];
++};
++
++export const API_BASE_URL_PLACEHOLDER = "https://<host>";
++
++export const API_AUTH_DOC = {
++  summary: "Bearer-Token oder X-API-Key",
++  description:
++    "Jede Anfrage trägt einen Schlüssel, entweder als Authorization: Bearer <key> oder als X-API-Key. Schlüssel werden ausschließlich als SHA-256-Hash konfiguriert; der Klartext wird einmal ausgegeben und nirgends gespeichert. Ein falscher und ein fehlender Schlüssel werden identisch beantwortet, damit die Antwort nicht verrät, ob ein Schlüssel existiert.",
++  example: `curl -H "Authorization: Bearer et_..." \\
++  ${API_BASE_URL_PLACEHOLDER}${API_PREFIX}/meta`,
++};
++
++export const API_GUARANTEES = [
++  {
++    title: "Modellstempel auf jeder Antwort",
++    body: "Modellversion, Annahmensatz, Jurisdiktion, Währung und Berechnungszeitpunkt. Zwei Ergebnisse sind nur dann vergleichbar, wenn ihr Stempel übereinstimmt — und das lässt sich damit feststellen statt vermuten.",
++  },
++  {
++    title: "Herkunft je Eingabewert",
++    body: "Für jede Annahme wird ausgewiesen, ob sie vom Aufrufer stammt oder ein Vorgabewert ist, welche Quellenklasse sie hat und ob sie verifiziert ist. Damit lässt sich einem Eigentümer oder einer Bank zeigen, woher jede Zahl kommt.",
++  },
++  {
++    title: "Gültigkeit der regulierten Sätze",
++    body: "Jeder verwendete Satz trägt sein Gültigkeitsfenster. Läuft er aus, sagt die Antwort das, bevor jemand mit einer veralteten Zahl rechnet.",
++  },
++  {
++    title: "Verweigerung statt Schätzung",
++    body: "Liegt eine Eingabe außerhalb dessen, was die Engine beantworten kann, kommt ein Fehler mit benanntem Grund — nie ein plausibler Wert. Eine 96-Werte-Reihe für einen Tag mit 100 Viertelstunden wird abgelehnt, nicht aufgefüllt.",
++  },
++  {
++    title: "Nichts wird gespeichert",
++    body: "Die Berechnungsendpunkte legen keine übergebenen Projektdaten ab. Eine mitgegebene Referenz wird lediglich zurückgegeben, damit der Aufrufer zuordnen kann.",
++  },
++];
++
++const MELO_EXAMPLE = "DE0000000000000000000000012345A";
++
++export const API_ENDPOINTS: ApiEndpointDoc[] = [
++  {
++    method: "GET",
++    path: `${API_PREFIX}/meta`,
++    summary: "Was diese Installation rechnet und wie aktuell sie ist",
++    purpose:
++      "Der erste Aufruf einer Integration. Nennt alle Endpunkte, jede regulierte Rate mit Bändern, Rechtsgrundlage und Gültigkeitsfenster, sowie die drei Beteiligungsmodelle mit der Angabe, welches die Engine tatsächlich rechnet.",
++    parameters: [],
++    example: `curl -H "Authorization: Bearer $KEY" \\
++  ${API_BASE_URL_PLACEHOLDER}${API_PREFIX}/meta`,
++    responseExample: `{
++  "ok": true,
++  "model": {
++    "apiVersion": "${API_VERSION}",
++    "modelVersion": "1.0.0",
++    "assumptionSet": "de-mieterstrom-2026-09.2",
++    "jurisdiction": "DE",
++    "currency": "EUR"
++  },
++  "rates": { "feedInTariff": { "bands": [...], "freshness": { "status": "current" } } },
++  "endpoints": ["${API_PREFIX}/meta", "..."]
++}`,
++    refuses: [{ code: "401 unauthorized", when: "Schlüssel fehlt oder ist ungültig" }],
++  },
++  {
++    method: "POST",
++    path: `${API_PREFIX}/calculate`,
++    summary: "Wirtschaftlichkeit in drei Szenarien",
++    purpose:
++      "Amortisation, Kapitalwert, interner Zinsfuß, kumulierter Erlös und CO2 — konservativ, realistisch und optimistisch parallel. Ausgelassene Eingaben werden mit dem für diese Anlagengröße geltenden Satz gefüllt, und die Herkunft weist aus, welche das waren.",
++    parameters: [
++      { name: "inputs.kwp", type: "number", required: true, description: "Anlagengröße. Pflicht, weil jede regulierte Rate danach gebändert ist." },
++      { name: "inputs.*", type: "number", required: false, description: "Jede weitere Annahme; ausgelassene werden mit dem Vorgabewert gefüllt." },
++      { name: "includeSchedule", type: "boolean", required: false, description: "Jahresweise Zahlungsreihe mitliefern." },
++      { name: "reference", type: "string", required: false, description: "Eigene Vorgangsnummer, wird zurückgegeben. Nicht gespeichert." },
++    ],
++    example: `curl -X POST -H "Authorization: Bearer $KEY" \\
++  -H "content-type: application/json" \\
++  -d '{"inputs":{"kwp":60,"anzahlWohneinheiten":24},"includeSchedule":true}' \\
++  ${API_BASE_URL_PLACEHOLDER}${API_PREFIX}/calculate`,
++    responseExample: `{
++  "ok": true,
++  "scenarios": {
++    "realistisch": { "npvEur": 19463.26, "irrPct": 8.94, "amortisationsdauerJahre": 9.8 }
++  },
++  "provenance": [ { "key": "kwp", "value": 60, "source": "customer", "verified": false } ],
++  "freshness": { "feedInTariff": { "status": "current", "daysRemaining": 145 } },
++  "warnings": [ { "code": "feed_in_regime_change", "message": "..." } ]
++}`,
++    refuses: [
++      { code: "400 validation_error", when: "kwp fehlt oder liegt außerhalb des zulässigen Bereichs" },
++    ],
++  },
++  {
++    method: "POST",
++    path: `${API_PREFIX}/eligibility`,
++    summary: "Qualifizierung einer Konstellation",
++    purpose:
++      "Ein Urteil mit Begründung: Machbarkeit, Werttreiber, Hauptrisiko, fehlende Daten, Aufwandsband und der nächste sinnvolle Schritt. Trifft ausdrücklich keine Aussage zur rechtlichen Zulässigkeit.",
++    parameters: [
++      { name: "inputs.kwp", type: "number", required: true, description: "Anlagengröße." },
++      { name: "facts", type: "object", required: false, description: "Eigentümerkonstellation, räumlicher Zuschnitt, Anlagenstatus, Zählerkonzept. Jede Angabe optional; Unbekanntes wird als Lücke benannt statt angenommen." },
++    ],
++    example: `curl -X POST -H "Authorization: Bearer $KEY" \\
++  -H "content-type: application/json" \\
++  -d '{"inputs":{"kwp":60},"facts":{"ownerConstellation":"weg"}}' \\
++  ${API_BASE_URL_PLACEHOLDER}${API_PREFIX}/eligibility`,
++    responseExample: `{
++  "ok": true,
++  "verdict": "REQUIRES_REVIEW",
++  "findings": [ { "code": "weg_consent", "severity": "review", "message": "..." } ],
++  "missingData": ["Mess- und Zählerkonzept"],
++  "estimatedEffort": "mittel",
++  "nextPaidStep": { "offerCode": "et_eligibility", "requiredData": [...] }
++}`,
++    refuses: [{ code: "400 validation_error", when: "Eingaben unvollständig oder außerhalb des Bereichs" }],
++  },
++  {
++    method: "POST",
++    path: `${API_PREFIX}/messkonzept`,
++    summary: "Messkonzept, Zählerinventar und kritischer Pfad",
++    purpose:
++      "Leitet aus der Konstellation die Messvariante, das vollständige Zählerinventar mit Anzahl und Anforderung an Zählerstandsgangmessung, die Marktrollen und die geordnete Aufgabenliste ab.",
++    parameters: [
++      { name: "constellation.units", type: "integer", required: true, description: "Anzahl der Einheiten." },
++      { name: "constellation.kwp", type: "number", required: true, description: "Anlagengröße." },
++      { name: "constellation.gridConnection", type: "enum", required: false, description: "single_connection, per_unit_connection oder public_grid. Ohne diese Angabe lautet das Ergebnis not_determinable." },
++      { name: "constellation.storage", type: "enum", required: false, description: "none, planned oder existing." },
++    ],
++    example: `curl -X POST -H "Authorization: Bearer $KEY" \\
++  -H "content-type: application/json" \\
++  -d '{"constellation":{"units":24,"kwp":60,"gridConnection":"single_connection"}}' \\
++  ${API_BASE_URL_PLACEHOLDER}${API_PREFIX}/messkonzept`,
++    responseExample: `{
++  "ok": true,
++  "variant": "summenzaehler",
++  "meterCount": 26,
++  "meters": [ { "code": "unterzaehler", "count": 24, "intervalMetering": false } ],
++  "criticalPath": [ { "code": "messkonzept_submit", "owner": "Anlagenbetreiber" } ],
++  "confidence": "medium",
++  "disclaimer": "Vorschlag für die technische Ausgestaltung. ..."
++}`,
++    refuses: [{ code: "400 validation_error", when: "Unbekannter Wert für gridConnection oder storage" }],
++  },
++  {
++    method: "POST",
++    path: `${API_PREFIX}/allocation`,
++    summary: "Aufteilungsschlüssel, viertelstundengenau",
++    purpose:
++      "Verteilt die Erzeugung über die übergebenen Intervalle nach einem oder allen drei Schlüsseln. Zuordnung plus Einspeisung ergibt konstruktionsbedingt exakt die Erzeugung, in jedem Intervall.",
++    parameters: [
++      { name: "generationKwh", type: "number[]", required: true, description: "Erzeugung je Intervall in kWh." },
++      { name: "participants", type: "object[]", required: true, description: "Je Teilnehmer id, optional share, und consumptionKwh in derselben Länge wie generationKwh." },
++      { name: "key", type: "enum", required: false, description: "static, dynamic oder cascading. Weggelassen werden alle drei gerechnet und verglichen." },
++      { name: "includeSeries", type: "boolean", required: false, description: "Reihen je Intervall mitliefern." },
++    ],
++    example: `curl -X POST -H "Authorization: Bearer $KEY" \\
++  -H "content-type: application/json" \\
++  -d '{"generationKwh":[0,4,10,2],
++       "participants":[{"id":"a","share":0.5,"consumptionKwh":[1,1,1,1]},
++                       {"id":"b","share":0.5,"consumptionKwh":[1,5,5,1]}]}' \\
++  ${API_BASE_URL_PLACEHOLDER}${API_PREFIX}/allocation`,
++    responseExample: `{
++  "ok": true,
++  "runs": {
++    "static":    { "totals": { "allocatedKwh": 11, "feedInKwh": 5, "selfConsumptionRate": 0.6875 } },
++    "cascading": { "totals": { "allocatedKwh": 12, "feedInKwh": 4, "selfConsumptionRate": 0.75 } }
++  },
++  "recommendation": { "key": "dynamic", "additionalSelfConsumptionPoints": 6.25 }
++}`,
++    refuses: [
++      { code: "400 unsupported_input", when: "Eine Verbrauchsreihe passt nicht zur Erzeugungsreihe" },
++      { code: "400 unsupported_input", when: "Die Summe der Anteile überschreitet 100 %" },
++    ],
++  },
++  {
++    method: "POST",
++    path: `${API_PREFIX}/billing`,
++    summary: "Jahresabrechnung, in ganzen Cent",
++    purpose:
++      "Erzeugt je Teilnehmer eine Abrechnung aus gemessenen Mengen. Jede Summe ist die Summe der Positionen darüber, und die Antwort enthält eine unabhängige Rekonziliation, mit der ein Integrator das nachprüfen kann, ohne dem Erzeuger zu vertrauen.",
++    parameters: [
++      { name: "period", type: "object", required: true, description: "from und to als JJJJ-MM-TT, halboffen." },
++      { name: "tariff", type: "object", required: true, description: "Arbeitspreise und Grundpreis. Optional der örtliche Grundversorgungstarif für den Vergleich." },
++      { name: "participants", type: "object[]", required: true, description: "Je Teilnehmer allocatedKwh, gridDrawKwh, optional Abschläge und Zählernummer." },
++    ],
++    example: `curl -X POST -H "Authorization: Bearer $KEY" \\
++  -H "content-type: application/json" \\
++  -d '{"period":{"from":"2026-01-01","to":"2027-01-01"},
++       "tariff":{"mieterstromCtPerKwh":28,"reststromCtPerKwh":34,"grundpreisEurPerYear":120},
++       "participants":[{"id":"we-1","allocatedKwh":1200,"gridDrawKwh":1800}]}' \\
++  ${API_BASE_URL_PLACEHOLDER}${API_PREFIX}/billing`,
++    responseExample: `{
++  "ok": true,
++  "days": 365,
++  "statements": [ { "id": "we-1", "netCents": 108216, "grossCents": 128777, "balanceCents": 128777 } ],
++  "totals": { "grossCents": 128777 },
++  "reconciliation": { "ok": true, "failures": [] },
++  "conventions": ["Der Grundpreis wird taggenau anteilig berechnet (Tage im Zeitraum / 365)."]
++}`,
++    refuses: [
++      { code: "400 unsupported_input", when: "Der Zeitraum ist umgekehrt oder leer" },
++      { code: "400 unsupported_input", when: "Eine Teilnehmer-ID kommt mehrfach vor" },
++    ],
++  },
++  {
++    method: "GET",
++    path: `${MAKO_PREFIX}/grid`,
++    summary: "Das echte Viertelstundenraster eines Tages oder Zeitraums",
++    purpose:
++      "Liefert die tatsächliche Anzahl der Intervalle — 92, 96 oder 100 — abgeleitet aus dem Kalender, nicht angenommen. Der Endpunkt, mit dem sich eine bestehende Implementierung an den beiden Umstellungstagen prüfen lässt.",
++    parameters: [
++      { name: "date", type: "string", required: false, description: "Ein lokaler Tag als JJJJ-MM-TT." },
++      { name: "from / to", type: "string", required: false, description: "Halboffener Zeitraum. Entweder date oder from und to." },
++    ],
++    example: `curl -H "Authorization: Bearer $KEY" \\
++  "${API_BASE_URL_PLACEHOLDER}${MAKO_PREFIX}/grid?date=2026-10-25"`,
++    responseExample: `{
++  "ok": true,
++  "timezone": "Europe/Berlin",
++  "intervals": 100,
++  "days": [ { "date": "2026-10-25", "intervals": 100, "kind": "dst_long" } ],
++  "firstIntervalStart": "202610250000+02",
++  "lastIntervalStart":  "202610252345+01"
++}`,
++    refuses: [{ code: "400 unsupported_input", when: "Kein gültiges Datum oder umgekehrter Zeitraum" }],
++  },
++  {
++    method: "POST",
++    path: `${MAKO_PREFIX}/identifiers`,
++    summary: "Marktidentifikatoren prüfen, bevor etwas gesendet wird",
++    purpose:
++      "Prüft MaLo, MeLo, BDEW-Codenummern und EIC. Formatregeln werden zugesichert; Prüfziffernverfahren sind Veröffentlichungen Dritter und werden als algorithm_unverified gemeldet, solange die Umsetzung nicht gegen die Veröffentlichung geprüft ist.",
++    parameters: [
++      { name: "senderCode", type: "string", required: true, description: "BDEW-Codenummer des Absenders." },
++      { name: "receiverCode", type: "string", required: true, description: "BDEW-Codenummer des Empfängers." },
++      { name: "malo / melo / balancingAreaEic", type: "string", required: false, description: "Werden geprüft, wenn übergeben." },
++    ],
++    example: `curl -X POST -H "Authorization: Bearer $KEY" \\
++  -H "content-type: application/json" \\
++  -d '{"senderCode":"9999999999994","receiverCode":"8888888888888"}' \\
++  ${API_BASE_URL_PLACEHOLDER}${MAKO_PREFIX}/identifiers`,
++    responseExample: `{
++  "ok": true,
++  "valid": true,
++  "results": { "senderCode": { "format": "ok", "checkDigit": "algorithm_unverified" } },
++  "algorithms": [ { "id": "malo", "verified": false, "openQuestion": "..." } ]
++}`,
++    refuses: [{ code: "400 validation_error", when: "Pflichtfeld fehlt" }],
++  },
++  {
++    method: "POST",
++    path: `${MAKO_PREFIX}/mscons`,
++    summary: "MSCONS-Nachricht aus Viertelstundenwerten",
++    purpose:
++      "Baut die vollständige Übertragungsdatei. Segmentzählung und Kontrollreferenz werden aus dem Inhalt berechnet und in der Antwort aus der erzeugten Nachricht heraus nachgeprüft. Eine Reihe, die nicht zum Raster des Zeitraums passt, wird abgelehnt statt aufgefüllt.",
++    parameters: [
++      { name: "period", type: "object", required: true, description: "date, oder from und to." },
++      { name: "sender / receiver", type: "object", required: true, description: "Je BDEW-Codenummer." },
++      { name: "locations", type: "object[]", required: true, description: "Je Messlokation melo, direction, valuesKwh und optional statuses." },
++    ],
++    example: `curl -X POST -H "Authorization: Bearer $KEY" \\
++  -H "content-type: application/json" \\
++  -d '{"period":{"date":"2026-10-25"},
++       "sender":{"code":"9999999999994"},"receiver":{"code":"8888888888888"},
++       "locations":[{"melo":"${MELO_EXAMPLE}",
++                     "direction":"consumption","valuesKwh":[/* 100 Werte */]}]}' \\
++  ${API_BASE_URL_PLACEHOLDER}${MAKO_PREFIX}/mscons`,
++    responseExample: `{
++  "ok": true,
++  "message": "UNA:+.? 'UNB+UNOC:3+...'",
++  "bytes": 10879,
++  "grid": { "intervals": 100, "dstDays": [ { "date": "2026-10-25", "intervals": 100 } ] },
++  "syntax": { "ok": true, "messageCount": 1, "findings": [] },
++  "profile": { "messageType": "MSCONS", "verified": false }
++}`,
++    refuses: [
++      { code: "400 unsupported_input", when: "96 Werte für einen Tag mit 100 Viertelstunden — der Grund wird benannt" },
++      { code: "400 unsupported_input", when: "Eine Messlokation kommt für dieselbe Energierichtung mehrfach vor" },
++      { code: "400 unsupported_input", when: "Ein Identifikator ist formal ungültig" },
++    ],
++  },
++];
++
++/** Every path the documentation claims. Used by the drift test. */
++export function documentedPaths(): string[] {
++  return API_ENDPOINTS.map((e) => e.path);
++}
+diff --git a/shared/routes.ts b/shared/routes.ts
+new file mode 100644
+index 0000000..075f078
+--- /dev/null
++++ b/shared/routes.ts
+@@ -0,0 +1,299 @@
++/**
++ * shared/routes.ts
++ *
++ * The route manifest — one source of truth for every page this site serves.
++ *
++ * Everything that has to agree about routes reads from here: the router, the
++ * per-route document head, the sitemap, the internal link graph and the tests
++ * that check they have not drifted apart. Adding a page in one place and
++ * forgetting the other three is how a site ends up with pages Google cannot
++ * find and a sitemap listing pages that no longer exist.
++ *
++ * Each tool has its own route on purpose. A section inside a long page cannot
++ * be indexed, cannot be linked to from an answer, and cannot rank for the
++ * question it answers. The engines were already built; what they lacked was a
++ * door.
++ */
++
++export type RouteKind = "landing" | "tool" | "reference" | "legal" | "system";
++
++export type StructuredData = Record<string, unknown>;
++
++export type RouteDefinition = {
++  path: string;
++  kind: RouteKind;
++  /** Document title. Kept under ~60 characters so it is not truncated. */
++  title: string;
++  /** Meta description. 120–160 characters. */
++  description: string;
++  /** Short label for navigation and breadcrumbs. */
++  navLabel: string;
++  /**
++   * The question this page exists to answer, in the words someone would use.
++   * Written down because a page without one is a page with no reason to rank.
++   */
++  answers: string;
++  /** Included in the sitemap. */
++  indexable: boolean;
++  changefreq: "daily" | "weekly" | "monthly" | "yearly";
++  priority: number;
++  /** Routes a reader of this page most plausibly needs next. */
++  relatedPaths: string[];
++  /** JSON-LD emitted into this page's head, beyond the site-wide graph. */
++  structuredData?: StructuredData;
++};
++
++const ORIGIN_FALLBACK = "https://energie-teilen-site.vercel.app";
++
++/** The public origin. Overridden at build time by APP_URL. */
++export function siteOrigin(): string {
++  const raw =
++    (typeof process !== "undefined" ? process.env?.APP_URL : undefined) ?? ORIGIN_FALLBACK;
++  return raw.replace(/\/+$/, "");
++}
++
++export function absoluteUrl(path: string): string {
++  return `${siteOrigin()}${path === "/" ? "/" : path}`;
++}
++
++// ============================================================================
++// ROUTES
++// ============================================================================
++
++export const ROUTES: RouteDefinition[] = [
++  {
++    path: "/",
++    kind: "landing",
++    title: "Energie Teilen — Mieterstrom rechnen, prüfen, umsetzen",
++    description:
++      "Wirtschaftlichkeit, Messkonzept, Aufteilungsschlüssel und Marktkommunikation für lokale Energieprojekte. Kostenlose Rechner, dokumentierte Annahmen, bezahlte Pilotaufnahme.",
++    navLabel: "Start",
++    answers: "Lohnt sich mein Mieterstromprojekt, und was ist der nächste Schritt?",
++    indexable: true,
++    changefreq: "weekly",
++    priority: 1.0,
++    relatedPaths: ["/rechner", "/messkonzept", "/aufteilungsschluessel"],
++  },
++  {
++    path: "/rechner",
++    kind: "tool",
++    title: "Mieterstrom-Rechner — Rendite, Amortisation, NPV",
++    description:
++      "Drei Szenarien mit dokumentierter Herkunft jeder Annahme: Amortisation, Kapitalwert, interner Zinsfuß und CO2. Kostenlos, ohne Anmeldung, Bericht als PDF.",
++    navLabel: "Rechner",
++    answers: "Rechnet sich eine PV-Anlage mit Mieterstrom in meinem Gebäude?",
++    indexable: true,
++    changefreq: "weekly",
++    priority: 0.9,
++    relatedPaths: ["/messkonzept", "/aufteilungsschluessel", "/"],
++    structuredData: {
++      "@type": "SoftwareApplication",
++      name: "Mieterstrom-Rechner",
++      applicationCategory: "FinanceApplication",
++      operatingSystem: "Web",
++      offers: { "@type": "Offer", price: "0", priceCurrency: "EUR" },
++      featureList: [
++        "Drei Szenarien parallel",
++        "Kapitalwert, interner Zinsfuß, Amortisation",
++        "Herkunft jeder Annahme ausgewiesen",
++        "Bericht als PDF",
++      ],
++    },
++  },
++  {
++    path: "/messkonzept",
++    kind: "tool",
++    title: "Messkonzept-Generator für Mieterstrom und Gebäudeversorgung",
++    description:
++      "Welches Messkonzept passt zu Ihrer Konstellation? Summenzähler, Einzelzähler oder Viertelstundenbilanzierung — mit Zählerinventar, Marktrollen und kritischem Pfad.",
++    navLabel: "Messkonzept",
++    answers: "Welches Messkonzept braucht mein Projekt und wie viele Zähler sind das?",
++    indexable: true,
++    changefreq: "monthly",
++    priority: 0.9,
++    relatedPaths: ["/aufteilungsschluessel", "/marktkommunikation", "/rechner"],
++    structuredData: {
++      "@type": "HowTo",
++      name: "Messkonzept für ein Mieterstromprojekt bestimmen",
++      step: [
++        { "@type": "HowToStep", name: "Netzanschlusssituation klären" },
++        { "@type": "HowToStep", name: "Zählerinventar ableiten" },
++        { "@type": "HowToStep", name: "Marktrollen besetzen" },
++        { "@type": "HowToStep", name: "Messkonzept beim Netzbetreiber einreichen" },
++      ],
++    },
++  },
++  {
++    path: "/aufteilungsschluessel",
++    kind: "tool",
++    title: "Aufteilungsschlüssel berechnen und vergleichen",
++    description:
++      "Statisch, dynamisch oder mit Nachverteilung: welcher Schlüssel wie viel Strom bei den Teilnehmern lässt. Viertelstundengenau gerechnet, Energiebilanz exakt geschlossen.",
++    navLabel: "Aufteilung",
++    answers: "Welcher Aufteilungsschlüssel bringt den Teilnehmern am meisten?",
++    indexable: true,
++    changefreq: "monthly",
++    priority: 0.9,
++    relatedPaths: ["/messkonzept", "/marktkommunikation", "/rechner"],
++    structuredData: {
++      "@type": "SoftwareApplication",
++      name: "Aufteilungsschlüssel-Vergleich",
++      applicationCategory: "UtilitiesApplication",
++      operatingSystem: "Web",
++      offers: { "@type": "Offer", price: "0", priceCurrency: "EUR" },
++    },
++  },
++  {
++    path: "/marktkommunikation",
++    kind: "tool",
++    title: "MSCONS und das Viertelstundenraster — 92, 96 oder 100",
++    description:
++      "Zweimal im Jahr hat ein Tag nicht 96 Viertelstunden. Erzeugte MSCONS-Nachricht mit geprüfter Syntax, korrektem Zeitraster und maskierten OBIS-Kennzahlen.",
++    navLabel: "Marktkommunikation",
++    answers: "Wie viele Viertelstunden hat der Tag der Zeitumstellung, und wie sieht die Nachricht aus?",
++    indexable: true,
++    changefreq: "monthly",
++    priority: 0.85,
++    relatedPaths: ["/api", "/messkonzept", "/aufteilungsschluessel"],
++    structuredData: {
++      "@type": "TechArticle",
++      headline: "Das Viertelstundenraster der Zeitumstellung in der Marktkommunikation",
++      about: ["MSCONS", "EDIFACT", "Zeitumstellung", "Marktkommunikation"],
++    },
++  },
++  {
++    path: "/api",
++    kind: "reference",
++    title: "API — dieselbe Engine hinter einem Schlüssel",
++    description:
++      "Neun Endpunkte für Wirtschaftlichkeit, Qualifizierung, Messkonzept, Aufteilung, Abrechnung und Marktkommunikation. Jede Antwort mit Modellstempel und Herkunft.",
++    navLabel: "API",
++    answers: "Kann ich diese Berechnungen in mein eigenes System einbauen?",
++    indexable: true,
++    changefreq: "monthly",
++    priority: 0.8,
++    relatedPaths: ["/marktkommunikation", "/messkonzept", "/"],
++    structuredData: {
++      "@type": "TechArticle",
++      headline: "Energie Teilen API v1",
++      about: ["API", "Mieterstrom", "Marktkommunikation", "MSCONS"],
++    },
++  },
++  {
++    path: "/impressum",
++    kind: "legal",
++    title: "Impressum",
++    description:
++      "Anbieterkennzeichnung, Kontaktangaben, Registereintrag und Umsatzsteuer-Identifikationsnummer des Betreibers dieser Website.",
++    navLabel: "Impressum",
++    answers: "Wer betreibt diese Seite?",
++    indexable: true,
++    changefreq: "yearly",
++    priority: 0.3,
++    relatedPaths: ["/datenschutz", "/agb"],
++  },
++  {
++    path: "/datenschutz",
++    kind: "legal",
++    title: "Datenschutzerklärung",
++    description:
++      "Welche Daten diese Website verarbeitet, wozu, auf welcher Rechtsgrundlage und wie lange.",
++    navLabel: "Datenschutz",
++    answers: "Was passiert mit meinen Daten?",
++    indexable: true,
++    changefreq: "yearly",
++    priority: 0.3,
++    relatedPaths: ["/impressum", "/agb"],
++  },
++  {
++    path: "/agb",
++    kind: "legal",
++    title: "Allgemeine Geschäftsbedingungen",
++    description:
++      "Bedingungen für die kostenpflichtige Pilotaufnahme: Leistungsgegenstand je Stufe, Vertragsschluss, Vergütung, Mitwirkung und Nutzungsrechte.",
++    navLabel: "AGB",
++    answers: "Zu welchen Bedingungen wird die Pilotaufnahme erbracht?",
++    indexable: true,
++    changefreq: "yearly",
++    priority: 0.3,
++    relatedPaths: ["/impressum", "/datenschutz"],
++  },
++  {
++    path: "/404",
++    kind: "system",
++    title: "Seite nicht gefunden",
++    description:
++      "Die aufgerufene Adresse führt ins Leere. Von hier aus geht es direkt zu den Rechnern und zur Pilotaufnahme.",
++    navLabel: "404",
++    answers: "—",
++    indexable: false,
++    changefreq: "yearly",
++    priority: 0.0,
++    relatedPaths: ["/"],
++  },
++];
++
++export const ROUTE_BY_PATH: Record<string, RouteDefinition> = Object.fromEntries(
++  ROUTES.map((r) => [r.path, r]),
++);
++
++export function routeFor(path: string): RouteDefinition | null {
++  const normalised = path.length > 1 ? path.replace(/\/+$/, "") : path;
++  return ROUTE_BY_PATH[normalised] ?? null;
++}
++
++/** Routes that belong in the sitemap. */
++export function indexableRoutes(): RouteDefinition[] {
++  return ROUTES.filter((r) => r.indexable);
++}
++
++/** The tools, in the order they appear in navigation. */
++export function toolRoutes(): RouteDefinition[] {
++  return ROUTES.filter((r) => r.kind === "tool");
++}
++
++/**
++ * Everything the primary navigation offers: the tools plus the reference.
++ *
++ * Separate from toolRoutes() because the API reference is not a tool but is
++ * exactly what a technical evaluator is looking for, and leaving it out of the
++ * navigation made it unreachable except by typing the URL.
++ */
++export function navRoutes(): RouteDefinition[] {
++  return ROUTES.filter((r) => r.kind === "tool" || r.kind === "reference");
++}
++
++// ============================================================================
++// SITEMAP
++// ============================================================================
++
++/**
++ * Generated from the manifest rather than maintained by hand, so it cannot
++ * list a page that does not exist or omit one that does.
++ */
++export function buildSitemap(lastModified: string): string {
++  const urls = indexableRoutes()
++    .map(
++      (r) =>
++        `  <url>\n` +
++        `    <loc>${absoluteUrl(r.path)}</loc>\n` +
++        `    <lastmod>${lastModified}</lastmod>\n` +
++        `    <changefreq>${r.changefreq}</changefreq>\n` +
++        `    <priority>${r.priority.toFixed(1)}</priority>\n` +
++        `  </url>`,
++    )
++    .join("\n");
++
++  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>\n`;
++}
++
++export function buildRobots(): string {
++  return [
++    "User-agent: *",
++    "Allow: /",
++    "",
++    "# Nothing here is behind a login, and the calculators are the point.",
++    `Sitemap: ${absoluteUrl("/sitemap.xml")}`,
++    "",
++  ].join("\n");
++}
+-- 
+2.43.0
+
