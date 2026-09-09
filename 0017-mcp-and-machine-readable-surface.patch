@@ -1,0 +1,3418 @@
+From ccae518facefbb8ee5ea77cd44e7fd8e26bc3a5a Mon Sep 17 00:00:00 2001
+From: Vincenzo Grimaldi <vince.ceccarelli@gmail.com>
+Date: Wed, 9 Sep 2026 19:45:36 +0000
+Subject: [PATCH 17/17] feat(mcp): the engines as callable tools, and a
+ machine-readable surface
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Being found gets a page mentioned. Being callable gets it used. Every
+engine here was already correct and already documented for people; none of
+it was reachable by a model that wanted to run a calculation rather than
+read about one.
+
+An MCP server at /mcp
+
+  Streamable HTTP, JSON-RPC 2.0, protocol revision 2025-06-18. Eight
+  read-only tools: economics, eligibility, metering concept, allocation,
+  billing, the quarter-hour grid, market identifiers, MSCONS. Single
+  requests and batches; notifications answered 202 with no body; GET
+  declined with 405 because this server never initiates messages, so a
+  stream would cost a client a connection for nothing.
+
+  server/api-v1.ts is refactored so each endpoint is a pure handler over a
+  ResultSink, and dispatchApiV1() runs those handlers in process. MCP does
+  not call the API over HTTP and does not reimplement it — both surfaces
+  execute the same function. e2e/mcp.spec.ts asserts that for all eight
+  tools by comparing normalised responses byte for byte, so a change that
+  made them diverge fails rather than ships.
+
+  Refusals travel as tool results, not protocol errors: 96 values on the
+  100-interval day comes back isError with unsupported_input and the reason,
+  which an agent can read and correct. The instructions returned by
+  initialize state the three things that are true here and guessed
+  everywhere else — the grid is 92/96/100, a refusal is a correct answer,
+  and nothing here rules on legal admissibility.
+
+Schemas that cannot drift from the validator
+
+  toJsonSchema() was hand-written against Zod 3 and threw on every tool
+  under Zod 4; tools/list was unusable. It now delegates to Zod's own
+  converter and asserts the result is an object schema. The published
+  OpenAPI request bodies, the GET query parameters and the tool list in
+  /.well-known/mcp.json are all generated from those same schemas, so the
+  spec an agent reads is the contract the server enforces.
+
+  The build scripts no longer scrape TypeScript with regular expressions.
+  scripts/load-manifests.mjs bundles the real modules with esbuild and
+  executes them, which removes the failure where a reformatted manifest
+  silently publishes something other than what the server runs.
+
+/mcp was routed at the page shell in production
+
+  vercel.json rewrote only /api/* to the function, so /mcp would have
+  returned index.html with status 200 to an MCP client — a failure that
+  passes every local test. It is now routed at the server and excluded from
+  caches, and client/src/lib/deployment.test.ts evaluates the rewrite rules
+  against every endpoint so the next one cannot be missed.
+
+Answers a model can quote
+
+  shared/faq.ts holds the questions this codebase can answer precisely,
+  with the answers: the clock-change grid and why an annual total proves
+  nothing, what decides a metering concept, why the three allocation keys
+  differ, what the API refuses and why. They render on the page, they are
+  emitted as FAQPage structured data, and they are inlined into
+  /llms-full.txt. Tests assert no answer claims legal admissibility and no
+  answer cites a statute, because no citation here has been verified.
+
+  Documents other than the landing page were copying the landing page's
+  FAQPage and HowTo, asserting one @id at several URLs. Page-level entities
+  now belong to their own page. /rechner serves the landing page under a
+  second URL; it is marked as an alias, points its canonical at the page it
+  duplicates and leaves the sitemap, instead of competing with it.
+
+  robots.txt names nineteen AI crawlers explicitly and allows them.
+  robots.txt now has one owner: two scripts were writing it, and the richer
+  version survived only because of the order they happened to run in.
+
+  A documented Messlokations-ID in the API reference was 31 characters
+  where the engine requires 33 — the first example a developer copies was
+  one the engine refuses. Fixed, with a test over every documented example.
+
+567 unit tests, 468 end-to-end across three viewports.
+---
+ client/src/components/ToolPageLayout.tsx |  25 +
+ client/src/lib/deployment.test.ts        |  65 ++
+ client/src/lib/faq.test.ts               |  77 +++
+ client/src/lib/head.ts                   |   6 +-
+ client/src/lib/mcp.test.ts               | 183 +++++
+ client/src/lib/routes.test.ts            |  38 +-
+ e2e/discovery.spec.ts                    | 125 ++++
+ e2e/mcp.spec.ts                          | 288 ++++++++
+ package.json                             |   2 +-
+ scripts/build-discovery.mjs              | 414 ++++++++++++
+ scripts/build-static.mjs                 | 124 ++--
+ scripts/load-manifests.mjs               |  45 ++
+ scripts/manifest-entry.ts                |  19 +
+ server/api-v1.ts                         | 815 +++++++++++++----------
+ server/index.ts                          |  13 +-
+ server/mcp-path.ts                       |  12 +
+ server/mcp.ts                            | 216 ++++++
+ shared/api-contract.ts                   |  27 +
+ shared/api-reference.ts                  |   2 +-
+ shared/faq.ts                            | 126 ++++
+ shared/mcp.ts                            | 243 +++++++
+ shared/routes.ts                         |  20 +-
+ vercel.json                              |  29 +
+ 23 files changed, 2505 insertions(+), 409 deletions(-)
+ create mode 100644 client/src/lib/deployment.test.ts
+ create mode 100644 client/src/lib/faq.test.ts
+ create mode 100644 client/src/lib/mcp.test.ts
+ create mode 100644 e2e/mcp.spec.ts
+ create mode 100644 scripts/build-discovery.mjs
+ create mode 100644 scripts/load-manifests.mjs
+ create mode 100644 scripts/manifest-entry.ts
+ create mode 100644 server/mcp-path.ts
+ create mode 100644 server/mcp.ts
+ create mode 100644 shared/faq.ts
+ create mode 100644 shared/mcp.ts
+
+diff --git a/client/src/components/ToolPageLayout.tsx b/client/src/components/ToolPageLayout.tsx
+index 1e32eaf..d2cca9e 100644
+--- a/client/src/components/ToolPageLayout.tsx
++++ b/client/src/components/ToolPageLayout.tsx
+@@ -3,6 +3,7 @@ import { ArrowRight } from "lucide-react";
+ import Header from "@/components/Header";
+ import Footer from "@/components/Footer";
+ import { routeFor, type RouteDefinition } from "../../../shared/routes";
++import { faqFor } from "../../../shared/faq";
+ 
+ /**
+  * ToolPageLayout
+@@ -32,6 +33,7 @@ export function ToolPageLayout({
+   aside?: React.ReactNode;
+ }) {
+   const route = routeFor(path);
++  const faq = faqFor(path);
+   const related = (route?.relatedPaths ?? [])
+     .map((p) => routeFor(p))
+     .filter((r): r is RouteDefinition => r !== null);
+@@ -68,6 +70,29 @@ export function ToolPageLayout({
+ 
+         {aside ? <div className="mt-14 max-w-3xl">{aside}</div> : null}
+ 
++        {faq.length > 0 ? (
++          <section className="mt-16 max-w-3xl border-t border-border/60 pt-10">
++            <h2 className="font-display text-xl font-semibold tracking-[-0.02em] text-foreground">
++              Häufige Fragen
++            </h2>
++            {/*
++              These answers are also published as structured data. They are
++              rendered here because an answer that exists only in a metadata
++              block is one a reader cannot check — and a page that says one
++              thing to a crawler and another to a person deserves neither's
++              trust.
++            */}
++            <dl className="mt-6 space-y-6">
++              {faq.map((entry) => (
++                <div key={entry.question} className="space-y-2">
++                  <dt className="font-medium leading-7 text-foreground">{entry.question}</dt>
++                  <dd className="text-sm leading-7 text-muted-foreground">{entry.answer}</dd>
++                </div>
++              ))}
++            </dl>
++          </section>
++        ) : null}
++
+         {related.length > 0 ? (
+           <section className="mt-16 border-t border-border/60 pt-10">
+             <h2 className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+diff --git a/client/src/lib/deployment.test.ts b/client/src/lib/deployment.test.ts
+new file mode 100644
+index 0000000..32cca46
+--- /dev/null
++++ b/client/src/lib/deployment.test.ts
+@@ -0,0 +1,65 @@
++import { describe, it, expect } from "vitest";
++import { readFileSync } from "fs";
++import { dirname, join } from "path";
++import { fileURLToPath } from "url";
++
++import { MCP_PATH } from "../../../server/mcp-path";
++import { API_V1_ENDPOINTS } from "../../../shared/api-contract";
++import { indexableRoutes } from "../../../shared/routes";
++
++/**
++ * The deployment configuration is code.
++ *
++ * Everything else in this repository is tested against a server running on
++ * this machine, where every path reaches Express. In production a rewrite
++ * decides that, and a path that is not routed at the function is answered with
++ * the single-page shell — a 200, with HTML, to a client expecting JSON. That
++ * failure passes every local test, which is exactly why it is asserted here.
++ */
++
++// Resolved from this file, not the working directory, so the test means the
++// same thing however it is invoked.
++const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
++
++const vercel = JSON.parse(readFileSync(join(REPO_ROOT, "vercel.json"), "utf8")) as {
++  rewrites: { source: string; destination: string }[];
++  headers: { source: string; headers: { key: string; value: string }[] }[];
++};
++
++/** What the deployment would answer a request for this path with. */
++function destinationFor(path: string): string {
++  for (const rule of vercel.rewrites) {
++    const re = new RegExp(`^${rule.source}$`);
++    if (re.test(path)) return rule.destination;
++  }
++  return "(no rule)";
++}
++
++describe("vercel routing", () => {
++  it("sends every v1 endpoint to the server", () => {
++    for (const endpoint of API_V1_ENDPOINTS) {
++      expect(destinationFor(endpoint), endpoint).toBe("/api");
++    }
++  });
++
++  it("sends the MCP endpoint to the server, not the page shell", () => {
++    // Without this rule /mcp returns index.html with status 200, and an MCP
++    // client reports a parse error rather than a routing mistake.
++    expect(destinationFor(MCP_PATH)).toBe("/api");
++  });
++
++  it("still sends application routes to the page shell", () => {
++    for (const route of indexableRoutes()) {
++      if (route.path.startsWith("/api")) continue;
++      expect(destinationFor(route.path), route.path).toBe("/index.html");
++    }
++  });
++
++  it("keeps MCP responses out of caches", () => {
++    // A cached tool result is a wrong tool result the moment an input changes.
++    const rule = vercel.headers.find((h) => h.source === MCP_PATH);
++    expect(rule, "no header rule for /mcp").toBeDefined();
++    const cacheControl = rule!.headers.find((h) => h.key === "Cache-Control")?.value ?? "";
++    expect(cacheControl).toContain("no-store");
++  });
++});
+diff --git a/client/src/lib/faq.test.ts b/client/src/lib/faq.test.ts
+new file mode 100644
+index 0000000..c5db272
+--- /dev/null
++++ b/client/src/lib/faq.test.ts
+@@ -0,0 +1,77 @@
++import { describe, it, expect } from "vitest";
++
++import { FAQ, allFaqEntries, faqFor } from "../../../shared/faq";
++import { indexableRoutes, routeFor } from "../../../shared/routes";
++
++/**
++ * The FAQ is published three ways: rendered on the page, emitted as FAQPage
++ * structured data, and inlined into the long-form index at /llms-full.txt. All
++ * three read this module, so what is asserted here holds for all three.
++ */
++
++describe("the published questions", () => {
++  it("attaches every section to a route that exists and is indexable", () => {
++    const indexable = new Set(indexableRoutes().map((r) => r.path));
++    for (const section of FAQ) {
++      expect(routeFor(section.path), section.path).not.toBeNull();
++      expect(indexable.has(section.path), `${section.path} is indexable`).toBe(true);
++    }
++  });
++
++  it("asks each question once across the whole site", () => {
++    // The same question answered at two URLs splits whatever ranking either
++    // would have earned, and leaves two answers to keep in step.
++    const questions = allFaqEntries().map((e) => e.question);
++    expect(new Set(questions).size).toBe(questions.length);
++  });
++
++  it("names one section per route", () => {
++    const paths = FAQ.map((s) => s.path);
++    expect(new Set(paths).size).toBe(paths.length);
++  });
++
++  it("actually asks a question", () => {
++    for (const entry of allFaqEntries()) expect(entry.question.trim()).toMatch(/\?$/);
++  });
++
++  it("answers at length enough to be quotable on its own", () => {
++    // An answer lifted out of context still has to be true and complete. A
++    // one-line answer gets paraphrased into something this codebase did not say.
++    for (const entry of allFaqEntries()) {
++      expect(entry.answer.length, entry.question).toBeGreaterThan(140);
++    }
++  });
++
++  it("claims no legal admissibility anywhere", () => {
++    // The engines assess economic and structural conditions. An answer that
++    // drifted into "is permitted" would be the single most damaging sentence
++    // on the site.
++    for (const entry of allFaqEntries()) {
++      expect(entry.answer, entry.question).not.toMatch(/ist (rechtlich )?zulässig|ist erlaubt|ist gestattet/i);
++    }
++  });
++
++  it("cites no statute, because no citation here has been checked", () => {
++    // Verification gate: a paragraph reference is a claim about a published
++    // text. Until that text has been read against the code, the answer says
++    // what the code does instead.
++    for (const entry of allFaqEntries()) {
++      expect(entry.answer, entry.question).not.toMatch(/§|\bEEG\b|\bEnWG\b|\bMsbG\b/);
++    }
++  });
++
++  it("states the interval counts that make this site worth citing", () => {
++    const grid = faqFor("/marktkommunikation").map((e) => e.answer).join(" ");
++    expect(grid).toContain("92");
++    expect(grid).toContain("96");
++    expect(grid).toContain("100");
++    expect(grid).toContain("35.040");
++  });
++
++  it("covers every tool page", () => {
++    for (const route of indexableRoutes()) {
++      if (route.kind !== "tool" && route.kind !== "reference") continue;
++      expect(faqFor(route.path).length, `${route.path} has no questions`).toBeGreaterThan(0);
++    }
++  });
++});
+diff --git a/client/src/lib/head.ts b/client/src/lib/head.ts
+index f7a2ada..90d73b6 100644
+--- a/client/src/lib/head.ts
++++ b/client/src/lib/head.ts
+@@ -13,7 +13,7 @@
+  * is called.
+  */
+ 
+-import { absoluteUrl, routeFor, type RouteDefinition } from "../../../shared/routes";
++import { absoluteUrl, canonicalPathFor, routeFor, type RouteDefinition } from "../../../shared/routes";
+ 
+ const OG_IMAGE = "/og-image.png";
+ 
+@@ -50,7 +50,9 @@ export function applyRouteHead(route: RouteDefinition): void {
+   setMeta('meta[name="twitter:title"]', "name", "twitter:title", route.title);
+   setMeta('meta[name="twitter:description"]', "name", "twitter:description", route.description);
+ 
+-  setLink("canonical", absoluteUrl(route.path));
++  // Follow an alias: a second URL for the same page declares the page it
++  // duplicates, not itself.
++  setLink("canonical", absoluteUrl(canonicalPathFor(route.path)));
+ }
+ 
+ /** Apply the head for a path, falling back to the landing route. */
+diff --git a/client/src/lib/mcp.test.ts b/client/src/lib/mcp.test.ts
+new file mode 100644
+index 0000000..1455b4b
+--- /dev/null
++++ b/client/src/lib/mcp.test.ts
+@@ -0,0 +1,183 @@
++import { describe, it, expect } from "vitest";
++import { z } from "zod";
++
++import {
++  JSON_RPC_ERRORS,
++  JsonRpcRequestSchema,
++  MCP_INSTRUCTIONS,
++  MCP_PROTOCOL_VERSION,
++  MCP_SERVER_INFO,
++  MCP_TOOLS,
++  jsonRpcError,
++  jsonRpcResult,
++  toJsonSchema,
++  toolByName,
++  toolListPayload,
++} from "../../../shared/mcp";
++import { API_V1_ENDPOINTS } from "../../../shared/api-contract";
++import { API_ENDPOINTS, documentedPaths } from "../../../shared/api-reference";
++import { MELO_LENGTH } from "../../../shared/market-ids";
++
++describe("mcp server identity", () => {
++  it("pins the protocol revision it was written against", () => {
++    // An agent negotiates on this string. Changing it is a deliberate act, not
++    // a side effect of editing something nearby.
++    expect(MCP_PROTOCOL_VERSION).toBe("2025-06-18");
++    expect(MCP_SERVER_INFO.name).toBe("energie-teilen");
++  });
++
++  it("tells the caller the three things that make these tools different", () => {
++    // The instructions are the only place an agent learns the contract before
++    // it calls anything. Each of these is a fact that changes how the tools
++    // must be used, and losing one silently is the failure this guards.
++    expect(MCP_INSTRUCTIONS).toContain("92");
++    expect(MCP_INSTRUCTIONS).toContain("100");
++    expect(MCP_INSTRUCTIONS).toMatch(/VERWEIGERN|Verweigerung/);
++    expect(MCP_INSTRUCTIONS).toMatch(/rechtlich/i);
++  });
++});
++
++describe("the tool set", () => {
++  it("names every tool once, in snake_case", () => {
++    const names = MCP_TOOLS.map((t) => t.name);
++    expect(new Set(names).size).toBe(names.length);
++    for (const n of names) expect(n).toMatch(/^[a-z][a-z0-9_]*$/);
++  });
++
++  it("points every tool at an endpoint that exists", () => {
++    for (const t of MCP_TOOLS) {
++      expect(API_V1_ENDPOINTS as readonly string[]).toContain(t.endpoint);
++    }
++  });
++
++  it("points every tool at an endpoint that is publicly documented", () => {
++    // A tool an agent can call but a developer cannot read about is a trap.
++    for (const t of MCP_TOOLS) expect(documentedPaths()).toContain(t.endpoint);
++  });
++
++  it("agrees with the documentation about the HTTP method", () => {
++    for (const t of MCP_TOOLS) {
++      const doc = API_ENDPOINTS.find((e) => e.path === t.endpoint);
++      expect(doc, `no documentation for ${t.endpoint}`).toBeDefined();
++      expect(doc!.method).toBe(t.method);
++    }
++  });
++
++  it("covers every computation except the metadata endpoint", () => {
++    // /meta describes the service; it is not a computation, so it is the one
++    // documented endpoint with no tool. Everything else must be callable.
++    const covered = new Set(MCP_TOOLS.map((t) => t.endpoint));
++    const uncovered = API_V1_ENDPOINTS.filter((e) => !covered.has(e));
++    expect(uncovered).toEqual(["/api/v1/meta"]);
++  });
++
++  it("declares every tool read-only, because none of them writes anything", () => {
++    for (const t of MCP_TOOLS) expect(t.readOnly).toBe(true);
++  });
++
++  it("gives every tool a description long enough to choose it by", () => {
++    // A model picks a tool from this string alone. One line is not enough to
++    // convey what the tool refuses to do.
++    for (const t of MCP_TOOLS) expect(t.description.length).toBeGreaterThan(180);
++  });
++});
++
++describe("toJsonSchema", () => {
++  it("emits an object schema with the required keys marked", () => {
++    const schema = toJsonSchema(
++      z.object({ a: z.string().min(1), b: z.number().int().optional() }),
++    );
++    expect(schema.type).toBe("object");
++    expect(schema.required).toEqual(["a"]);
++    expect((schema.properties as Record<string, { type: string }>).a.type).toBe("string");
++  });
++
++  it("drops the dialect marker, which MCP carries itself", () => {
++    expect(toJsonSchema(z.object({ a: z.string() })).$schema).toBeUndefined();
++  });
++
++  it("refuses a schema that is not an object", () => {
++    // MCP tool arguments are always named. A tool whose schema said otherwise
++    // would be listed and then fail on every call.
++    expect(() => toJsonSchema(z.string())).toThrow(/must be an object/);
++  });
++
++  it("converts every tool schema to a usable object schema", () => {
++    for (const t of MCP_TOOLS) {
++      const schema = toJsonSchema(t.inputSchema);
++      expect(schema.type, t.name).toBe("object");
++      expect(Object.keys(schema.properties as object).length, t.name).toBeGreaterThan(0);
++    }
++  });
++
++  it("carries the constraints the validator actually enforces", () => {
++    // The published schema and the runtime check must be the same statement.
++    // A date pattern in the schema is how an agent avoids a round trip.
++    const grid = toolByName("market_grid")!;
++    const props = toJsonSchema(grid.inputSchema).properties as Record<string, { pattern?: string }>;
++    expect(props.date.pattern).toBeDefined();
++    expect(new RegExp(props.date.pattern!).test("2026-10-25")).toBe(true);
++    expect(new RegExp(props.date.pattern!).test("25.10.2026")).toBe(false);
++  });
++});
++
++describe("toolListPayload", () => {
++  it("annotates every tool as read-only, idempotent and closed-world", () => {
++    for (const t of toolListPayload().tools) {
++      expect(t.annotations.readOnlyHint).toBe(true);
++      expect(t.annotations.idempotentHint).toBe(true);
++      // Nothing here reaches out to the open web; results depend only on input.
++      expect(t.annotations.openWorldHint).toBe(false);
++    }
++  });
++
++  it("lists exactly the declared tools", () => {
++    expect(toolListPayload().tools.map((t) => t.name)).toEqual(MCP_TOOLS.map((t) => t.name));
++  });
++});
++
++describe("toolByName", () => {
++  it("returns null rather than a near match", () => {
++    expect(toolByName("market_grid")?.name).toBe("market_grid");
++    expect(toolByName("market_gri")).toBeNull();
++    expect(toolByName("")).toBeNull();
++  });
++});
++
++describe("json-rpc envelope", () => {
++  it("accepts a call, a notification and a batch member", () => {
++    expect(JsonRpcRequestSchema.safeParse({ jsonrpc: "2.0", id: 1, method: "ping" }).success).toBe(true);
++    expect(JsonRpcRequestSchema.safeParse({ jsonrpc: "2.0", method: "notifications/initialized" }).success).toBe(true);
++    expect(JsonRpcRequestSchema.safeParse({ jsonrpc: "2.0", id: "a", method: "tools/list" }).success).toBe(true);
++  });
++
++  it("rejects an envelope from another protocol version", () => {
++    expect(JsonRpcRequestSchema.safeParse({ jsonrpc: "1.0", id: 1, method: "ping" }).success).toBe(false);
++    expect(JsonRpcRequestSchema.safeParse({ id: 1, method: "ping" }).success).toBe(false);
++  });
++
++  it("carries a null id when a request could not be identified", () => {
++    // JSON-RPC requires an id on the error even when the request had none.
++    expect(jsonRpcError(undefined, JSON_RPC_ERRORS.parseError, "kaputt").id).toBeNull();
++    expect(jsonRpcResult(7, { ok: true })).toMatchObject({ jsonrpc: "2.0", id: 7 });
++  });
++
++  it("uses the reserved code range", () => {
++    for (const code of Object.values(JSON_RPC_ERRORS)) {
++      expect(code).toBeLessThanOrEqual(-32000);
++      expect(code).toBeGreaterThanOrEqual(-32700);
++    }
++  });
++});
++
++describe("the documented examples are the examples that work", () => {
++  it("uses a Messlokations-ID the engine accepts", () => {
++    // A developer copies the example first. If the example is refused, the
++    // first thing they learn about the API is that it does not work.
++    for (const e of API_ENDPOINTS) {
++      for (const melo of e.example.match(/DE[0-9A-Z]{10,40}/g) ?? []) {
++        expect(melo.length, `${e.path} documents a ${melo.length}-character MeLo`).toBe(MELO_LENGTH);
++      }
++    }
++  });
++});
+diff --git a/client/src/lib/routes.test.ts b/client/src/lib/routes.test.ts
+index 74ee1b4..232d30f 100644
+--- a/client/src/lib/routes.test.ts
++++ b/client/src/lib/routes.test.ts
+@@ -7,6 +7,7 @@ import {
+   absoluteUrl,
+   buildRobots,
+   buildSitemap,
++  canonicalPathFor,
+   indexableRoutes,
+   routeFor,
+   navRoutes,
+@@ -122,14 +123,19 @@ describe("sitemap and robots", () => {
+     const xml = buildSitemap("2026-09-09");
+     for (const r of ROUTES) {
+       const url = absoluteUrl(r.path);
+-      if (r.indexable) expect(xml, `${r.path} in sitemap`).toContain(`<loc>${url}</loc>`);
+-      else expect(xml, `${r.path} not in sitemap`).not.toContain(`<loc>${url}</loc>`);
++      // An alias is indexable in the sense that it is a real page, but it is
++      // advertised under the URL it duplicates, not its own.
++      if (r.indexable && !r.aliasOf) {
++        expect(xml, `${r.path} in sitemap`).toContain(`<loc>${url}</loc>`);
++      } else {
++        expect(xml, `${r.path} not in sitemap`).not.toContain(`<loc>${url}</loc>`);
++      }
+     }
+   });
+ 
+   it("covers more than the legal pages", () => {
+     const nonLegal = indexableRoutes().filter((r) => r.kind !== "legal");
+-    expect(nonLegal.length, "indexable pages that are not legal boilerplate").toBeGreaterThanOrEqual(6);
++    expect(nonLegal.length, "indexable pages that are not legal boilerplate").toBeGreaterThanOrEqual(5);
+   });
+ 
+   it("is well-formed and carries a lastmod on every entry", () => {
+@@ -186,3 +192,29 @@ describe("the API reference matches the API", () => {
+     expect(calculate.parameters.find((p) => p.name === "inputs.kwp")?.required).toBe(true);
+   });
+ });
++
++describe("aliases", () => {
++  it("keeps an alias out of the sitemap while leaving the route reachable", () => {
++    // /rechner serves the landing page under a second URL. Both must work; only
++    // one may be advertised, or the two split whatever ranking either earns.
++    expect(routeFor("/rechner")).not.toBeNull();
++    expect(indexableRoutes().map((r) => r.path)).not.toContain("/rechner");
++    expect(buildSitemap()).not.toContain("/rechner<");
++  });
++
++  it("points every alias at a page that exists and is itself canonical", () => {
++    for (const route of ROUTES) {
++      if (!route.aliasOf) continue;
++      const target = routeFor(route.aliasOf);
++      expect(target, `${route.path} aliases a missing route`).not.toBeNull();
++      expect(target!.aliasOf, `${route.path} aliases another alias`).toBeUndefined();
++      expect(canonicalPathFor(route.path)).toBe(route.aliasOf);
++    }
++  });
++
++  it("leaves a real page pointing at itself", () => {
++    for (const route of indexableRoutes()) {
++      expect(canonicalPathFor(route.path), route.path).toBe(route.path);
++    }
++  });
++});
+diff --git a/e2e/discovery.spec.ts b/e2e/discovery.spec.ts
+index 559e9f1..c84b561 100644
+--- a/e2e/discovery.spec.ts
++++ b/e2e/discovery.spec.ts
+@@ -166,3 +166,128 @@ test.describe("the tools work on their own routes", () => {
+     }
+   });
+ });
++
++test.describe("the machine-readable surface", () => {
++  const FILES = [
++    { path: "/llms.txt", type: /text\/plain/ },
++    { path: "/llms-full.txt", type: /text\/plain/ },
++    { path: "/openapi.json", type: /application\/json/ },
++    { path: "/.well-known/mcp.json", type: /application\/json/ },
++    { path: "/mcp.json", type: /application\/json/ },
++    { path: "/ai.txt", type: /text\/plain/ },
++  ];
++
++  for (const file of FILES) {
++    test(`${file.path} is served`, async ({ request }) => {
++      const res = await request.get(file.path);
++      expect(res.status(), file.path).toBe(200);
++      expect(res.headers()["content-type"], file.path).toMatch(file.type);
++      expect((await res.text()).length, file.path).toBeGreaterThan(200);
++    });
++  }
++
++  test("llms.txt links only to pages that exist", async ({ request }) => {
++    // A model that follows a dead link from the index learns the site is
++    // unreliable, which is worse than not being indexed at all.
++    const txt = await (await request.get("/llms.txt")).text();
++    const paths = [...txt.matchAll(/\]\(https?:\/\/[^/)]+(\/[^)\s]*)\)/g)].map((m) => m[1]);
++    expect(paths.length).toBeGreaterThan(5);
++    for (const path of new Set(paths)) {
++      expect((await request.get(path)).status(), path).toBe(200);
++    }
++  });
++
++  test("llms-full.txt carries the facts, not just the links", async ({ request }) => {
++    const txt = await (await request.get("/llms-full.txt")).text();
++    // The three things that are true here and guessed everywhere else.
++    expect(txt).toContain("92");
++    expect(txt).toContain("100");
++    expect(txt).toMatch(/Cent/);
++    expect(txt).toMatch(/not_determinable|verweiger|Verweiger/);
++    expect(txt.length).toBeGreaterThan(8000);
++  });
++
++  test("openapi.json describes exactly the endpoints that exist", async ({ request }) => {
++    const spec = await (await request.get("/openapi.json")).json();
++    expect(spec.openapi).toMatch(/^3\.1/);
++    for (const path of [
++      "/api/v1/meta",
++      "/api/v1/calculate",
++      "/api/v1/eligibility",
++      "/api/v1/messkonzept",
++      "/api/v1/allocation",
++      "/api/v1/billing",
++      "/api/v1/mako/grid",
++      "/api/v1/mako/identifiers",
++      "/api/v1/mako/mscons",
++    ]) {
++      expect(Object.keys(spec.paths), `${path} in spec`).toContain(path);
++    }
++    // Every operation an agent might call must state how to authenticate and
++    // what a refusal looks like.
++    for (const [path, ops] of Object.entries(spec.paths as Record<string, Record<string, { responses: Record<string, unknown> }>>)) {
++      for (const [verb, op] of Object.entries(ops)) {
++        expect(op.responses["401"], `${verb} ${path} documents 401`).toBeTruthy();
++        expect(op.responses["400"], `${verb} ${path} documents 400`).toBeTruthy();
++      }
++    }
++    expect(spec.components.securitySchemes).toBeTruthy();
++  });
++
++  test("openapi.json publishes the schema the server enforces", async ({ request }) => {
++    const spec = await (await request.get("/openapi.json")).json();
++    // A spec with an empty request body teaches an agent nothing and costs it
++    // a round trip per guess.
++    const calculate = spec.paths["/api/v1/calculate"].post.requestBody.content["application/json"].schema;
++    expect(calculate.type).toBe("object");
++    expect(calculate.required).toContain("inputs");
++
++    const grid = spec.paths["/api/v1/mako/grid"].get;
++    expect(grid.parameters.map((p: { name: string }) => p.name)).toContain("date");
++  });
++
++  test("the MCP manifest points at an endpoint that answers", async ({ request }) => {
++    const manifest = await (await request.get("/.well-known/mcp.json")).json();
++    expect(manifest.transport.type).toBe("streamable-http");
++    expect(manifest.transport.url).toMatch(/\/mcp$/);
++    expect(manifest.authentication.type).toBe("bearer");
++    expect(manifest.tools.length).toBeGreaterThanOrEqual(8);
++    for (const tool of manifest.tools) {
++      // Every tool must also be reachable without MCP, so a plain HTTP client
++      // is not shut out.
++      expect(tool.httpEquivalent.path, tool.name).toMatch(/^\/api\/v1\//);
++      expect(tool.inputSchema.type, tool.name).toBe("object");
++    }
++  });
++
++  test("the root copy of the manifest matches the well-known copy", async ({ request }) => {
++    const wellKnown = await (await request.get("/.well-known/mcp.json")).text();
++    const root = await (await request.get("/mcp.json")).text();
++    expect(root).toBe(wellKnown);
++  });
++
++  test("robots.txt names the AI crawlers explicitly", async ({ request }) => {
++    // Several of these default to not crawling unless named. Being absent from
++    // this list is being absent from the answer.
++    const txt = await (await request.get("/robots.txt")).text();
++    for (const agent of [
++      "GPTBot",
++      "OAI-SearchBot",
++      "ChatGPT-User",
++      "ClaudeBot",
++      "Claude-User",
++      "PerplexityBot",
++      "Google-Extended",
++      "CCBot",
++    ]) {
++      expect(txt, `${agent} named`).toContain(agent);
++    }
++    expect(txt).not.toMatch(/^Disallow: \/$/m);
++  });
++
++  test("ai.txt states the terms rather than leaving them to be assumed", async ({ request }) => {
++    const txt = await (await request.get("/ai.txt")).text();
++    expect(txt).toMatch(/llms\.txt/);
++    expect(txt).toMatch(/openapi\.json/);
++  });
++});
+diff --git a/e2e/mcp.spec.ts b/e2e/mcp.spec.ts
+new file mode 100644
+index 0000000..3fc5590
+--- /dev/null
++++ b/e2e/mcp.spec.ts
+@@ -0,0 +1,288 @@
++import { test, expect, type APIRequestContext } from "@playwright/test";
++import { E2E_API_KEY } from "./fixtures";
++
++/**
++ * The MCP endpoint, exercised as an agent would exercise it.
++ *
++ * These tests are the reason an agent can be told to trust the tools: the
++ * protocol behaves, the schemas are honest, a refusal comes back as a refusal
++ * rather than a plausible number, and the answer over MCP is byte-for-byte the
++ * answer over HTTP.
++ */
++
++const auth = { Authorization: `Bearer ${E2E_API_KEY}` };
++const MELO = "DE000000000000000000000000012345A";
++
++type RpcOptions = { headers?: Record<string, string> };
++
++async function rpc(request: APIRequestContext, body: unknown, options: RpcOptions = {}) {
++  return request.post("/mcp", {
++    headers: { "content-type": "application/json", ...auth, ...(options.headers ?? {}) },
++    data: body,
++  });
++}
++
++async function call(request: APIRequestContext, name: string, args: unknown) {
++  const res = await rpc(request, {
++    jsonrpc: "2.0",
++    id: 1,
++    method: "tools/call",
++    params: { name, arguments: args },
++  });
++  expect(res.status()).toBe(200);
++  return (await res.json()).result;
++}
++
++test.describe("transport and authentication", () => {
++  test("refuses an unauthenticated call and says how to authenticate", async ({ request }) => {
++    const res = await request.post("/mcp", {
++      headers: { "content-type": "application/json" },
++      data: { jsonrpc: "2.0", id: 1, method: "tools/list" },
++    });
++    expect(res.status()).toBe(401);
++    // Without this header an MCP client cannot tell an auth failure from an
++    // outage, and retries instead of asking for a key.
++    expect(res.headers()["www-authenticate"]).toBeTruthy();
++  });
++
++  test("declines the server-initiated stream rather than leaving it open", async ({ request }) => {
++    // This server never pushes; a GET that hung would cost the client a
++    // connection for nothing.
++    const res = await request.get("/mcp", { headers: auth });
++    expect(res.status()).toBe(405);
++  });
++
++  test("answers a notification with 202 and no body", async ({ request }) => {
++    const res = await rpc(request, { jsonrpc: "2.0", method: "notifications/initialized" });
++    expect(res.status()).toBe(202);
++    expect((await res.body()).length).toBe(0);
++  });
++
++  test("answers a batch in one response, preserving ids", async ({ request }) => {
++    const res = await rpc(request, [
++      { jsonrpc: "2.0", id: "a", method: "ping" },
++      { jsonrpc: "2.0", id: "b", method: "tools/list" },
++    ]);
++    expect(res.status()).toBe(200);
++    const body = await res.json();
++    expect(Array.isArray(body)).toBe(true);
++    expect(body.map((m: { id: string }) => m.id)).toEqual(["a", "b"]);
++  });
++
++  test("names an unsupported method instead of failing silently", async ({ request }) => {
++    const body = await (await rpc(request, { jsonrpc: "2.0", id: 1, method: "resources/list" })).json();
++    expect(body.error.code).toBe(-32601);
++    expect(body.error.message).toContain("resources/list");
++  });
++
++  test("rejects a malformed envelope", async ({ request }) => {
++    const body = await (await rpc(request, { id: 1, method: "ping" })).json();
++    expect(body.error).toBeTruthy();
++  });
++});
++
++test.describe("initialize", () => {
++  test("returns the protocol version, the tool capability and the usage contract", async ({ request }) => {
++    const res = await rpc(request, {
++      jsonrpc: "2.0",
++      id: 1,
++      method: "initialize",
++      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } },
++    });
++    expect(res.status()).toBe(200);
++    const { result } = await res.json();
++    expect(result.protocolVersion).toBe("2025-06-18");
++    expect(result.capabilities.tools).toBeTruthy();
++    expect(result.serverInfo.name).toBe("energie-teilen");
++    // The instructions are where an agent learns that a refusal is a result.
++    expect(result.instructions).toMatch(/VERWEIGERN|Verweigerung/);
++    expect(result.instructions).toContain("100");
++  });
++});
++
++test.describe("tools/list", () => {
++  test("publishes a callable schema for every tool", async ({ request }) => {
++    const { result } = await (await rpc(request, { jsonrpc: "2.0", id: 1, method: "tools/list" })).json();
++    expect(result.tools.length).toBeGreaterThanOrEqual(8);
++    for (const tool of result.tools) {
++      expect(tool.inputSchema.type, tool.name).toBe("object");
++      expect(Object.keys(tool.inputSchema.properties ?? {}).length, tool.name).toBeGreaterThan(0);
++      expect(tool.annotations.readOnlyHint, tool.name).toBe(true);
++      expect(tool.annotations.openWorldHint, tool.name).toBe(false);
++    }
++  });
++
++  test("matches the tool list published at /.well-known/mcp.json", async ({ request }) => {
++    // An agent that reads the manifest and an agent that connects must be
++    // offered the same tools, or one of them is calling something that is not
++    // there.
++    const live = (await (await rpc(request, { jsonrpc: "2.0", id: 1, method: "tools/list" })).json()).result.tools;
++    const manifest = await (await request.get("/.well-known/mcp.json")).json();
++    expect(manifest.tools.map((t: { name: string }) => t.name).sort()).toEqual(
++      live.map((t: { name: string }) => t.name).sort(),
++    );
++    for (const t of manifest.tools) {
++      const match = live.find((l: { name: string }) => l.name === t.name);
++      expect(JSON.stringify(t.inputSchema), t.name).toBe(JSON.stringify(match.inputSchema));
++    }
++  });
++});
++
++test.describe("tools/call", () => {
++  test("returns the real interval count on the long day", async ({ request }) => {
++    // The last Sunday in October has 100 quarter-hours. A tool that answered
++    // 96 here would be wrong in a way no downstream check would catch.
++    const result = await call(request, "market_grid", { date: "2026-10-25" });
++    expect(result.isError).toBeFalsy();
++    expect(result.structuredContent.intervals).toBe(100);
++    // The same content is repeated as text, for clients that read only that.
++    expect(JSON.parse(result.content[0].text).intervals).toBe(100);
++  });
++
++  test("returns 92 on the short day and 96 on an ordinary one", async ({ request }) => {
++    expect((await call(request, "market_grid", { date: "2026-03-29" })).structuredContent.intervals).toBe(92);
++    expect((await call(request, "market_grid", { date: "2026-06-15" })).structuredContent.intervals).toBe(96);
++  });
++
++  test("refuses a series that does not fit the grid, and says why", async ({ request }) => {
++    const result = await call(request, "build_mscons_message", {
++      period: { date: "2026-10-25" },
++      sender: { code: "9999999999994" },
++      receiver: { code: "8888888888888" },
++      locations: [
++        { melo: MELO, direction: "consumption", valuesKwh: Array.from({ length: 96 }, () => 1) },
++      ],
++    });
++    // A refusal is a tool result, not a protocol error: the agent must be able
++    // to read the reason and correct its input.
++    expect(result.isError).toBe(true);
++    expect(result.structuredContent.code).toBe("unsupported_input");
++    expect(result.structuredContent.message).toContain("100");
++  });
++
++  test("refuses input that does not match the published schema", async ({ request }) => {
++    const result = await call(request, "market_grid", { date: "25.10.2026" });
++    expect(result.isError).toBe(true);
++    expect(result.structuredContent.code).toBe("validation_error");
++  });
++
++  test("names an unknown tool rather than guessing", async ({ request }) => {
++    const body = await (
++      await rpc(request, {
++        jsonrpc: "2.0",
++        id: 1,
++        method: "tools/call",
++        params: { name: "calculate_everything", arguments: {} },
++      })
++    ).json();
++    expect(body.error.code).toBe(-32602);
++    expect(body.error.message).toContain("calculate_everything");
++  });
++
++  test("does not assume a metering concept it was not given the data for", async ({ request }) => {
++    const result = await call(request, "derive_metering_concept", {
++      constellation: { units: 24, kwp: 60 },
++    });
++    expect(result.isError).toBeFalsy();
++    expect(result.structuredContent.variant).toBe("not_determinable");
++  });
++});
++
++test.describe("MCP and HTTP are one implementation", () => {
++  const CASES: { tool: string; method: "get" | "post"; path: string; args: Record<string, unknown> }[] = [
++    {
++      tool: "calculate_economics",
++      method: "post",
++      path: "/api/v1/calculate",
++      args: { inputs: { kwp: 60, anzahlWohneinheiten: 24 }, includeSchedule: true },
++    },
++    {
++      tool: "assess_eligibility",
++      method: "post",
++      path: "/api/v1/eligibility",
++      args: { inputs: { kwp: 60 }, facts: { ownerConstellation: "weg" } },
++    },
++    {
++      tool: "derive_metering_concept",
++      method: "post",
++      path: "/api/v1/messkonzept",
++      args: { constellation: { units: 24, kwp: 60, gridConnection: "single_connection" } },
++    },
++    {
++      tool: "allocate_generation",
++      method: "post",
++      path: "/api/v1/allocation",
++      args: {
++        generationKwh: [0, 4, 10, 2],
++        participants: [
++          { id: "a", share: 0.5, consumptionKwh: [1, 1, 1, 1] },
++          { id: "b", share: 0.5, consumptionKwh: [1, 5, 5, 1] },
++        ],
++      },
++    },
++    {
++      tool: "bill_period",
++      method: "post",
++      path: "/api/v1/billing",
++      args: {
++        period: { from: "2026-01-01", to: "2027-01-01" },
++        tariff: { mieterstromCtPerKwh: 28, reststromCtPerKwh: 34, grundpreisEurPerYear: 120 },
++        participants: [{ id: "we-1", allocatedKwh: 1200, gridDrawKwh: 1800 }],
++      },
++    },
++    { tool: "market_grid", method: "get", path: "/api/v1/mako/grid?date=2026-10-25", args: { date: "2026-10-25" } },
++    {
++      tool: "validate_market_identifiers",
++      method: "post",
++      path: "/api/v1/mako/identifiers",
++      args: { senderCode: "9999999999994", receiverCode: "8888888888888" },
++    },
++    {
++      tool: "build_mscons_message",
++      method: "post",
++      path: "/api/v1/mako/mscons",
++      args: {
++        period: { date: "2026-10-25" },
++        sender: { code: "9999999999994" },
++        receiver: { code: "8888888888888" },
++        locations: [
++          {
++            melo: MELO,
++            direction: "consumption",
++            valuesKwh: Array.from({ length: 100 }, (_, i) => i / 10),
++          },
++        ],
++      },
++    },
++  ];
++
++  // Anything that legitimately differs between two calls a millisecond apart.
++  const VOLATILE =
++    /"(calculatedAt|generatedAt|timestamp|requestId|controlReference|messageReference|preparedAt)":"[^"]*"/g;
++
++  function stable(value: unknown): unknown {
++    if (Array.isArray(value)) return value.map(stable);
++    if (value && typeof value === "object") {
++      const o = value as Record<string, unknown>;
++      return Object.fromEntries(Object.keys(o).sort().map((k) => [k, stable(o[k])]));
++    }
++    return value;
++  }
++  const normalise = (v: unknown) => JSON.stringify(stable(v)).replace(VOLATILE, '"$1":"<volatile>"');
++
++  for (const c of CASES) {
++    test(`${c.tool} answers identically over both surfaces`, async ({ request }) => {
++      const http =
++        c.method === "get"
++          ? await request.get(c.path, { headers: auth })
++          : await request.post(c.path, { headers: auth, data: c.args });
++      const overMcp = await call(request, c.tool, c.args);
++
++      expect(await http.json().then((b) => b.ok)).toBe(true);
++      expect(overMcp.isError).toBeFalsy();
++      // Not "similar": the same bytes. The two surfaces share one function, and
++      // this is what proves it stayed that way.
++      expect(normalise(overMcp.structuredContent)).toBe(normalise(await http.json()));
++    });
++  }
++});
+diff --git a/package.json b/package.json
+index 9f536b7..9481ce6 100644
+--- a/package.json
++++ b/package.json
+@@ -7,7 +7,7 @@
+     "dev": "vite --host",
+     "dev:server": "PORT=3001 tsx server/index.ts",
+     "dev:all": "concurrently -k -n vite,api -c cyan,magenta \"pnpm dev\" \"pnpm dev:server\"",
+-    "build": "vite build && node scripts/build-static.mjs && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
++    "build": "vite build && node scripts/build-static.mjs && node scripts/build-discovery.mjs && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
+     "start": "NODE_ENV=production node dist/index.js",
+     "preview": "vite preview --host",
+     "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p api/tsconfig.json",
+diff --git a/scripts/build-discovery.mjs b/scripts/build-discovery.mjs
+new file mode 100644
+index 0000000..b63e9eb
+--- /dev/null
++++ b/scripts/build-discovery.mjs
+@@ -0,0 +1,414 @@
++/**
++ * scripts/build-discovery.mjs
++ *
++ * Emits the machine-readable files an agent looks for.
++ *
++ * A person finds this site through a search result. A model finds it through
++ * one of these:
++ *
++ *   /llms.txt              a short, linkable index of what the site is and
++ *                          which page answers which question
++ *   /llms-full.txt         the same, with the substance inlined, so a model
++ *                          that fetches one file has the actual answers
++ *   /openapi.json          the API as a spec an agent can call without being
++ *                          told how
++ *   /.well-known/mcp.json  the MCP endpoint, so an agent can add the tools
++ *   /ai.txt                what may be done with the content
++ *
++ * All of it is generated from the same manifests the site is built from, so it
++ * cannot describe a page or an endpoint that does not exist.
++ */
++
++import { writeFileSync, mkdirSync } from "fs";
++import { join } from "path";
++import { loadManifests } from "./load-manifests.mjs";
++
++const DIST = join(process.cwd(), "dist", "public");
++const ORIGIN = (process.env.APP_URL || "https://energie-teilen-site.vercel.app").replace(/\/+$/, "");
++
++const manifests = await loadManifests();
++
++const routes = manifests.indexableRoutes().map((r) => ({
++  path: r.path,
++  kind: r.kind,
++  title: r.title,
++  description: r.description,
++  navLabel: r.navLabel ?? "",
++  answers: r.answers ?? "",
++}));
++
++const endpoints = manifests.API_ENDPOINTS.map((e) => ({
++  method: e.method,
++  path: e.path,
++  summary: e.summary,
++  purpose: e.purpose,
++  parameters: e.parameters ?? [],
++  refuses: e.refuses ?? [],
++}));
++
++const tools = manifests.toolListPayload().tools.map((t) => {
++  const def = manifests.toolByName(t.name);
++  return {
++    name: t.name,
++    title: t.title,
++    description: t.description,
++    inputSchema: t.inputSchema,
++    endpoint: def?.endpoint ?? "",
++    method: def?.method ?? "POST",
++  };
++});
++
++if (routes.length < 5 || endpoints.length < 8 || tools.length < 6) {
++  console.error(
++    `discovery: parsed ${routes.length} routes, ${endpoints.length} endpoints, ${tools.length} tools — refusing to write a partial index.`,
++  );
++  process.exit(1);
++}
++
++mkdirSync(join(DIST, ".well-known"), { recursive: true });
++
++// ---------------------------------------------------------------- llms.txt ---
++const llms = `# Energie Teilen
++
++> Deterministische Rechenwerkzeuge für dezentrale Energieprojekte in Deutschland — Mieterstrom, gemeinschaftliche Gebäudeversorgung und Energy Sharing. Wirtschaftlichkeit, Messkonzept, Aufteilungsschlüssel, Abrechnung und Marktkommunikation (MSCONS/EDIFACT).
++
++Alle Ergebnisse stammen aus versioniertem, getestetem Code, nicht aus einem Sprachmodell. Jede Antwort trägt einen Modellstempel und die Herkunft jedes Eingabewerts. Wo eine Eingabe außerhalb dessen liegt, was die Engine beantworten kann, verweigert sie die Antwort und nennt den Grund — statt zu schätzen.
++
++Jurisdiktion: Deutschland. Währung: EUR. Sprache: Deutsch.
++
++## Werkzeuge
++
++${routes
++  .filter((r) => r.kind === "tool" || r.kind === "landing")
++  .map((r) => `- [${r.navLabel}](${ORIGIN}${r.path}): ${r.answers} ${r.description}`)
++  .join("\n")}
++
++## Für Entwickler und Agenten
++
++- [API-Referenz](${ORIGIN}/api): Neun Endpunkte hinter einem Schlüssel. Jede Antwort mit Modellstempel, Herkunft und Gültigkeitsfenster der regulierten Sätze.
++- [OpenAPI-Spezifikation](${ORIGIN}/openapi.json): Maschinenlesbare Beschreibung derselben Endpunkte.
++- [MCP-Server](${ORIGIN}/.well-known/mcp.json): Model Context Protocol unter ${ORIGIN}/mcp. Agenten können die Engines direkt als Werkzeuge aufrufen.
++
++## Was diese Werkzeuge NICHT tun
++
++- Sie beurteilen keine rechtliche Zulässigkeit. Sie prüfen wirtschaftliche und strukturelle Voraussetzungen.
++- Sie geben keine unbelegten Rechtsgrundlagen aus. Eine Paragrafenangabe wird erst gerendert, wenn sie gegen eine benannte Quelle geprüft wurde.
++- Sie füllen keine fehlenden Angaben mit plausiblen Werten. Fehlende Angaben werden benannt.
++
++## Rechtliches
++
++${routes.filter((r) => r.kind === "legal").map((r) => `- [${r.navLabel}](${ORIGIN}${r.path})`).join("\n")}
++`;
++writeFileSync(join(DIST, "llms.txt"), llms);
++
++// ----------------------------------------------------------- llms-full.txt ---
++const llmsFull = `${llms}
++---
++
++## Domänenwissen, das diese Werkzeuge umsetzen
++
++### Das Viertelstundenraster ist lokal, nicht 96
++
++Der deutsche Markt rechnet auf einem lokalen Viertelstundenraster in Europe/Berlin. Ein gewöhnlicher Tag hat 96 Viertelstunden. Am letzten Sonntag im März hat der Tag 92, am letzten Sonntag im Oktober 100. Eine Implementierung, die 96 fest verdrahtet, verliert im Frühjahr vier Werte und zählt im Herbst vier doppelt.
++
++Ein volles Jahr ergibt weiterhin 35 040 Viertelstunden, weil sich die beiden Umstellungen aufheben. Deshalb beweist eine Prüfung auf Jahresebene nichts: die Jahreszahl stimmt, während zwei einzelne Tage falsch sind.
++
++Auf der Leitung unterscheidet der UTC-Versatz die wiederholte Stunde: 202610250200+02 und 202610250200+01 bezeichnen dieselbe Ortszeit an zwei verschiedenen Zeitpunkten.
++
++### Das Messkonzept entscheidet über die Baubarkeit
++
++Die Wirtschaftlichkeit entscheidet, ob sich ein Projekt lohnt; das Messkonzept entscheidet, ob es gebaut werden kann. Ausschlaggebend ist die Netzanschlusssituation:
++
++- Ein gemeinsamer Hausanschluss → Summenzählermodell: Zweirichtungszähler am Netzanschlusspunkt, Unterzähler je Einheit, plus Erzeugungszähler.
++- Ein Anschluss je Einheit → Einzelzählermodell: keine Summenbildung, jede Entnahmestelle einzeln gemessen.
++- Beteiligte an verschiedenen Netzanschlusspunkten → rechnerische Zuordnung aus viertelstündlichen Messwerten, mit Zählerstandsgangmessung je Teilnehmer.
++
++Ohne Angabe der Netzanschlusssituation ist die Variante nicht bestimmbar. Das ist die richtige Antwort; ein plausibles, aber falsches Schema ist teurer als gar keines.
++
++### Der Aufteilungsschlüssel ist ein Betrag, kein Detail
++
++Der Schlüssel wird in jeder Viertelstunde angewendet und entscheidet, wie viel Erzeugung bei den Teilnehmern bleibt statt eingespeist zu werden:
++
++- Statisch: feste Anteile. Was ein Teilnehmer in einer Viertelstunde nicht abnimmt, verfällt für die Zuordnung.
++- Dynamisch: verbrauchsanteilig je Viertelstunde; alle erreichen denselben Deckungsgrad.
++- Mit Nachverteilung: erst der feste Anteil, dann wird der ungenutzte Rest unter den Teilnehmern mit offenem Bedarf weiterverteilt. Höchste Eigennutzung.
++
++Invariante: Zuordnung plus Einspeisung ergibt in jedem Intervall exakt die Erzeugung, und kein Teilnehmer erhält mehr, als er verbraucht hat.
++
++### Abrechnung in ganzen Cent
++
++Beträge werden durchgehend in ganzen Cent geführt. Jede Summe ist die Summe der Positionen darüber, nicht eine unabhängige Neuberechnung — eine Abrechnung, deren Positionen nicht zur Summe passen, ist wertlos, egal wie gut die Physik dahinter war.
++
++### Marktkommunikation: Syntax geprüft, Profil offen
++
++MSCONS-Nachrichten werden in UN/EDIFACT Syntax Level A erzeugt. Freigabezeichen, Segmentzählung in UNT und Kontrollreferenz in UNZ werden aus dem Inhalt berechnet und anschließend aus der erzeugten Nachricht heraus nachgeprüft.
++
++Der OBIS-Code enthält den Komponententrenner und muss maskiert werden: 1-1?:1.29.0. Ohne Maskierung zerfällt das Element, und die Nachricht meldet eine andere Messgröße als gemeint.
++
++Die Segmentverwendung ist nicht gegen die aktuelle BDEW-Formatbeschreibung geprüft. Erzeugte Nachrichten sind deshalb als Testübertragung gekennzeichnet.
++
++### Prüfziffern werden nicht als bestätigt ausgegeben
++
++Für MaLo-ID, BDEW-Codenummer und EIC werden Prüfziffern berechnet, aber als "algorithm_unverified" gemeldet, solange die Umsetzung nicht gegen die Veröffentlichung des jeweiligen Herausgebers geprüft ist. Formatregeln — Länge, Zeichenvorrat — werden zugesichert.
++
++---
++
++## API-Endpunkte
++
++${endpoints.map((e) => `### ${e.method} ${e.path}\n\n${e.summary}\n\n${e.purpose}\n`).join("\n")}
++
++---
++
++## MCP-Werkzeuge
++
++Endpunkt: ${ORIGIN}/mcp (Streamable HTTP, JSON-RPC 2.0). Authentifizierung über denselben API-Schlüssel wie die REST-Endpunkte.
++
++${tools.map((t) => `### ${t.name} — ${t.title}\n\n${t.description}\n`).join("\n")}
++
++---
++
++## Fragen und Antworten
++
++Diese Antworten stehen wörtlich auf den genannten Seiten und sind dort als strukturierte Daten ausgezeichnet. Sie dürfen unter Angabe der Quelle zitiert werden.
++
++${manifests.FAQ.map(
++  (section) =>
++    `### ${ORIGIN}${section.path}\n\n` +
++    section.entries.map((e) => `**${e.question}**\n\n${e.answer}\n`).join("\n"),
++).join("\n")}
++`;
++writeFileSync(join(DIST, "llms-full.txt"), llmsFull);
++
++// A path is documented once, but described twice: as an HTTP operation and as
++// an MCP tool. Both descriptions come from the same Zod schema, so an agent
++// that reads the spec and an agent that lists the tools are told the same
++// thing about what the endpoint accepts.
++const TOOL_BY_ENDPOINT = new Map(tools.map((t) => [t.endpoint, t]));
++
++/** GET endpoints carry their arguments in the query string, not a body. */
++function queryParameters(schema) {
++  const props = schema?.properties ?? {};
++  const required = new Set(schema?.required ?? []);
++  return Object.entries(props).map(([name, sub]) => ({
++    name,
++    in: "query",
++    required: required.has(name),
++    schema: sub,
++  }));
++}
++
++// -------------------------------------------------------------- openapi ---
++const openapi = {
++  openapi: "3.1.0",
++  info: {
++    title: "Energie Teilen API",
++    version: "1.0.0",
++    summary: "Deterministische Engines für dezentrale Energieprojekte in Deutschland.",
++    description:
++      "Wirtschaftlichkeit, Qualifizierung, Messkonzept, Aufteilungsschlüssel, Abrechnung und Marktkommunikation. Jede Antwort trägt einen Modellstempel und die Herkunft jedes Eingabewerts. Die Engines verweigern eine Antwort, wo sie sie nur schätzen könnten.",
++    contact: { url: `${ORIGIN}/api` },
++  },
++  servers: [{ url: ORIGIN }],
++  security: [{ bearerAuth: [] }, { apiKeyHeader: [] }],
++  components: {
++    securitySchemes: {
++      bearerAuth: { type: "http", scheme: "bearer" },
++      apiKeyHeader: { type: "apiKey", in: "header", name: "X-API-Key" },
++    },
++    schemas: {
++      Error: {
++        type: "object",
++        required: ["ok", "code", "message"],
++        properties: {
++          ok: { const: false },
++          code: {
++            type: "string",
++            enum: ["unauthorized", "rate_limited", "validation_error", "unsupported_input", "internal_error"],
++          },
++          message: { type: "string" },
++          details: {},
++        },
++      },
++      ModelStamp: {
++        type: "object",
++        description:
++          "Identifiziert die Berechnung eindeutig. Zwei Ergebnisse sind nur vergleichbar, wenn ihr Stempel übereinstimmt.",
++        properties: {
++          apiVersion: { type: "string" },
++          modelVersion: { type: "string" },
++          assumptionSet: { type: "string" },
++          jurisdiction: { const: "DE" },
++          currency: { const: "EUR" },
++          calculatedAt: { type: "string", format: "date-time" },
++        },
++      },
++    },
++    responses: {
++      Unauthorized: {
++        description: "Schlüssel fehlt oder ist ungültig. Beide Fälle antworten identisch.",
++        content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } },
++      },
++      BadRequest: {
++        description: "Die Eingabe liegt außerhalb dessen, was die Engine beantworten kann. Der Grund wird benannt.",
++        content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } },
++      },
++    },
++  },
++  paths: Object.fromEntries(
++    endpoints.map((e) => [
++      e.path,
++      {
++        [e.method.toLowerCase()]: {
++          operationId: e.path.split("/").filter(Boolean).join("_"),
++          summary: e.summary,
++          description: e.purpose,
++          ...(() => {
++            const schema = TOOL_BY_ENDPOINT.get(e.path)?.inputSchema;
++            if (e.method === "GET") {
++              const params = queryParameters(schema);
++              return params.length > 0 ? { parameters: params } : {};
++            }
++            return {
++              requestBody: {
++                required: true,
++                content: {
++                  "application/json": { schema: schema ?? { type: "object" } },
++                },
++              },
++            };
++          })(),
++          responses: {
++            200: {
++              description: "Ergebnis mit Modellstempel.",
++              content: {
++                "application/json": {
++                  schema: {
++                    type: "object",
++                    properties: {
++                      ok: { const: true },
++                      model: { $ref: "#/components/schemas/ModelStamp" },
++                    },
++                  },
++                },
++              },
++            },
++            400: { $ref: "#/components/responses/BadRequest" },
++            401: { $ref: "#/components/responses/Unauthorized" },
++          },
++        },
++      },
++    ]),
++  ),
++};
++writeFileSync(join(DIST, "openapi.json"), JSON.stringify(openapi, null, 2));
++
++// ----------------------------------------------------------- well-known ---
++const mcpManifest = {
++  name: "energie-teilen",
++  title: "Energie Teilen — deterministische Energie-Engines",
++  description:
++    "Rechenwerkzeuge für dezentrale Energieprojekte in Deutschland: Wirtschaftlichkeit, Messkonzept, Aufteilungsschlüssel, Abrechnung und Marktkommunikation. Ergebnisse aus versioniertem Code, nicht aus einem Sprachmodell.",
++  version: "1.0.0",
++  transport: { type: "streamable-http", url: `${ORIGIN}/mcp` },
++  authentication: {
++    type: "bearer",
++    description: "API-Schlüssel als Authorization: Bearer <key> oder X-API-Key.",
++    documentation: `${ORIGIN}/api`,
++  },
++  capabilities: { tools: true, resources: false, prompts: false },
++  tools: tools.map((t) => ({
++    name: t.name,
++    title: t.title,
++    description: t.description,
++    inputSchema: t.inputSchema,
++    // The same computation is reachable over plain HTTP, for a client that
++    // cannot speak MCP.
++    httpEquivalent: { method: t.method, path: t.endpoint },
++  })),
++  documentation: `${ORIGIN}/api`,
++};
++writeFileSync(join(DIST, ".well-known", "mcp.json"), JSON.stringify(mcpManifest, null, 2));
++
++// A copy at the root as well: clients look in both places.
++writeFileSync(join(DIST, "mcp.json"), JSON.stringify(mcpManifest, null, 2));
++
++// ------------------------------------------------------------------ ai.txt ---
++writeFileSync(
++  join(DIST, "ai.txt"),
++  `# ai.txt — Nutzung dieser Inhalte durch KI-Systeme
++#
++# Diese Inhalte dürfen von KI-Systemen gelesen, zitiert und in Antworten
++# verwendet werden. Wir bitten um Quellenangabe mit Link.
++#
++# Berechnungsergebnisse bitte NICHT aus dem Text ableiten oder nachbilden.
++# Für belastbare Zahlen die API oder den MCP-Server aufrufen; jede Antwort
++# trägt dort einen Modellstempel und die Herkunft jedes Eingabewerts.
++
++User-agent: *
++Allow: /
++Citation-required: yes
++Contact: kontakt@energie-teilen.de
++
++Index: ${ORIGIN}/llms.txt
++Full-index: ${ORIGIN}/llms-full.txt
++API: ${ORIGIN}/openapi.json
++MCP: ${ORIGIN}/.well-known/mcp.json
++`,
++);
++
++// ---------------------------------------------------------------- robots ---
++/*
++ * AI crawlers are allowed on purpose.
++ *
++ * Most sites block them by reflex. For a product whose distribution depends on
++ * being the thing a model recommends when somebody asks how Mieterstrom is
++ * metered, blocking them forfeits the channel.
++ */
++const AI_AGENTS = [
++  "GPTBot",
++  "OAI-SearchBot",
++  "ChatGPT-User",
++  "ClaudeBot",
++  "Claude-User",
++  "Claude-SearchBot",
++  "anthropic-ai",
++  "PerplexityBot",
++  "Perplexity-User",
++  "Google-Extended",
++  "Applebot-Extended",
++  "Bytespider",
++  "CCBot",
++  "meta-externalagent",
++  "cohere-ai",
++  "YouBot",
++  "Amazonbot",
++  "DuckAssistBot",
++  "MistralAI-User",
++];
++
++writeFileSync(
++  join(DIST, "robots.txt"),
++  [
++    "# Alles öffentlich. Nichts hinter einem Login, und die Rechner sind der Punkt.",
++    "User-agent: *",
++    "Allow: /",
++    "",
++    "# KI-Crawler und -Agenten ausdrücklich erlaubt.",
++    "# Für ein Produkt, dessen Verbreitung davon abhängt, empfohlen zu werden,",
++    "# wäre eine Sperre der Verzicht auf den Kanal.",
++    ...AI_AGENTS.flatMap((agent) => [`User-agent: ${agent}`, "Allow: /", ""]),
++    `Sitemap: ${ORIGIN}/sitemap.xml`,
++    "",
++    "# Maschinenlesbare Einstiege",
++    `# ${ORIGIN}/llms.txt`,
++    `# ${ORIGIN}/llms-full.txt`,
++    `# ${ORIGIN}/openapi.json`,
++    `# ${ORIGIN}/.well-known/mcp.json`,
++    "",
++  ].join("\n"),
++);
++
++console.log(
++  `discovery: llms.txt (${(llms.length / 1024).toFixed(1)} kB), llms-full.txt (${(llmsFull.length / 1024).toFixed(1)} kB), ` +
++    `openapi.json (${endpoints.length} paths), mcp.json (${tools.length} tools), ai.txt, robots.txt (${AI_AGENTS.length} agents allowed)`,
++);
+diff --git a/scripts/build-static.mjs b/scripts/build-static.mjs
+index b29fe0d..3135bcb 100644
+--- a/scripts/build-static.mjs
++++ b/scripts/build-static.mjs
+@@ -31,46 +31,19 @@ if (!existsSync(SHELL)) {
+   process.exit(1);
+ }
+ 
+-// The manifest is TypeScript; read the fields we need without a compile step.
+-const routesSource = readFileSync(join(process.cwd(), "shared", "routes.ts"), "utf8");
++import { loadManifests } from "./load-manifests.mjs";
+ 
+ const ORIGIN = (process.env.APP_URL || "https://energie-teilen-site.vercel.app").replace(/\/+$/, "");
+ 
+-/** Parse the ROUTES array out of the manifest. */
+-function parseRoutes() {
+-  const body = routesSource.slice(
+-    routesSource.indexOf("export const ROUTES: RouteDefinition[] = ["),
+-  );
+-  const routes = [];
+-  const blockRe = /\{\s*\n\s*path: "([^"]+)",([\s\S]*?)\n  \},/g;
+-  let m;
+-  while ((m = blockRe.exec(body)) !== null) {
+-    const [, path, rest] = m;
+-    const field = (name) => {
+-      const r = new RegExp(`${name}:\\s*(?:\\n\\s*)?"((?:[^"\\\\]|\\\\.)*)"`);
+-      const hit = r.exec(rest);
+-      return hit ? hit[1].replace(/\\"/g, '"') : null;
+-    };
+-    const bool = (name) => new RegExp(`${name}: (true|false)`).exec(rest)?.[1] === "true";
+-    routes.push({
+-      path,
+-      title: field("title"),
+-      description: field("description"),
+-      navLabel: field("navLabel"),
+-      answers: field("answers"),
+-      indexable: bool("indexable"),
+-      changefreq: field("changefreq") ?? "monthly",
+-      priority: Number(/priority: ([\d.]+)/.exec(rest)?.[1] ?? "0.5"),
+-      kind: field("kind") ?? "tool",
+-    });
+-    if (routes.length > 40) break;
+-  }
+-  return routes;
+-}
++// The manifests are executed rather than parsed, so a reformat of the source
++// can never change what gets published. See scripts/load-manifests.mjs.
++const manifests = await loadManifests();
++const routes = manifests.ROUTES;
++const faqFor = manifests.faqFor;
++const canonicalPathFor = manifests.canonicalPathFor;
+ 
+-const routes = parseRoutes();
+ if (routes.length < 5) {
+-  console.error(`Only parsed ${routes.length} routes from shared/routes.ts — refusing to continue.`);
++  console.error(`Only ${routes.length} routes in the manifest — refusing to continue.`);
+   process.exit(1);
+ }
+ 
+@@ -120,6 +93,22 @@ function structuredDataFor(route) {
+     },
+   ];
+ 
++  const faq = faqFor(route.path);
++  if (faq.length > 0) {
++    // The answers are on the page in full. This block is the same text in the
++    // form a crawler can extract without parsing the layout — which is how a
++    // question gets answered with this page rather than about it.
++    graph.push({
++      "@type": "FAQPage",
++      "@id": `${ORIGIN}${route.path}#faq`,
++      mainEntity: faq.map((entry) => ({
++        "@type": "Question",
++        name: entry.question,
++        acceptedAnswer: { "@type": "Answer", text: entry.answer },
++      })),
++    });
++  }
++
+   if (route.path !== "/") {
+     graph.push({
+       "@type": "BreadcrumbList",
+@@ -142,34 +131,81 @@ function structuredDataFor(route) {
+  */
+ function noscriptSummary(route) {
+   if (route.path === "/") return "";
++  const faq = faqFor(route.path)
++    .map(
++      (entry) =>
++        `        <dt>${escapeAttr(entry.question)}</dt>\n` +
++        `        <dd>${escapeAttr(entry.answer)}</dd>\n`,
++    )
++    .join("");
++
+   return (
+     `\n    <noscript>\n` +
+     `      <h1>${escapeAttr(route.navLabel)}</h1>\n` +
+     `      <p>${escapeAttr(route.description)}</p>\n` +
+     `      <p>${escapeAttr(route.answers)}</p>\n` +
++    (faq ? `      <dl>\n${faq}      </dl>\n` : "") +
+     `    </noscript>\n`
+   );
+ }
+ 
++/**
++ * The shell's own JSON-LD describes the LANDING page as well as the site.
++ *
++ * Copied unchanged into every document, it asserts the landing page's
++ * questions and its @id on /messkonzept — the same identifier claimed at two
++ * URLs, which invalidates both. The site-level entities are true everywhere and
++ * stay; the page-level ones belong only to the page they describe.
++ */
++const PAGE_SPECIFIC_TYPES = new Set(["FAQPage", "HowTo", "WebPage", "BreadcrumbList"]);
++
++function stripLandingPageEntities(html, route) {
++  if (route.path === "/") return html;
++  return html.replace(
++    /<script type="application\/ld\+json">([\s\S]*?)<\/script>/,
++    (whole, body) => {
++      let parsed;
++      try {
++        parsed = JSON.parse(body);
++      } catch {
++        return whole; // Leave anything unparseable alone rather than corrupt it.
++      }
++      if (!Array.isArray(parsed["@graph"])) return whole;
++      parsed["@graph"] = parsed["@graph"].filter((n) => !PAGE_SPECIFIC_TYPES.has(n["@type"]));
++      return `<script type="application/ld+json">${JSON.stringify(parsed)}</script>`;
++    },
++  );
++}
++
+ let written = 0;
+ for (const route of routes) {
+   const url = `${ORIGIN}${route.path}`;
++  // An alias points at the page it duplicates, not at itself.
++  const canonicalUrl = `${ORIGIN}${canonicalPathFor(route.path)}`;
+   let html = shell;
+ 
+   html = replaceTitle(html, route.title);
+   html = replaceMultilineMeta(html, "name", "description", route.description);
+   html = replaceMultilineMeta(html, "property", "og:title", route.title);
+   html = replaceMultilineMeta(html, "property", "og:description", route.description);
+-  html = replaceMultilineMeta(html, "property", "og:url", url);
++  html = replaceMultilineMeta(html, "property", "og:url", canonicalUrl);
+   html = replaceMultilineMeta(html, "name", "twitter:title", route.title);
+   html = replaceMultilineMeta(html, "name", "twitter:description", route.description);
+-  html = setCanonical(html, url);
++  html = setCanonical(html, canonicalUrl);
++  html = stripLandingPageEntities(html, route);
+ 
++  // Marked, and any earlier copy removed first: running this script twice over
++  // the same output must produce the same document, not two of everything.
++  html = html.replace(
++    /\n\s*<script type="application\/ld\+json" data-route-graph>[\s\S]*?<\/script>/g,
++    "",
++  );
+   html = html.replace(
+     "</head>",
+-    `    <script type="application/ld+json">\n${JSON.stringify(structuredDataFor(route), null, 2)}\n    </script>\n  </head>`,
++    `    <script type="application/ld+json" data-route-graph>\n${JSON.stringify(structuredDataFor(route), null, 2)}\n    </script>\n  </head>`,
+   );
+ 
++  html = html.replace(/<body>\s*<noscript>[\s\S]*?<\/noscript>\n/, "<body>");
+   html = html.replace("<body>", `<body>${noscriptSummary(route)}`);
+ 
+   // "/" is the shell itself; everything else becomes <path>/index.html so a
+@@ -184,7 +220,7 @@ const today = new Date().toISOString().slice(0, 10);
+ const sitemap =
+   `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+   routes
+-    .filter((r) => r.indexable)
++    .filter((r) => r.indexable && !r.aliasOf)
+     .map(
+       (r) =>
+         `  <url>\n    <loc>${ORIGIN}${r.path}</loc>\n    <lastmod>${today}</lastmod>\n` +
+@@ -194,12 +230,12 @@ const sitemap =
+   `\n</urlset>\n`;
+ 
+ writeFileSync(join(DIST, "sitemap.xml"), sitemap);
+-writeFileSync(
+-  join(DIST, "robots.txt"),
+-  ["User-agent: *", "Allow: /", "", `Sitemap: ${ORIGIN}/sitemap.xml`, ""].join("\n"),
+-);
+ 
+-const indexable = routes.filter((r) => r.indexable).length;
++// robots.txt is written by scripts/build-discovery.mjs, which names the AI
++// crawlers individually. One file, one owner: two scripts writing it meant the
++// richer version survived only because of the order they happened to run in.
++
++const indexable = routes.filter((r) => r.indexable && !r.aliasOf).length;
+ console.log(
+   `static: ${written} documents, ${indexable} in the sitemap` +
+     ` (was 1 document and 4 sitemap entries, three of them legal pages)`,
+diff --git a/scripts/load-manifests.mjs b/scripts/load-manifests.mjs
+new file mode 100644
+index 0000000..9ada2b3
+--- /dev/null
++++ b/scripts/load-manifests.mjs
+@@ -0,0 +1,45 @@
++/**
++ * scripts/load-manifests.mjs
++ *
++ * Loads the TypeScript manifests by executing them.
++ *
++ * The build scripts used to read these files with regular expressions. That
++ * works until a manifest is reformatted, and then the generated documents
++ * quietly describe something other than what the application serves — which is
++ * the one failure a generated index must not have, because nothing downstream
++ * can detect it. Bundling the real modules costs a second and removes the
++ * whole class.
++ */
++
++import { mkdirSync, rmSync } from "fs";
++import { join } from "path";
++import { build } from "esbuild";
++
++let cached = null;
++
++export async function loadManifests() {
++  if (cached) return cached;
++
++  // Inside the project, so Node resolves the bundle's external imports against
++  // this package's own node_modules.
++  const cacheDir = join(process.cwd(), "node_modules", ".cache");
++  const outfile = join(cacheDir, `et-manifests-${process.pid}.mjs`);
++  mkdirSync(cacheDir, { recursive: true });
++
++  await build({
++    entryPoints: [join(process.cwd(), "scripts", "manifest-entry.ts")],
++    bundle: true,
++    platform: "node",
++    format: "esm",
++    packages: "external",
++    outfile,
++    logLevel: "silent",
++  });
++
++  try {
++    cached = await import(`file://${outfile}`);
++    return cached;
++  } finally {
++    rmSync(outfile, { force: true });
++  }
++}
+diff --git a/scripts/manifest-entry.ts b/scripts/manifest-entry.ts
+new file mode 100644
+index 0000000..aba39bd
+--- /dev/null
++++ b/scripts/manifest-entry.ts
+@@ -0,0 +1,19 @@
++/**
++ * scripts/manifest-entry.ts
++ *
++ * The single import surface the build scripts bundle and execute.
++ * It exists so the generated discovery files are derived from the manifests
++ * themselves rather than from a parse of their source text.
++ */
++
++export { indexableRoutes, ROUTES, siteOrigin, absoluteUrl, canonicalPathFor, buildSitemap, buildRobots } from "../shared/routes.js";
++export { FAQ, faqFor, allFaqEntries } from "../shared/faq.js";
++export { API_ENDPOINTS, API_AUTH_DOC, API_GUARANTEES, documentedPaths } from "../shared/api-reference.js";
++export {
++  MCP_PROTOCOL_VERSION,
++  MCP_SERVER_INFO,
++  MCP_INSTRUCTIONS,
++  MCP_TOOLS,
++  toolByName,
++  toolListPayload,
++} from "../shared/mcp.js";
+diff --git a/server/api-v1.ts b/server/api-v1.ts
+index 72008d4..96d6abf 100644
+--- a/server/api-v1.ts
++++ b/server/api-v1.ts
+@@ -18,6 +18,7 @@ import {
+   CalculateRequestSchema,
+   EligibilityRequestSchema,
+   type ApiModelStamp,
++  type ApiV1Endpoint,
+   type ApiV1Error,
+   type ApiV1ErrorCode,
+   type CalculateResponse,
+@@ -91,15 +92,15 @@ import { extractApiKey, identifyApiKey } from "./api-keys.js";
+ // ============================================================================
+ 
+ function apiV1Error(
+-  res: Response,
++  res: ResultSink,
+   status: number,
+   code: ApiV1ErrorCode,
+   message: string,
+   details?: unknown,
+-): Response {
++): void {
+   const body: ApiV1Error = { ok: false, code, message, details };
+   res.setHeader("Cache-Control", "no-store");
+-  return res.status(status).json(body);
++  res.status(status).json(body);
+ }
+ 
+ function stamp(now: Date): ApiModelStamp {
+@@ -266,403 +267,505 @@ function recommendKey(runs: Record<AllocationKey, AllocationResult>) {
+ // MOUNT
+ // ============================================================================
+ 
+-export function mountApiV1(
+-  app: Express,
+-  deps: { limiter: RequestHandler },
+-): void {
+-  /** Bearer or X-API-Key. Same 401 whether the key is wrong or absent. */
+-  const requireKey: RequestHandler = (req, res, next) => {
+-    const identity = identifyApiKey(
+-      extractApiKey(req.headers as Record<string, string | string[] | undefined>),
+-    );
+-    if (!identity) {
+-      apiV1Error(res, 401, "unauthorized", "Ungültiger oder fehlender API-Schlüssel.");
+-      return;
+-    }
+-    (req as Request & { apiKey?: typeof identity }).apiKey = identity;
+-    res.setHeader("X-Api-Version", API_VERSION);
+-    next();
+-  };
++// ============================================================================
++// HANDLERS
++// ----------------------------------------------------------------------------
++// Each endpoint is a function over its input, not a closure over an Express
++// request. Both the HTTP route and the MCP tool of the same name run the
++// SAME function, so a refusal, a warning or a stamp cannot differ between the
++// two surfaces — which it would within a week if there were two code paths.
++// ============================================================================
+ 
+-  // --------------------------------------------------------------------------
+-  // GET /api/v1/meta — what this deployment computes, and how current it is
+-  // --------------------------------------------------------------------------
+-  app.get(`${API_PREFIX}/meta`, deps.limiter, requireKey, (_req: Request, res: Response) => {
+-    const now = new Date();
+-    const rates = Object.fromEntries(
+-      Object.entries(DATED_TABLES).map(([name, t]) => [
+-        name,
+-        {
+-          bands: t.bands.map((b) => ({ maxKwp: b.maxKwp, ctPerKwh: b.ctPerKwh })),
+-          legalBasis: t.legalBasis,
+-          validFrom: t.validFrom,
+-          validUntil: t.validUntil,
+-          verified: t.verified,
+-          freshness: freshness(t, now),
+-        },
+-      ]),
+-    );
++/**
++ * The subset of the Express response the handlers use.
++ *
++ * An Express Response satisfies it, and so does the in-process collector the
++ * MCP dispatcher passes in.
++ */
++export type ResultSink = {
++  status(code: number): ResultSink;
++  json(body: unknown): ResultSink;
++  setHeader(name: string, value: string): void;
++};
++
++export function handleMeta(payload: unknown, res: ResultSink): void {
++  const now = new Date();
++  const rates = Object.fromEntries(
++    Object.entries(DATED_TABLES).map(([name, t]) => [
++      name,
++      {
++        bands: t.bands.map((b) => ({ maxKwp: b.maxKwp, ctPerKwh: b.ctPerKwh })),
++        legalBasis: t.legalBasis,
++        validFrom: t.validFrom,
++        validUntil: t.validUntil,
++        verified: t.verified,
++        freshness: freshness(t, now),
++      },
++    ]),
++  );
+ 
+-    const body: MetaResponse = {
+-      ok: true,
+-      model: stamp(now),
+-      rates,
+-      models: LEGAL_MODEL_ORDER.map((id) => {
+-        const m = LEGAL_MODELS[id];
+-        return {
+-          id: m.id,
+-          name: m.name,
+-          scope: m.scope,
+-          computed: m.modelledByCalculator,
+-          citation: formatCitation(m),
+-        };
+-      }),
+-      endpoints: [
+-        `${API_PREFIX}/meta`,
+-        `${API_PREFIX}/calculate`,
+-        `${API_PREFIX}/eligibility`,
+-        `${API_PREFIX}/messkonzept`,
+-        `${API_PREFIX}/allocation`,
+-        `${API_PREFIX}/billing`,
+-        `${MAKO_PREFIX}/grid`,
+-        `${MAKO_PREFIX}/identifiers`,
+-        `${MAKO_PREFIX}/mscons`,
+-      ],
+-    };
++  const body: MetaResponse = {
++    ok: true,
++    model: stamp(now),
++    rates,
++    models: LEGAL_MODEL_ORDER.map((id) => {
++      const m = LEGAL_MODELS[id];
++      return {
++        id: m.id,
++        name: m.name,
++        scope: m.scope,
++        computed: m.modelledByCalculator,
++        citation: formatCitation(m),
++      };
++    }),
++    endpoints: [
++      `${API_PREFIX}/meta`,
++      `${API_PREFIX}/calculate`,
++      `${API_PREFIX}/eligibility`,
++      `${API_PREFIX}/messkonzept`,
++      `${API_PREFIX}/allocation`,
++      `${API_PREFIX}/billing`,
++      `${MAKO_PREFIX}/grid`,
++      `${MAKO_PREFIX}/identifiers`,
++      `${MAKO_PREFIX}/mscons`,
++    ],
++  };
+ 
+-    res.setHeader("Cache-Control", "no-store");
+-    res.status(200).json(body);
+-  });
++  res.setHeader("Cache-Control", "no-store");
++  res.status(200).json(body);
++}
+ 
+-  // --------------------------------------------------------------------------
+-  // POST /api/v1/calculate
+-  // --------------------------------------------------------------------------
+-  app.post(`${API_PREFIX}/calculate`, deps.limiter, requireKey, (req: Request, res: Response) => {
+-    const parsed = CalculateRequestSchema.safeParse(req.body);
+-    if (!parsed.success) {
+-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+-    }
++export function handleCalculate(payload: unknown, res: ResultSink): void {
++  const parsed = CalculateRequestSchema.safeParse(payload);
++  if (!parsed.success) {
++    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++  }
+ 
+-    const now = new Date();
+-    const { inputs, outOfBand } = resolveInputs(parsed.data.inputs);
+-    const scenarios = scenarioBundle(inputs);
++  const now = new Date();
++  const { inputs, outOfBand } = resolveInputs(parsed.data.inputs);
++  const scenarios = scenarioBundle(inputs);
++
++  const body: CalculateResponse = {
++    ok: true,
++    reference: parsed.data.reference ?? null,
++    model: stamp(now),
++    scenarios: {
++      konservativ: scenarios.konservativ.kpis,
++      realistisch: scenarios.realistisch.kpis,
++      optimistisch: scenarios.optimistisch.kpis,
++    },
++    schedule: parsed.data.includeSchedule ? scenarios.realistisch.jahre : null,
++    provenance: provenanceFor(inputs),
++    freshness: freshnessPayload(now),
++    coverage: calculatorCoverageStatement(),
++    warnings: buildWarnings(inputs, outOfBand, now),
++  };
+ 
+-    const body: CalculateResponse = {
+-      ok: true,
+-      reference: parsed.data.reference ?? null,
+-      model: stamp(now),
+-      scenarios: {
+-        konservativ: scenarios.konservativ.kpis,
+-        realistisch: scenarios.realistisch.kpis,
+-        optimistisch: scenarios.optimistisch.kpis,
+-      },
+-      schedule: parsed.data.includeSchedule ? scenarios.realistisch.jahre : null,
+-      provenance: provenanceFor(inputs),
+-      freshness: freshnessPayload(now),
+-      coverage: calculatorCoverageStatement(),
+-      warnings: buildWarnings(inputs, outOfBand, now),
+-    };
++  res.setHeader("Cache-Control", "no-store");
++  return void res.status(200).json(body);
++}
+ 
+-    res.setHeader("Cache-Control", "no-store");
+-    return res.status(200).json(body);
++export function handleEligibility(payload: unknown, res: ResultSink): void {
++  const parsed = EligibilityRequestSchema.safeParse(payload);
++  if (!parsed.success) {
++    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++  }
++
++  const now = new Date();
++  const { inputs } = resolveInputs(parsed.data.inputs);
++  const evaluation = evaluateEligibility({
++    economics: inputs,
++    kpis: calculateMieterstrom(inputs).kpis,
++    facts: parsed.data.facts,
+   });
+ 
+-  // --------------------------------------------------------------------------
+-  // POST /api/v1/eligibility
+-  // --------------------------------------------------------------------------
+-  app.post(`${API_PREFIX}/eligibility`, deps.limiter, requireKey, (req: Request, res: Response) => {
+-    const parsed = EligibilityRequestSchema.safeParse(req.body);
+-    if (!parsed.success) {
+-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+-    }
++  const step = evaluation.nextPaidStep;
++  const body: EligibilityResponse = {
++    ok: true,
++    reference: parsed.data.reference ?? null,
++    model: stamp(now),
++    verdict: evaluation.verdict,
++    verdictLabel: evaluation.verdictLabel,
++    findings: evaluation.findings,
++    missingData: evaluation.missingData,
++    feasibility: evaluation.feasibility,
++    valueDriver: evaluation.valueDriver,
++    mainRisk: evaluation.mainRisk,
++    estimatedEffort: evaluation.estimatedEffort,
++    nextPaidStep: step
++      ? {
++          offerCode: step.offerCode,
++          label: step.label,
++          rationale: step.rationale,
++          requiredData: PILOT_OFFER_FULFILLMENT[step.offerCode as PilotOfferCode].requiredData,
++        }
++      : null,
++    disclaimer: API_DISCLAIMER_DE,
++  };
+ 
+-    const now = new Date();
+-    const { inputs } = resolveInputs(parsed.data.inputs);
+-    const evaluation = evaluateEligibility({
+-      economics: inputs,
+-      kpis: calculateMieterstrom(inputs).kpis,
+-      facts: parsed.data.facts,
+-    });
++  res.setHeader("Cache-Control", "no-store");
++  return void res.status(200).json(body);
++}
+ 
+-    const step = evaluation.nextPaidStep;
+-    const body: EligibilityResponse = {
+-      ok: true,
+-      reference: parsed.data.reference ?? null,
+-      model: stamp(now),
+-      verdict: evaluation.verdict,
+-      verdictLabel: evaluation.verdictLabel,
+-      findings: evaluation.findings,
+-      missingData: evaluation.missingData,
+-      feasibility: evaluation.feasibility,
+-      valueDriver: evaluation.valueDriver,
+-      mainRisk: evaluation.mainRisk,
+-      estimatedEffort: evaluation.estimatedEffort,
+-      nextPaidStep: step
+-        ? {
+-            offerCode: step.offerCode,
+-            label: step.label,
+-            rationale: step.rationale,
+-            requiredData: PILOT_OFFER_FULFILLMENT[step.offerCode as PilotOfferCode].requiredData,
+-          }
+-        : null,
+-      disclaimer: API_DISCLAIMER_DE,
+-    };
++export function handleMesskonzept(payload: unknown, res: ResultSink): void {
++  const parsed = MesskonzeptRequestSchema.safeParse(payload);
++  if (!parsed.success) {
++    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++  }
+ 
+-    res.setHeader("Cache-Control", "no-store");
+-    return res.status(200).json(body);
+-  });
++  const now = new Date();
++  const result = deriveMesskonzept(parsed.data.constellation);
++
++  const body: MesskonzeptResponse = {
++    ok: true,
++    reference: parsed.data.reference ?? null,
++    model: stamp(now),
++    variant: result.variant,
++    variantLabel: result.variantLabel,
++    rationale: result.rationale,
++    meters: result.meters,
++    meterCount: result.meterCount,
++    roles: result.roles,
++    tasks: result.tasks,
++    criticalPath: criticalPath(result),
++    warnings: result.warnings,
++    missingInputs: result.missingInputs,
++    confidence: result.confidence,
++    disclaimer: result.disclaimer,
++  };
+ 
+-  // --------------------------------------------------------------------------
+-  // POST /api/v1/messkonzept — meter inventory, market roles, critical path
+-  // --------------------------------------------------------------------------
+-  app.post(`${API_PREFIX}/messkonzept`, deps.limiter, requireKey, (req: Request, res: Response) => {
+-    const parsed = MesskonzeptRequestSchema.safeParse(req.body);
+-    if (!parsed.success) {
+-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++  res.setHeader("Cache-Control", "no-store");
++  return void res.status(200).json(body);
++}
++
++export function handleAllocation(payload: unknown, res: ResultSink): void {
++  const parsed = AllocationRequestSchema.safeParse(payload);
++  if (!parsed.success) {
++    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++  }
++
++  const { key, generationKwh, participants, includeSeries } = parsed.data;
++  const options = { includeSeries };
++
++  let runs: Partial<Record<AllocationKey, AllocationResult>>;
++  try {
++    runs = key
++      ? { [key]: allocate({ key, generationKwh, participants }, options) }
++      : compareKeys({ generationKwh, participants }, options);
++  } catch (err) {
++    // A shape the schema cannot express — mismatched series lengths, shares
++    // over 100 %. Reported as the caller's input error, with its code.
++    if (err instanceof AllocationError) {
++      return void apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+     }
++    throw err;
++  }
+ 
+-    const now = new Date();
+-    const result = deriveMesskonzept(parsed.data.constellation);
++  const body: AllocationResponse = {
++    ok: true,
++    reference: parsed.data.reference ?? null,
++    model: stamp(new Date()),
++    key: key ?? null,
++    runs: runs as Record<AllocationKey, AllocationResult>,
++    recommendation: key ? null : recommendKey(runs as Record<AllocationKey, AllocationResult>),
++  };
+ 
+-    const body: MesskonzeptResponse = {
+-      ok: true,
+-      reference: parsed.data.reference ?? null,
+-      model: stamp(now),
+-      variant: result.variant,
+-      variantLabel: result.variantLabel,
+-      rationale: result.rationale,
+-      meters: result.meters,
+-      meterCount: result.meterCount,
+-      roles: result.roles,
+-      tasks: result.tasks,
+-      criticalPath: criticalPath(result),
+-      warnings: result.warnings,
+-      missingInputs: result.missingInputs,
+-      confidence: result.confidence,
+-      disclaimer: result.disclaimer,
+-    };
++  res.setHeader("Cache-Control", "no-store");
++  return void res.status(200).json(body);
++}
+ 
+-    res.setHeader("Cache-Control", "no-store");
+-    return res.status(200).json(body);
+-  });
++export function handleBilling(payload: unknown, res: ResultSink): void {
++  const parsed = BillingRequestSchema.safeParse(payload);
++  if (!parsed.success) {
++    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++  }
+ 
+-  // --------------------------------------------------------------------------
+-  // POST /api/v1/allocation — interval-level Aufteilungsschlüssel
+-  // --------------------------------------------------------------------------
+-  app.post(`${API_PREFIX}/allocation`, deps.limiter, requireKey, (req: Request, res: Response) => {
+-    const parsed = AllocationRequestSchema.safeParse(req.body);
+-    if (!parsed.success) {
+-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+-    }
++  const { reference, ...input } = parsed.data;
+ 
+-    const { key, generationKwh, participants, includeSeries } = parsed.data;
+-    const options = { includeSeries };
+-
+-    let runs: Partial<Record<AllocationKey, AllocationResult>>;
+-    try {
+-      runs = key
+-        ? { [key]: allocate({ key, generationKwh, participants }, options) }
+-        : compareKeys({ generationKwh, participants }, options);
+-    } catch (err) {
+-      // A shape the schema cannot express — mismatched series lengths, shares
+-      // over 100 %. Reported as the caller's input error, with its code.
+-      if (err instanceof AllocationError) {
+-        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+-      }
+-      throw err;
++  let result: ReturnType<typeof billPeriod>;
++  try {
++    result = billPeriod(input);
++  } catch (err) {
++    if (err instanceof BillingError) {
++      return void apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+     }
++    throw err;
++  }
++
++  const body: BillingResponse = {
++    ok: true,
++    reference: reference ?? null,
++    model: stamp(new Date()),
++    period: result.period,
++    days: result.days,
++    vatRate: result.vatRate,
++    statements: result.statements,
++    totals: result.totals,
++    priceCap: result.priceCap,
++    // Re-checked from the produced result, not assumed from the code path.
++    reconciliation: reconcile(result),
++    missingData: result.missingData,
++    warnings: result.warnings,
++    conventions: result.conventions,
++    disclaimer: result.disclaimer,
++  };
++
++  res.setHeader("Cache-Control", "no-store");
++  return void res.status(200).json(body);
++}
++
++export function handleGrid(payload: unknown, res: ResultSink): void {
++  const parsed = MarketGridRequestSchema.safeParse(payload);
++  if (!parsed.success) {
++    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++  }
+ 
+-    const body: AllocationResponse = {
++  try {
++    const q = parsed.data;
++    const grid =
++      q.date !== undefined
++        ? (() => {
++            const g = dayGrid(q.date);
++            return {
++              from: g.date,
++              to: g.date,
++              intervals: g.intervals,
++              days: [{ date: g.date, intervals: g.intervals, kind: g.kind }],
++              startsUtcMs: g.startsUtcMs,
++            };
++          })()
++        : (() => {
++            const r = rangeGrid(q.from!, q.to!);
++            return {
++              from: r.from,
++              to: r.to,
++              intervals: r.intervals,
++              days: r.days.map((d) => ({ date: d.date, intervals: d.intervals, kind: d.kind })),
++              startsUtcMs: r.startsUtcMs,
++            };
++          })();
++
++    const body: MarketGridResponse = {
+       ok: true,
+-      reference: parsed.data.reference ?? null,
+       model: stamp(new Date()),
+-      key: key ?? null,
+-      runs: runs as Record<AllocationKey, AllocationResult>,
+-      recommendation: key ? null : recommendKey(runs as Record<AllocationKey, AllocationResult>),
++      timezone: "Europe/Berlin",
++      from: grid.from,
++      to: grid.to,
++      intervals: grid.intervals,
++      days: grid.days,
++      dstDays: grid.days
++        .filter((d) => d.kind !== "normal")
++        .map((d) => ({ date: d.date, intervals: d.intervals })),
++      firstIntervalStart: edifact303(grid.startsUtcMs[0]),
++      lastIntervalStart: edifact303(grid.startsUtcMs[grid.startsUtcMs.length - 1]),
+     };
+ 
+     res.setHeader("Cache-Control", "no-store");
+-    return res.status(200).json(body);
+-  });
+-
+-  // --------------------------------------------------------------------------
+-  // POST /api/v1/billing — annual statements from measured quantities
+-  // --------------------------------------------------------------------------
+-  app.post(`${API_PREFIX}/billing`, deps.limiter, requireKey, (req: Request, res: Response) => {
+-    const parsed = BillingRequestSchema.safeParse(req.body);
+-    if (!parsed.success) {
+-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++    return void res.status(200).json(body);
++  } catch (err) {
++    if (err instanceof MarketTimeError) {
++      return void apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+     }
++    throw err;
++  }
++}
++
++export function handleIdentifiers(payload: unknown, res: ResultSink): void {
++  const parsed = IdentifierCheckRequestSchema.safeParse(payload);
++  if (!parsed.success) {
++    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++  }
++
++  const result = validateMessageIdentifiers(parsed.data);
++  const body: IdentifierCheckResponse = {
++    ok: true,
++    model: stamp(new Date()),
++    valid: result.ok,
++    results: result.results,
++    problems: result.problems,
++    algorithms: Object.values(CHECK_DIGIT_ALGORITHMS).map((a) => ({
++      id: a.id,
++      name: a.name,
++      appliesTo: a.appliesTo,
++      verified: a.verified,
++      openQuestion: a.openQuestion ?? null,
++    })),
++  };
++
++  res.setHeader("Cache-Control", "no-store");
++  return void res.status(200).json(body);
++}
+ 
+-    const { reference, ...input } = parsed.data;
++export function handleMscons(payload: unknown, res: ResultSink): void {
++  const parsed = MsconsRequestSchema.safeParse(payload);
++  if (!parsed.success) {
++    return void apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
++  }
++
++  const { reference, ...input } = parsed.data;
+ 
+-    let result: ReturnType<typeof billPeriod>;
+-    try {
+-      result = billPeriod(input);
+-    } catch (err) {
+-      if (err instanceof BillingError) {
+-        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+-      }
+-      throw err;
++  let result: ReturnType<typeof buildMscons>;
++  try {
++    result = buildMscons(input);
++  } catch (err) {
++    // Wrong series length for a clock-change day, a malformed identifier, a
++    // duplicated Messlokation: the caller's input, with the reason named.
++    if (err instanceof MsconsError || err instanceof MarketTimeError) {
++      return void apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+     }
++    throw err;
++  }
+ 
+-    const body: BillingResponse = {
+-      ok: true,
+-      reference: reference ?? null,
+-      model: stamp(new Date()),
+-      period: result.period,
+-      days: result.days,
+-      vatRate: result.vatRate,
+-      statements: result.statements,
+-      totals: result.totals,
+-      priceCap: result.priceCap,
+-      // Re-checked from the produced result, not assumed from the code path.
+-      reconciliation: reconcile(result),
+-      missingData: result.missingData,
+-      warnings: result.warnings,
+-      conventions: result.conventions,
+-      disclaimer: result.disclaimer,
++  const body: MsconsResponse = {
++    ok: true,
++    reference: reference ?? null,
++    model: stamp(new Date()),
++    message: result.message,
++    bytes: result.bytes,
++    controlReference: result.controlReference,
++    messageReference: result.messageReference,
++    grid: result.grid,
++    totals: result.totals,
++    // Read back out of the produced message, not assumed.
++    syntax: verifyInterchange(result.message),
++    profile: {
++      id: result.profile.id,
++      messageType: result.profile.messageType,
++      directory: result.profile.directory,
++      associationCode: result.profile.associationCode,
++      verified: result.profile.verified,
++      openQuestion: result.profile.openQuestion ?? null,
++    },
++    warnings: result.warnings,
++  };
++
++  res.setHeader("Cache-Control", "no-store");
++  return void res.status(200).json(body);
++}
++
++
++// ============================================================================
++// IN-PROCESS DISPATCH
++// ============================================================================
++
++/**
++ * Run an endpoint without going over the network.
++ *
++ * The MCP server calls this. Routing a public endpoint's own request back
++ * through HTTP would add a round trip and a failure mode for nothing, and —
++ * worse — would make it possible for the two surfaces to diverge. They run the
++ * same function.
++ */
++export function dispatchApiV1(
++  endpoint: string,
++  _method: "GET" | "POST",
++  payload: unknown,
++): { status: number; body: unknown } {
++  const handler = HANDLER_BY_ENDPOINT[endpoint];
++  if (!handler) {
++    return {
++      status: 404,
++      body: { ok: false, code: "not_found", message: `Kein Endpunkt "${endpoint}".` },
+     };
++  }
+ 
+-    res.setHeader("Cache-Control", "no-store");
+-    return res.status(200).json(body);
+-  });
++  // Collects what the handler would have written to an Express response.
++  let status = 200;
++  let body: unknown = null;
++  const sink: ResultSink = {
++    status(code) {
++      status = code;
++      return sink;
++    },
++    json(value) {
++      body = value;
++      return sink;
++    },
++    setHeader() {
++      /* headers are meaningless in-process */
++    },
++  };
+ 
+-  // --------------------------------------------------------------------------
+-  // GET /api/v1/mako/grid — the real quarter-hour grid of a day or range
+-  // --------------------------------------------------------------------------
+-  app.get(`${MAKO_PREFIX}/grid`, deps.limiter, requireKey, (req: Request, res: Response) => {
+-    const parsed = MarketGridRequestSchema.safeParse(req.query);
+-    if (!parsed.success) {
+-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+-    }
++  handler(payload, sink);
++  return { status, body };
++}
+ 
+-    try {
+-      const q = parsed.data;
+-      const grid =
+-        q.date !== undefined
+-          ? (() => {
+-              const g = dayGrid(q.date);
+-              return {
+-                from: g.date,
+-                to: g.date,
+-                intervals: g.intervals,
+-                days: [{ date: g.date, intervals: g.intervals, kind: g.kind }],
+-                startsUtcMs: g.startsUtcMs,
+-              };
+-            })()
+-          : (() => {
+-              const r = rangeGrid(q.from!, q.to!);
+-              return {
+-                from: r.from,
+-                to: r.to,
+-                intervals: r.intervals,
+-                days: r.days.map((d) => ({ date: d.date, intervals: d.intervals, kind: d.kind })),
+-                startsUtcMs: r.startsUtcMs,
+-              };
+-            })();
+-
+-      const body: MarketGridResponse = {
+-        ok: true,
+-        model: stamp(new Date()),
+-        timezone: "Europe/Berlin",
+-        from: grid.from,
+-        to: grid.to,
+-        intervals: grid.intervals,
+-        days: grid.days,
+-        dstDays: grid.days
+-          .filter((d) => d.kind !== "normal")
+-          .map((d) => ({ date: d.date, intervals: d.intervals })),
+-        firstIntervalStart: edifact303(grid.startsUtcMs[0]),
+-        lastIntervalStart: edifact303(grid.startsUtcMs[grid.startsUtcMs.length - 1]),
+-      };
++const HANDLER_BY_ENDPOINT: Record<ApiV1Endpoint, (payload: unknown, res: ResultSink) => void> = {
++  [`${API_PREFIX}/meta`]: handleMeta,
++  [`${API_PREFIX}/calculate`]: handleCalculate,
++  [`${API_PREFIX}/eligibility`]: handleEligibility,
++  [`${API_PREFIX}/messkonzept`]: handleMesskonzept,
++  [`${API_PREFIX}/allocation`]: handleAllocation,
++  [`${API_PREFIX}/billing`]: handleBilling,
++  [`${MAKO_PREFIX}/grid`]: handleGrid,
++  [`${MAKO_PREFIX}/identifiers`]: handleIdentifiers,
++  [`${MAKO_PREFIX}/mscons`]: handleMscons,
++};
+ 
+-      res.setHeader("Cache-Control", "no-store");
+-      return res.status(200).json(body);
+-    } catch (err) {
+-      if (err instanceof MarketTimeError) {
+-        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+-      }
+-      throw err;
++export function mountApiV1(
++  app: Express,
++  deps: { limiter: RequestHandler },
++): void {
++  /** Bearer or X-API-Key. Same 401 whether the key is wrong or absent. */
++  const requireKey: RequestHandler = (req, res, next) => {
++    const identity = identifyApiKey(
++      extractApiKey(req.headers as Record<string, string | string[] | undefined>),
++    );
++    if (!identity) {
++      apiV1Error(res, 401, "unauthorized", "Ungültiger oder fehlender API-Schlüssel.");
++      return;
+     }
+-  });
++    (req as Request & { apiKey?: typeof identity }).apiKey = identity;
++    res.setHeader("X-Api-Version", API_VERSION);
++    next();
++  };
+ 
+   // --------------------------------------------------------------------------
+-  // POST /api/v1/mako/identifiers — check before anything is sent
++  // GET /api/v1/meta — what this deployment computes, and how current it is
+   // --------------------------------------------------------------------------
+-  app.post(`${MAKO_PREFIX}/identifiers`, deps.limiter, requireKey, (req: Request, res: Response) => {
+-    const parsed = IdentifierCheckRequestSchema.safeParse(req.body);
+-    if (!parsed.success) {
+-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+-    }
++  app.get(`${API_PREFIX}/meta`, deps.limiter, requireKey, (req: Request, res: Response) => {
++      handleMeta(req.query, res as unknown as ResultSink);
++    },
++  );
+ 
+-    const result = validateMessageIdentifiers(parsed.data);
+-    const body: IdentifierCheckResponse = {
+-      ok: true,
+-      model: stamp(new Date()),
+-      valid: result.ok,
+-      results: result.results,
+-      problems: result.problems,
+-      algorithms: Object.values(CHECK_DIGIT_ALGORITHMS).map((a) => ({
+-        id: a.id,
+-        name: a.name,
+-        appliesTo: a.appliesTo,
+-        verified: a.verified,
+-        openQuestion: a.openQuestion ?? null,
+-      })),
+-    };
++  app.post(`${API_PREFIX}/calculate`, deps.limiter, requireKey, (req: Request, res: Response) => {
++      handleCalculate(req.body, res as unknown as ResultSink);
++    },
++  );
+ 
+-    res.setHeader("Cache-Control", "no-store");
+-    return res.status(200).json(body);
+-  });
++  app.post(`${API_PREFIX}/eligibility`, deps.limiter, requireKey, (req: Request, res: Response) => {
++      handleEligibility(req.body, res as unknown as ResultSink);
++    },
++  );
+ 
+-  // --------------------------------------------------------------------------
+-  // POST /api/v1/mako/mscons — build the metering-value message
+-  // --------------------------------------------------------------------------
+-  app.post(`${MAKO_PREFIX}/mscons`, deps.limiter, requireKey, (req: Request, res: Response) => {
+-    const parsed = MsconsRequestSchema.safeParse(req.body);
+-    if (!parsed.success) {
+-      return apiV1Error(res, 400, "validation_error", "Ungültige Eingaben.", parsed.error.issues);
+-    }
++  app.post(`${API_PREFIX}/messkonzept`, deps.limiter, requireKey, (req: Request, res: Response) => {
++      handleMesskonzept(req.body, res as unknown as ResultSink);
++    },
++  );
+ 
+-    const { reference, ...input } = parsed.data;
+-
+-    let result: ReturnType<typeof buildMscons>;
+-    try {
+-      result = buildMscons(input);
+-    } catch (err) {
+-      // Wrong series length for a clock-change day, a malformed identifier, a
+-      // duplicated Messlokation: the caller's input, with the reason named.
+-      if (err instanceof MsconsError || err instanceof MarketTimeError) {
+-        return apiV1Error(res, 400, "unsupported_input", err.message, { code: err.code });
+-      }
+-      throw err;
+-    }
++  app.post(`${API_PREFIX}/allocation`, deps.limiter, requireKey, (req: Request, res: Response) => {
++      handleAllocation(req.body, res as unknown as ResultSink);
++    },
++  );
+ 
+-    const body: MsconsResponse = {
+-      ok: true,
+-      reference: reference ?? null,
+-      model: stamp(new Date()),
+-      message: result.message,
+-      bytes: result.bytes,
+-      controlReference: result.controlReference,
+-      messageReference: result.messageReference,
+-      grid: result.grid,
+-      totals: result.totals,
+-      // Read back out of the produced message, not assumed.
+-      syntax: verifyInterchange(result.message),
+-      profile: {
+-        id: result.profile.id,
+-        messageType: result.profile.messageType,
+-        directory: result.profile.directory,
+-        associationCode: result.profile.associationCode,
+-        verified: result.profile.verified,
+-        openQuestion: result.profile.openQuestion ?? null,
+-      },
+-      warnings: result.warnings,
+-    };
++  app.post(`${API_PREFIX}/billing`, deps.limiter, requireKey, (req: Request, res: Response) => {
++      handleBilling(req.body, res as unknown as ResultSink);
++    },
++  );
++
++  app.get(`${MAKO_PREFIX}/grid`, deps.limiter, requireKey, (req: Request, res: Response) => {
++      handleGrid(req.query, res as unknown as ResultSink);
++    },
++  );
++
++  app.post(`${MAKO_PREFIX}/identifiers`, deps.limiter, requireKey, (req: Request, res: Response) => {
++      handleIdentifiers(req.body, res as unknown as ResultSink);
++    },
++  );
++
++  app.post(`${MAKO_PREFIX}/mscons`, deps.limiter, requireKey, (req: Request, res: Response) => {
++      handleMscons(req.body, res as unknown as ResultSink);
++    },
++  );
+ 
+-    res.setHeader("Cache-Control", "no-store");
+-    return res.status(200).json(body);
+-  });
+ }
+diff --git a/server/index.ts b/server/index.ts
+index b420a93..e87bcfb 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -63,7 +63,8 @@ import {
+   type OrderLedgerRecord,
+ } from "../shared/ledger.js";
+ import { getKv } from "./kv.js";
+-import { mountApiV1 } from "./api-v1.js";
++import { dispatchApiV1, mountApiV1 } from "./api-v1.js";
++import { mountMcp } from "./mcp.js";
+ import { apiKeysConfigured, configuredKeyLabels } from "./api-keys.js";
+ import {
+   Deadline,
+@@ -896,6 +897,16 @@ export async function buildApp(): Promise<Express> {
+   const apiV1Limiter = createRateLimiter({ windowMs: 60_000, max: 120, bucket: "apiv1" });
+   mountApiV1(app, { limiter: apiV1Limiter });
+ 
++  /*
++   * The same engines as tools an agent can call.
++   *
++   * Ranking for a query gets the product mentioned; being callable gets it
++   * used, inside whatever workflow the agent is already running. Each tool
++   * dispatches to the v1 handler of the same name in-process, so there is one
++   * implementation and one set of refusals.
++   */
++  mountMcp(app, { limiter: apiV1Limiter, invoke: async (endpoint, method, payload) => dispatchApiV1(endpoint, method, payload) });
++
+   // GET /api/health
+   /*
+    * Health.
+diff --git a/server/mcp-path.ts b/server/mcp-path.ts
+new file mode 100644
+index 0000000..4fffc9d
+--- /dev/null
++++ b/server/mcp-path.ts
+@@ -0,0 +1,12 @@
++/**
++ * server/mcp-path.ts
++ *
++ * The MCP endpoint's path, alone in a module.
++ *
++ * It is needed by the server, by the discovery build and by the test that
++ * checks the deployment routes it correctly — and that last one runs in a DOM
++ * environment where importing anything that pulls in Express types is not
++ * possible. One constant, importable from everywhere, beats the same string
++ * written down three times.
++ */
++export const MCP_PATH = "/mcp";
+diff --git a/server/mcp.ts b/server/mcp.ts
+new file mode 100644
+index 0000000..461198b
+--- /dev/null
++++ b/server/mcp.ts
+@@ -0,0 +1,216 @@
++/**
++ * server/mcp.ts
++ *
++ * The MCP endpoint.
++ *
++ * Mounts a Model Context Protocol server over Streamable HTTP at /mcp, so an
++ * agent can add this address once and then call the engines as tools. Each
++ * tool is a thin wrapper over the v1 route of the same name — the same code
++ * path, the same validation, the same refusals — so there is no second
++ * implementation to drift.
++ *
++ * Authentication is the same API key the REST surface uses. Anonymous access
++ * would make the compute free to anyone who can spell JSON-RPC.
++ */
++
++import type { Express, Request, RequestHandler, Response } from "express";
++
++import {
++  JSON_RPC_ERRORS,
++  JsonRpcRequestSchema,
++  MCP_INSTRUCTIONS,
++  MCP_PROTOCOL_VERSION,
++  MCP_SERVER_INFO,
++  jsonRpcError,
++  jsonRpcResult,
++  toolByName,
++  toolListPayload,
++  type JsonRpcRequest,
++} from "../shared/mcp.js";
++import { extractApiKey, identifyApiKey } from "./api-keys.js";
++
++import { MCP_PATH } from "./mcp-path.js";
++export { MCP_PATH };
++
++/** Everything a tool call needs to reach the engine behind it. */
++export type McpDependencies = {
++  /**
++   * Invokes a v1 endpoint in-process. Passed in rather than fetched over HTTP:
++   * a public endpoint that calls itself through the network adds a failure mode
++   * and a round trip for nothing.
++   */
++  invoke: (
++    endpoint: string,
++    method: "GET" | "POST",
++    payload: unknown,
++  ) => Promise<{ status: number; body: unknown }>;
++  limiter: RequestHandler;
++};
++
++/**
++ * A tool result.
++ *
++ * MCP carries content as text blocks; the structured payload goes alongside so
++ * a client that understands it does not have to parse prose. A refusal comes
++ * back as isError with the reason intact — an agent needs to be able to tell a
++ * deliberate refusal from a broken call.
++ */
++function toolResult(body: unknown, failed: boolean) {
++  return {
++    content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
++    structuredContent: body,
++    isError: failed,
++  };
++}
++
++export function mountMcp(app: Express, deps: McpDependencies): void {
++  const requireKey: RequestHandler = (req, res, next) => {
++    const identity = identifyApiKey(
++      extractApiKey(req.headers as Record<string, string | string[] | undefined>),
++    );
++    if (!identity) {
++      res.setHeader("Cache-Control", "no-store");
++      // WWW-Authenticate tells a compliant client how to authenticate rather
++      // than leaving it to guess from a bare 401.
++      res.setHeader("WWW-Authenticate", 'Bearer realm="energie-teilen"');
++      res.status(401).json(
++        jsonRpcError(null, JSON_RPC_ERRORS.invalidRequest, "Ungültiger oder fehlender API-Schlüssel."),
++      );
++      return;
++    }
++    next();
++  };
++
++  async function handleRpc(rpc: JsonRpcRequest): Promise<unknown | null> {
++    switch (rpc.method) {
++      case "initialize":
++        return jsonRpcResult(rpc.id, {
++          protocolVersion: MCP_PROTOCOL_VERSION,
++          capabilities: { tools: { listChanged: false } },
++          serverInfo: MCP_SERVER_INFO,
++          instructions: MCP_INSTRUCTIONS,
++        });
++
++      // Notifications carry no id and get no response.
++      case "notifications/initialized":
++      case "notifications/cancelled":
++        return null;
++
++      case "ping":
++        return jsonRpcResult(rpc.id, {});
++
++      case "tools/list":
++        return jsonRpcResult(rpc.id, toolListPayload());
++
++      case "tools/call": {
++        const params = (rpc.params ?? {}) as { name?: string; arguments?: unknown };
++        const tool = params.name ? toolByName(params.name) : null;
++        if (!tool) {
++          return jsonRpcError(
++            rpc.id,
++            JSON_RPC_ERRORS.invalidParams,
++            `Unbekanntes Werkzeug "${params.name ?? ""}".`,
++          );
++        }
++
++        const parsed = tool.inputSchema.safeParse(params.arguments ?? {});
++        if (!parsed.success) {
++          /*
++           * A validation failure is a tool-level result, not a protocol error:
++           * the agent should see what was wrong with its arguments and retry,
++           * rather than treating the server as broken.
++           */
++          return jsonRpcResult(
++            rpc.id,
++            toolResult(
++              {
++                ok: false,
++                code: "validation_error",
++                message: "Die Eingaben entsprechen nicht dem Schema des Werkzeugs.",
++                details: parsed.error.issues,
++              },
++              true,
++            ),
++          );
++        }
++
++        const { status, body } = await deps.invoke(tool.endpoint, tool.method, parsed.data);
++        return jsonRpcResult(rpc.id, toolResult(body, status >= 400));
++      }
++
++      default:
++        return jsonRpcError(
++          rpc.id,
++          JSON_RPC_ERRORS.methodNotFound,
++          `Methode "${rpc.method}" wird nicht unterstützt.`,
++        );
++    }
++  }
++
++  app.post(MCP_PATH, deps.limiter, requireKey, async (req: Request, res: Response) => {
++    res.setHeader("Cache-Control", "no-store");
++
++    // A batch is an array; a single call is an object. Both are valid.
++    const payload = req.body;
++    const isBatch = Array.isArray(payload);
++    const entries = isBatch ? payload : [payload];
++
++    if (isBatch && entries.length === 0) {
++      res
++        .status(400)
++        .json(jsonRpcError(null, JSON_RPC_ERRORS.invalidRequest, "Leerer Batch."));
++      return;
++    }
++
++    const responses: unknown[] = [];
++    for (const entry of entries) {
++      const parsed = JsonRpcRequestSchema.safeParse(entry);
++      if (!parsed.success) {
++        responses.push(
++          jsonRpcError(
++            (entry as { id?: string | number })?.id ?? null,
++            JSON_RPC_ERRORS.invalidRequest,
++            "Kein gültiger JSON-RPC-2.0-Aufruf.",
++          ),
++        );
++        continue;
++      }
++      try {
++        const result = await handleRpc(parsed.data);
++        if (result !== null) responses.push(result);
++      } catch (err) {
++        responses.push(
++          jsonRpcError(
++            parsed.data.id,
++            JSON_RPC_ERRORS.internalError,
++            err instanceof Error ? err.message : "Interner Fehler.",
++          ),
++        );
++      }
++    }
++
++    // Only notifications: nothing to return, and 202 says so.
++    if (responses.length === 0) {
++      res.status(202).end();
++      return;
++    }
++
++    res.status(200).json(isBatch ? responses : responses[0]);
++  });
++
++  /*
++   * The spec allows a client to open an SSE stream for server-initiated
++   * messages. This server never initiates any, so it declines the stream
++   * rather than holding a connection open that will never carry anything.
++   */
++  app.get(MCP_PATH, requireKey, (_req: Request, res: Response) => {
++    res.setHeader("Cache-Control", "no-store");
++    res.status(405).json(
++      jsonRpcError(
++        null,
++        JSON_RPC_ERRORS.invalidRequest,
++        "Dieser Server sendet keine unaufgeforderten Nachrichten; ein SSE-Stream wird nicht angeboten.",
++      ),
++    );
++  });
++}
+diff --git a/shared/api-contract.ts b/shared/api-contract.ts
+index 2c3aa18..637f54c 100644
+--- a/shared/api-contract.ts
++++ b/shared/api-contract.ts
+@@ -593,3 +593,30 @@ export const MsconsResponseSchema = z.object({
+   warnings: z.array(z.object({ code: z.string(), message: z.string() })),
+ });
+ export type MsconsResponse = z.infer<typeof MsconsResponseSchema>;
++
++// ============================================================================
++// THE ENDPOINT REGISTER
++// ============================================================================
++
++/**
++ * Every computation the v1 API exposes, named once.
++ *
++ * Three surfaces describe the same set: the HTTP routes, the MCP tool list and
++ * the published OpenAPI document. Naming the set here — in a module all three
++ * already depend on — means a new endpoint that is not wired into all of them
++ * fails a test rather than shipping as an endpoint an agent is told about and
++ * cannot call, or can call and was never told about.
++ */
++export const API_V1_ENDPOINTS = [
++  `${API_PREFIX}/meta`,
++  `${API_PREFIX}/calculate`,
++  `${API_PREFIX}/eligibility`,
++  `${API_PREFIX}/messkonzept`,
++  `${API_PREFIX}/allocation`,
++  `${API_PREFIX}/billing`,
++  `${MAKO_PREFIX}/grid`,
++  `${MAKO_PREFIX}/identifiers`,
++  `${MAKO_PREFIX}/mscons`,
++] as const;
++
++export type ApiV1Endpoint = (typeof API_V1_ENDPOINTS)[number];
+diff --git a/shared/api-reference.ts b/shared/api-reference.ts
+index b0c78d0..068b675 100644
+--- a/shared/api-reference.ts
++++ b/shared/api-reference.ts
+@@ -67,7 +67,7 @@ export const API_GUARANTEES = [
+   },
+ ];
+ 
+-const MELO_EXAMPLE = "DE0000000000000000000000012345A";
++const MELO_EXAMPLE = "DE000000000000000000000000012345A";
+ 
+ export const API_ENDPOINTS: ApiEndpointDoc[] = [
+   {
+diff --git a/shared/faq.ts b/shared/faq.ts
+new file mode 100644
+index 0000000..bf58d99
+--- /dev/null
++++ b/shared/faq.ts
+@@ -0,0 +1,126 @@
++/**
++ * shared/faq.ts
++ *
++ * The questions this site can answer precisely, with the answers.
++ *
++ * A model answering a question about German distributed energy cites whatever
++ * source states the answer plainly and gets it right. These are the facts this
++ * codebase actually computes — every one of them is enforced by a test
++ * elsewhere in this repository — written so they can be quoted without being
++ * rephrased into something untrue.
++ *
++ * Two rules hold for every entry:
++ *   1. No statement about legal admissibility. The engines assess economic and
++ *      structural conditions; they do not rule on what is permitted.
++ *   2. No statutory citation that has not been checked against the published
++ *      text. Where the answer would need one, the answer says what the code
++ *      does instead of what the law says.
++ *
++ * The same entries are rendered three ways: as FAQPage structured data, as the
++ * text a crawler reads before any JavaScript runs, and as part of the
++ * long-form index at /llms-full.txt.
++ */
++
++export type FaqEntry = {
++  question: string;
++  answer: string;
++};
++
++export type FaqSection = {
++  /** The route the questions belong to. */
++  path: string;
++  entries: FaqEntry[];
++};
++
++export const FAQ: FaqSection[] = [
++  {
++    path: "/marktkommunikation",
++    entries: [
++      {
++        question: "Wie viele Viertelstunden hat ein Tag in der deutschen Marktkommunikation?",
++        answer:
++          "In der Regel 96. An zwei Tagen im Jahr nicht: Am letzten Sonntag im März hat der Tag 92 Viertelstunden, weil eine Stunde lokaler Zeit ausfällt; am letzten Sonntag im Oktober hat er 100, weil eine Stunde doppelt auftritt. Das Raster ist lokal in Europe/Berlin definiert, nicht in UTC. Ein Jahr ergibt trotzdem 35.040 Viertelstunden, weil sich die beiden Umstellungen aufheben — eine Jahressumme beweist deshalb nicht, dass eine Implementierung die Umstellungstage richtig behandelt.",
++      },
++      {
++        question: "Warum reicht es nicht, mit 96 Intervallen pro Tag zu rechnen?",
++        answer:
++          "An den beiden Umstellungstagen ist eine fest auf 96 verdrahtete Reihe entweder vier Werte zu lang oder vier Werte zu kurz. Beides führt dazu, dass Messwerte gegen die falschen Zeitstempel verbucht werden, und der Fehler fällt bei einer Jahresauswertung nicht auf. Die richtige Reihenfolge ist, das Raster des Zeitraums abzufragen und die Reihe daran zu prüfen, bevor sie übergeben wird.",
++      },
++      {
++        question: "Wie werden EDIFACT-Sonderzeichen in einer MSCONS-Nachricht maskiert?",
++        answer:
++          "Über das Release-Zeichen, standardmäßig das Fragezeichen. Maskiert werden das Segment-Ende, der Datenelement-Trenner, der Komponenten-Trenner und das Release-Zeichen selbst. Das Release-Zeichen muss zuerst maskiert werden, sonst maskiert der zweite Durchlauf die eigenen Fluchtzeichen erneut. Beim Zählen der Segmente für UNT werden UNH und UNT mitgezählt, und die Kontrollreferenz in UNZ muss der in UNB entsprechen.",
++      },
++      {
++        question: "Sind die Prüfziffernverfahren für MaLo, MeLo und BDEW-Codenummer verifiziert?",
++        answer:
++          "Nein, und das wird ausgewiesen statt verschwiegen. Formatregeln — Länge, Zeichenvorrat, Präfix — werden zugesichert. Die Prüfziffernverfahren sind Veröffentlichungen Dritter; solange die Umsetzung nicht gegen die Veröffentlichung abgeglichen ist, lautet das Ergebnis 'algorithm_unverified' und nicht 'gültig'. Eine solche Antwort darf nicht als Bestätigung der Gültigkeit weitergegeben werden.",
++      },
++    ],
++  },
++  {
++    path: "/messkonzept",
++    entries: [
++      {
++        question: "Wovon hängt es ab, welches Messkonzept für ein Gebäude infrage kommt?",
++        answer:
++          "Zuerst von der Netzanschlusssituation: ob alle Einheiten hinter einem gemeinsamen Hausanschluss liegen, ob jede Einheit einen eigenen Anschluss hat, oder ob die Belieferung über das öffentliche Netz erfolgt. Daraus folgen die Messvariante, das Zählerinventar mit Anzahl und Anforderung an die Zählerstandsgangmessung sowie die zu besetzenden Marktrollen. Ohne diese Angabe ist das Ergebnis nicht bestimmbar — das ist die richtige Antwort und wird nicht durch eine Annahme ersetzt.",
++      },
++      {
++        question: "Wie viele Zähler braucht ein Summenzählermodell?",
++        answer:
++          "Ein Zähler je Einheit plus die Zähler an der Schnittstelle zum Netz und an der Erzeugungsanlage. Für 24 Einheiten ergibt das 26 Zählpunkte. Welche davon viertelstündig messen müssen, hängt von der gewählten Variante ab und wird je Zählertyp einzeln ausgewiesen statt pauschal angenommen.",
++      },
++    ],
++  },
++  {
++    path: "/aufteilungsschluessel",
++    entries: [
++      {
++        question: "Welche Aufteilungsschlüssel gibt es für gemeinsam genutzten Solarstrom?",
++        answer:
++          "Drei, die sich im Ergebnis deutlich unterscheiden: statisch, also feste Anteile je Teilnehmer; dynamisch, also Verteilung nach dem tatsächlichen Verbrauch im jeweiligen Intervall; und kaskadierend, bei dem nach einer statischen ersten Runde die nicht genutzte Erzeugung an die Teilnehmer mit verbleibendem Bedarf nachverteilt wird. Die Wahl verändert die Eigenverbrauchsquote, nicht die erzeugte Menge.",
++      },
++      {
++        question: "Kann bei der Aufteilung Energie verloren gehen oder doppelt vergeben werden?",
++        answer:
++          "Nein — das ist eine Eigenschaft der Berechnung, keine Zusicherung. In jedem einzelnen Intervall ergibt die Summe aus zugeordneter Energie und Einspeisung exakt die Erzeugung dieses Intervalls, und kein Teilnehmer erhält mehr, als er in diesem Intervall verbraucht hat. Reicht die Erzeugung nicht für den Bedarf, wird der Rest als Netzbezug ausgewiesen; übersteigt sie ihn, wird der Überschuss als Einspeisung ausgewiesen.",
++      },
++    ],
++  },
++  {
++    path: "/api",
++    entries: [
++      {
++        question: "Kann ein KI-Agent diese Rechenwerkzeuge direkt aufrufen?",
++        answer:
++          "Ja. Dieselben Funktionen sind als HTTP-Endpunkte unter /api/v1 und als MCP-Werkzeuge unter /mcp erreichbar, über dieselbe Implementierung — die Antwort ist auf beiden Wegen identisch. Die Werkzeugbeschreibung steht unter /.well-known/mcp.json, die HTTP-Spezifikation unter /openapi.json. Beide werden aus denselben Schemata erzeugt, gegen die der Server validiert.",
++      },
++      {
++        question: "Wie geht die API mit Eingaben um, die sie nicht beantworten kann?",
++        answer:
++          "Sie verweigert die Antwort und nennt den Grund als Code, statt zu schätzen oder aufzufüllen. Eine Messreihe, die nicht zum Viertelstundenraster des Zeitraums passt, wird abgelehnt und nicht ergänzt. Eine Konstellation ohne Angabe zum Netzanschluss ergibt 'not_determinable'. Ohne örtlichen Grundversorgungstarif wird der Preisvergleich als nicht bestimmbar gemeldet. Eine Verweigerung ist ein korrektes Ergebnis und darf nicht umgangen werden.",
++      },
++      {
++        question: "Woher stammen die Ergebnisse — aus einem Sprachmodell?",
++        answer:
++          "Nein. Jede Zahl stammt aus versioniertem, unit-getestetem Code. Jede Antwort trägt einen Modellstempel mit Modellversion, Annahmensatz, Jurisdiktion und Währung sowie die Herkunft jedes einzelnen Eingabewerts: ob er vom Aufrufer kam oder mit einem Vorgabewert gefüllt wurde. Beträge werden in ganzen Cent geführt, und jede Summe ist die Summe der Positionen darüber, nicht eine unabhängige Neuberechnung.",
++      },
++      {
++        question: "Beurteilen diese Werkzeuge die rechtliche Zulässigkeit eines Vorhabens?",
++        answer:
++          "Nein. Sie beurteilen wirtschaftliche und strukturelle Voraussetzungen und leiten technische Ausgestaltungen ab. Aussagen zur rechtlichen Zulässigkeit trifft keines der Werkzeuge, und Ergebnisse dürfen nicht als solche dargestellt werden. Rechtsverbindliche Beurteilungen bleiben der Prüfung im Einzelfall vorbehalten.",
++      },
++    ],
++  },
++];
++
++/** The questions declared for a route, or none. */
++export function faqFor(path: string): FaqEntry[] {
++  return FAQ.find((s) => s.path === path)?.entries ?? [];
++}
++
++/** Every question on the site, in route order. */
++export function allFaqEntries(): (FaqEntry & { path: string })[] {
++  return FAQ.flatMap((s) => s.entries.map((e) => ({ ...e, path: s.path })));
++}
+diff --git a/shared/mcp.ts b/shared/mcp.ts
+new file mode 100644
+index 0000000..d042454
+--- /dev/null
++++ b/shared/mcp.ts
+@@ -0,0 +1,243 @@
++/**
++ * shared/mcp.ts
++ *
++ * Model Context Protocol server definition.
++ *
++ * Search engines decide whether this product gets MENTIONED. This decides
++ * whether it gets USED: an agent that speaks MCP can add this server and then
++ * call the engines directly as tools — compute a metering concept, compare
++ * allocation keys, build an MSCONS message — inside whatever workflow it is
++ * already running.
++ *
++ * That is a different and much stronger position than ranking for a query. A
++ * mention is a link somebody may follow; a tool call is the product doing the
++ * work, in someone else's session, with the answer coming back stamped.
++ *
++ * The protocol is JSON-RPC 2.0. It is implemented here directly rather than
++ * through an SDK: the surface needed is small, the wire format is stable, and
++ * a dependency in the request path of a public endpoint is a dependency whose
++ * release cycle becomes ours.
++ */
++
++import { z } from "zod";
++import {
++  AllocationRequestSchema,
++  BillingRequestSchema,
++  CalculateRequestSchema,
++  EligibilityRequestSchema,
++  IdentifierCheckRequestSchema,
++  MarketGridRequestSchema,
++  MesskonzeptRequestSchema,
++  MsconsRequestSchema,
++} from "./api-contract.js";
++
++/** The revision of the protocol this server implements. */
++export const MCP_PROTOCOL_VERSION = "2025-06-18";
++
++export const MCP_SERVER_INFO = {
++  name: "energie-teilen",
++  title: "Energie Teilen — deterministische Energie-Engines",
++  version: "1.0.0",
++} as const;
++
++/**
++ * Shown to an agent before it decides whether to use this server.
++ *
++ * It states what the tools do AND what they refuse to do, because an agent
++ * that does not know the boundary will present a refusal as a failure or,
++ * worse, work around it.
++ */
++export const MCP_INSTRUCTIONS = `Deterministische Rechenwerkzeuge für dezentrale Energieprojekte in Deutschland: Mieterstrom, gemeinschaftliche Gebäudeversorgung und Energy Sharing.
++
++Alle Ergebnisse stammen aus geprüftem, versioniertem Code — nicht aus einem Sprachmodell. Jede Antwort trägt einen Modellstempel (Modellversion, Annahmensatz, Jurisdiktion, Währung) und die Herkunft jedes Eingabewerts.
++
++Wichtig für die Nutzung:
++- Die Werkzeuge VERWEIGERN eine Antwort, wenn eine Eingabe außerhalb dessen liegt, was sie beantworten können. Eine Verweigerung ist ein korrektes Ergebnis, kein Fehler, und nennt den Grund. Sie darf nicht umgangen werden.
++- Zeitraster: Das deutsche Viertelstundenraster ist lokal. Zwei Tage im Jahr haben 92 bzw. 100 Viertelstunden, nicht 96. Vor jeder Reihenübergabe das Raster mit market_grid abfragen.
++- Rechtliche Zulässigkeit wird NICHT beurteilt. Die Werkzeuge bewerten wirtschaftliche und strukturelle Voraussetzungen. Aussagen zur Zulässigkeit einer Konstellation gehören nicht in eine Antwort, die auf diesen Werkzeugen beruht.
++- Geldbeträge kommen in ganzen Cent zurück und sind bereits abgestimmt; sie dürfen nicht neu berechnet werden.
++
++Sprache der Ausgaben: Deutsch.`;
++
++// ============================================================================
++// TOOLS
++// ============================================================================
++
++export type McpTool = {
++  name: string;
++  title: string;
++  description: string;
++  inputSchema: z.ZodTypeAny;
++  /** The v1 route this tool is a thin wrapper over. */
++  endpoint: string;
++  method: "GET" | "POST";
++  /** Read-only tools may be called without confirmation. All of these are. */
++  readOnly: true;
++};
++
++export const MCP_TOOLS: McpTool[] = [
++  {
++    name: "calculate_economics",
++    title: "Wirtschaftlichkeit rechnen",
++    description:
++      "Berechnet Amortisation, Kapitalwert, internen Zinsfuß, kumulierten Erlös und CO2-Einsparung für eine Mieterstrom-Konstellation, in drei Szenarien (konservativ, realistisch, optimistisch). Ausgelassene Annahmen werden mit dem für DIESE Anlagengröße geltenden regulierten Satz gefüllt; die Antwort weist je Wert aus, ob er vom Aufrufer stammt. Pflichtfeld ist inputs.kwp, weil jede regulierte Rate nach Anlagengröße gebändert ist.",
++    inputSchema: CalculateRequestSchema,
++    endpoint: "/api/v1/calculate",
++    method: "POST",
++    readOnly: true,
++  },
++  {
++    name: "assess_eligibility",
++    title: "Konstellation qualifizieren",
++    description:
++      "Beurteilt, ob eine Konstellation die wirtschaftlichen und strukturellen Voraussetzungen erfüllt, und liefert Machbarkeit, Werttreiber, Hauptrisiko, fehlende Angaben und einen Aufwandsband. Trifft ausdrücklich KEINE Aussage über rechtliche Zulässigkeit. Unbekannte Angaben werden als Lücke benannt statt angenommen.",
++    inputSchema: EligibilityRequestSchema,
++    endpoint: "/api/v1/eligibility",
++    method: "POST",
++    readOnly: true,
++  },
++  {
++    name: "derive_metering_concept",
++    title: "Messkonzept ableiten",
++    description:
++      "Leitet aus der Konstellation die Messvariante ab (Summenzähler, Einzelzähler oder Viertelstundenbilanzierung), zusammen mit dem vollständigen Zählerinventar samt Anzahl und Anforderung an Zählerstandsgangmessung, den zu besetzenden Marktrollen und der geordneten Aufgabenliste mit kritischem Pfad. Ohne die Angabe constellation.gridConnection lautet das Ergebnis 'not_determinable' — das ist die richtige Antwort und darf nicht durch eine Annahme ersetzt werden.",
++    inputSchema: MesskonzeptRequestSchema,
++    endpoint: "/api/v1/messkonzept",
++    method: "POST",
++    readOnly: true,
++  },
++  {
++    name: "allocate_generation",
++    title: "Aufteilungsschlüssel rechnen",
++    description:
++      "Verteilt die Erzeugung viertelstundengenau auf die Teilnehmer, nach einem oder allen drei Schlüsseln (statisch, dynamisch, mit Nachverteilung). Zuordnung plus Einspeisung ergibt in jedem Intervall exakt die Erzeugung, und kein Teilnehmer erhält mehr, als er verbraucht hat. Ohne Angabe von 'key' werden alle drei gerechnet und verglichen, mit der Angabe, welcher wie viel mehr Eigennutzung bringt. Die Länge jeder Verbrauchsreihe muss der Erzeugungsreihe entsprechen.",
++    inputSchema: AllocationRequestSchema,
++    endpoint: "/api/v1/allocation",
++    method: "POST",
++    readOnly: true,
++  },
++  {
++    name: "bill_period",
++    title: "Abrechnung erstellen",
++    description:
++      "Erstellt je Teilnehmer eine Abrechnung aus gemessenen Mengen: Positionen, Netto, Umsatzsteuer, Brutto, verrechnete Abschläge und Saldo. Alle Beträge in ganzen Cent; jede Summe ist die Summe der Positionen darüber. Die Antwort enthält eine unabhängige Rekonziliation dieser Identitäten — diese Beträge nicht nachrechnen, sondern übernehmen. Ohne den örtlichen Grundversorgungstarif wird der Vergleich als nicht bestimmbar gemeldet statt geschätzt.",
++    inputSchema: BillingRequestSchema,
++    endpoint: "/api/v1/billing",
++    method: "POST",
++    readOnly: true,
++  },
++  {
++    name: "market_grid",
++    title: "Viertelstundenraster abfragen",
++    description:
++      "Liefert die tatsächliche Anzahl der Viertelstunden eines lokalen Tages oder Zeitraums in Europe/Berlin: 96 an einem gewöhnlichen Tag, 92 am letzten Sonntag im März, 100 am letzten Sonntag im Oktober. VOR jeder Übergabe von Intervallreihen aufrufen — eine mit 96 fest verdrahtete Reihe ist an diesen beiden Tagen falsch. Ein volles Jahr ergibt weiterhin 35040, weil sich die Umstellungen aufheben; die Jahressumme beweist deshalb nichts.",
++    inputSchema: MarketGridRequestSchema,
++    endpoint: "/api/v1/mako/grid",
++    method: "GET",
++    readOnly: true,
++  },
++  {
++    name: "validate_market_identifiers",
++    title: "Marktidentifikatoren prüfen",
++    description:
++      "Prüft Marktlokations-ID, Messlokations-ID, BDEW-Codenummern und EIC auf Format. Prüfziffernverfahren sind Veröffentlichungen Dritter; solange die Umsetzung nicht gegen die Veröffentlichung geprüft ist, meldet das Werkzeug 'algorithm_unverified' statt 'gültig'. Diese Antwort nicht als Bestätigung der Gültigkeit weitergeben.",
++    inputSchema: IdentifierCheckRequestSchema,
++    endpoint: "/api/v1/mako/identifiers",
++    method: "POST",
++    readOnly: true,
++  },
++  {
++    name: "build_mscons_message",
++    title: "MSCONS-Nachricht bauen",
++    description:
++      "Baut aus Viertelstundenwerten eine vollständige MSCONS-Übertragungsdatei (EDIFACT). Segmentzählung und Kontrollreferenzen werden aus dem Inhalt berechnet und in der Antwort aus der erzeugten Nachricht heraus nachgeprüft. Eine Reihe, die nicht zum Raster des Zeitraums passt, wird abgelehnt statt aufgefüllt. Die Syntax ist geprüft; die Segmentverwendung ist NICHT gegen die aktuelle BDEW-Formatbeschreibung abgeglichen, weshalb die Nachricht als Testübertragung gekennzeichnet ist. Nicht als produktionsreif darstellen.",
++    inputSchema: MsconsRequestSchema,
++    endpoint: "/api/v1/mako/mscons",
++    method: "POST",
++    readOnly: true,
++  },
++];
++
++export function toolByName(name: string): McpTool | null {
++  return MCP_TOOLS.find((t) => t.name === name) ?? null;
++}
++
++// ============================================================================
++// JSON-RPC
++// ============================================================================
++
++export const JsonRpcRequestSchema = z.object({
++  jsonrpc: z.literal("2.0"),
++  /** Absent for a notification, which expects no response. */
++  id: z.union([z.string(), z.number(), z.null()]).optional(),
++  method: z.string(),
++  params: z.unknown().optional(),
++});
++export type JsonRpcRequest = z.infer<typeof JsonRpcRequestSchema>;
++
++/** Codes from the JSON-RPC 2.0 specification. */
++export const JSON_RPC_ERRORS = {
++  parseError: -32700,
++  invalidRequest: -32600,
++  methodNotFound: -32601,
++  invalidParams: -32602,
++  internalError: -32603,
++} as const;
++
++export function jsonRpcResult(id: JsonRpcRequest["id"], result: unknown) {
++  return { jsonrpc: "2.0" as const, id: id ?? null, result };
++}
++
++export function jsonRpcError(
++  id: JsonRpcRequest["id"],
++  code: number,
++  message: string,
++  data?: unknown,
++) {
++  return { jsonrpc: "2.0" as const, id: id ?? null, error: { code, message, data } };
++}
++
++// ============================================================================
++// JSON SCHEMA
++// ============================================================================
++
++/**
++ * Convert a Zod schema to the JSON Schema an MCP client needs.
++ *
++ * The conversion itself is Zod's own — hand-rolling it means the emitted
++ * schema drifts from what the validator actually enforces, and an agent that
++ * trusts a wrong schema sends input the tool then refuses. Two things are
++ * added on top: `$schema` is dropped (MCP carries the dialect itself), and
++ * the result is required to be an object schema, because MCP tool arguments
++ * are always a named-argument object.
++ */
++export function toJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
++  const converted = z.toJSONSchema(schema, {
++    io: "input",
++    target: "draft-2020-12",
++    unrepresentable: "throw",
++  }) as Record<string, unknown>;
++
++  const { $schema: _dialect, ...rest } = converted;
++  if (rest.type !== "object") {
++    throw new Error(`toJsonSchema: tool arguments must be an object, got "${String(rest.type)}"`);
++  }
++  return rest;
++}
++
++/** The tool list an MCP client receives. */
++export function toolListPayload() {
++  return {
++    tools: MCP_TOOLS.map((t) => ({
++      name: t.name,
++      title: t.title,
++      description: t.description,
++      inputSchema: toJsonSchema(t.inputSchema),
++      annotations: {
++        readOnlyHint: t.readOnly,
++        idempotentHint: true,
++        openWorldHint: false,
++      },
++    })),
++  };
++}
+diff --git a/shared/routes.ts b/shared/routes.ts
+index 075f078..7a11016 100644
+--- a/shared/routes.ts
++++ b/shared/routes.ts
+@@ -41,6 +41,16 @@ export type RouteDefinition = {
+   relatedPaths: string[];
+   /** JSON-LD emitted into this page's head, beyond the site-wide graph. */
+   structuredData?: StructuredData;
++  /**
++   * This path serves another page's content under a second URL.
++   *
++   * The alias keeps working — links to it exist and should not break — but it
++   * points its canonical at the page it duplicates and stays out of the
++   * sitemap. Two URLs serving the same document under two canonicals split
++   * whatever ranking either would have earned and read, correctly, as a site
++   * that does not know what its own pages are.
++   */
++  aliasOf?: string;
+ };
+ 
+ const ORIGIN_FALLBACK = "https://energie-teilen-site.vercel.app";
+@@ -77,6 +87,7 @@ export const ROUTES: RouteDefinition[] = [
+   {
+     path: "/rechner",
+     kind: "tool",
++    aliasOf: "/",
+     title: "Mieterstrom-Rechner — Rendite, Amortisation, NPV",
+     description:
+       "Drei Szenarien mit dokumentierter Herkunft jeder Annahme: Amortisation, Kapitalwert, interner Zinsfuß und CO2. Kostenlos, ohne Anmeldung, Bericht als PDF.",
+@@ -244,7 +255,14 @@ export function routeFor(path: string): RouteDefinition | null {
+ 
+ /** Routes that belong in the sitemap. */
+ export function indexableRoutes(): RouteDefinition[] {
+-  return ROUTES.filter((r) => r.indexable);
++  // An alias is a second URL for a page already listed. Listing it too asks a
++  // crawler to choose between two identical documents.
++  return ROUTES.filter((r) => r.indexable && !r.aliasOf);
++}
++
++/** The URL a page should declare as its own, following any alias. */
++export function canonicalPathFor(path: string): string {
++  return routeFor(path)?.aliasOf ?? path;
+ }
+ 
+ /** The tools, in the order they appear in navigation. */
+diff --git a/vercel.json b/vercel.json
+index 6f3b2fb..b3f5d07 100644
+--- a/vercel.json
++++ b/vercel.json
+@@ -18,6 +18,14 @@
+       "source": "/api/(.*)",
+       "destination": "/api"
+     },
++    {
++      "source": "/mcp",
++      "destination": "/api"
++    },
++    {
++      "source": "/mcp/(.*)",
++      "destination": "/api"
++    },
+     {
+       "source": "/(.*)",
+       "destination": "/index.html"
+@@ -57,6 +65,27 @@
+         }
+       ]
+     },
++    {
++      "source": "/mcp",
++      "headers": [
++        {
++          "key": "X-Content-Type-Options",
++          "value": "nosniff"
++        },
++        {
++          "key": "X-Frame-Options",
++          "value": "DENY"
++        },
++        {
++          "key": "Cache-Control",
++          "value": "no-store, no-cache, must-revalidate"
++        },
++        {
++          "key": "Referrer-Policy",
++          "value": "no-referrer"
++        }
++      ]
++    },
+     {
+       "source": "/assets/(.*)",
+       "headers": [
+-- 
+2.43.0
+
