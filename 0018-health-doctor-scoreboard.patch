@@ -1,0 +1,1483 @@
+From 0018c4f87bb84548e4723fbde8ff195c3c78f147 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 11 Sep 2026 18:04:35 +0000
+Subject: [PATCH] feat(health): one go-live scoreboard for /api/health and pnpm
+ doctor
+
+Why
+---
+The funnel is deployed and has taken zero euros. What stops it is not code:
+a Stripe key, three price IDs, a webhook secret, APP_URL and the operator's
+own identity. /api/health reported six coarse checks and a two-state verdict
+("ok" / "degraded"), so a deployment that could not take a single payment
+looked the same as one that could take money but not send a confirmation.
+The go-live doctor from 0010 was never applied (scripts/doctor.mjs is absent
+from the tree, and 0010 no longer applies to package.json), so there was no
+operator checklist at all.
+
+This patch adds one register, shared/health.ts, and makes both consumers read
+it:
+
+  * GET /api/health returns the scoreboard: for every capability its id,
+    severity, present, cost_if_missing (plain German), fix, the variables
+    that feed it, and - when something is set but unusable - a problem that
+    describes the defect without quoting the value. Plus a presence map of
+    the thirteen documented variables (booleans), stripeMode (live / test /
+    null) and a three-state verdict:
+
+      blocked   at least one revenue blocker missing - no euro can move
+      degraded  money can move; fulfilment or record-keeping cannot fully
+      ok        every revenue blocker and fulfilment capability present
+
+  * pnpm doctor (tsx scripts/doctor.ts [url]) fetches that payload and
+    prints it: revenue blockers first with cost and fix, then fulfilment,
+    then optional surfaces; the Stripe test-mode caveat and the end-to-end
+    verification sequence when payment is configured. Exit 0 = no revenue
+    blocker, 1 = revenue blocker, 2 = unreachable or no scoreboard.
+
+Severities:
+  revenue_blocker  STRIPE_SECRET_KEY, one price per SKU (read from
+                   PILOT_OFFER_SERVER_CONFIG), APP_URL, STRIPE_WEBHOOK_SECRET,
+                   shared/legal-entity.ts
+  fulfilment       RESEND_API_KEY, RESEND_FROM_EMAIL, LEAD_NOTIFICATION_EMAIL,
+                   UPSTASH_REDIS_REST_URL + _TOKEN, ADMIN_API_TOKEN
+  optional         ET_API_KEYS
+
+Usability, not mere presence: a value left as written in .env.example
+("sk_test_...") is not configuration; a localhost or plain-http APP_URL is
+refused in production; a publishable key in STRIPE_SECRET_KEY, a product id
+in a price variable, a half-configured Upstash pair or an admin token below
+16 characters (which the admin surface already refuses) are named as
+problems. legal_entity is present only when legalEntityPublishable() holds -
+the record is checked, not just the flag.
+
+The legacy `failing`, `checks` and `config` fields are kept; `config` is
+byte-compatible so smoke-test.sh keeps working. `failing`/`checks` are now
+projections of the register (check names are the capability ids).
+
+Invariants preserved
+--------------------
+  * /api/health tells the truth: missing Stripe is "blocked", never "ok".
+  * No secret value leaves the server. Only names, booleans and a derived
+    mode. Pinned by a unit test that feeds real-looking secrets and by the
+    same pattern e2e/security.spec.ts applies to the live endpoint.
+  * HTTP status of /api/health stays 200 in every state (uptime probes).
+  * LEGAL_ENTITY stays configured: false; nothing is invented.
+  * No statutory paragraph number anywhere; the citation tree scan passes.
+  * No Stripe call, no dummy charge, no price ID reaches the client.
+  * shared/health.ts is DOM-free and performs no I/O.
+  * Webhook, checkout, ledger and lead code untouched.
+
+Tests added
+-----------
+  client/src/lib/health.test.ts (32 cases): register order and severities;
+  one price capability per sellable tier; top-level payload keys and
+  per-capability fields pinned; env presence map is exactly the documented
+  variables as booleans; ok / degraded / blocked derivation including the
+  shipped legal-entity default; .env.example template values, localhost
+  APP_URL in production, malformed keys/ids/emails/tokens, half-set Upstash,
+  unparseable ET_API_KEYS; stripeMode; no configured value in the report or
+  the doctor output; nothing matching the e2e secret pattern; doctor exit
+  codes 0 / 1 / 2 including a pre-scoreboard deployment and a report whose
+  status and scoreboard disagree (fails closed); doctor output order and
+  test-mode caveat.
+  e2e/api.spec.ts: the live endpoint returns a valid status, a capability
+  list with cost and fix for each entry, and a boolean-only env map.
+
+Not in this patch
+-----------------
+  * No value for any variable, no legal entity, no domain - operator facts.
+  * No change to how APP_URL feeds canonical URLs, sitemap or OG (0020).
+  * No check that mail addresses are domain mailboxes rather than freemail.
+  * No README update (0041).
+  * 0010-go-live-doctor.patch is superseded by this patch and must not be
+    applied after it: it would add a second doctor and a stray
+    marktlage.html.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FJwrn5CBbRT6xKGRqZJWkp
+---
+ .env.example                  |   8 +-
+ client/src/lib/health.test.ts | 457 ++++++++++++++++++++++++++++
+ docs/RUNBOOK.md               |  70 +++--
+ e2e/api.spec.ts               |  13 +
+ package.json                  |   1 +
+ scripts/doctor.ts             |  69 +++++
+ server/index.ts               |  58 ++--
+ shared/health.ts              | 547 ++++++++++++++++++++++++++++++++++
+ shared/legal-entity.ts        |   2 +-
+ 9 files changed, 1172 insertions(+), 53 deletions(-)
+ create mode 100644 client/src/lib/health.test.ts
+ create mode 100644 scripts/doctor.ts
+ create mode 100644 shared/health.ts
+
+diff --git a/.env.example b/.env.example
+index cf330ef..77e33c6 100644
+--- a/.env.example
++++ b/.env.example
+@@ -9,6 +9,10 @@
+ #   REQUIRED  → must be set for the feature to work at all
+ #   OPTIONAL  → safe to omit (feature degrades gracefully)
+ #   PUBLIC    → exposed to the browser (anything prefixed `VITE_` is public)
++#
++# `pnpm doctor` and GET /api/health report which of these are missing, what
++# each absence costs and how to fix it (register: shared/health.ts). A value
++# left exactly as written below (ending in "...") counts as NOT configured.
+ # =============================================================================
+ 
+ 
+@@ -43,7 +47,8 @@ STRIPE_SECRET_KEY=sk_test_...
+ 
+ # REQUIRED. Webhook signing secret. From Stripe dashboard → Developers → Webhooks.
+ # Point the webhook endpoint at: <APP_URL>/api/stripe/webhook
+-# Subscribe to event: checkout.session.completed
++# Subscribe to events: checkout.session.completed AND
++# checkout.session.async_payment_succeeded (SEPA debits settle later).
+ STRIPE_WEBHOOK_SECRET=whsec_...
+ 
+ # REQUIRED. Three Stripe Price IDs — one per pilot tier. Create them as
+@@ -176,6 +181,7 @@ ET_API_KEYS=
+ # -----------------------------------------------------------------------------
+ 
+ # Bearer token for GET /api/admin/orders and POST /api/admin/orders/:ref/stage.
++# /api/health reports the deployment as "degraded" until this is set.
+ # MUST be at least 32 random characters. Below 16 the admin surface is disabled
+ # entirely rather than weakly protected. Generate with:
+ #   openssl rand -hex 32
+diff --git a/client/src/lib/health.test.ts b/client/src/lib/health.test.ts
+new file mode 100644
+index 0000000..1088ffa
+--- /dev/null
++++ b/client/src/lib/health.test.ts
+@@ -0,0 +1,457 @@
++import { describe, it, expect } from "vitest";
++import {
++  CAPABILITY_IDS,
++  DOCTOR_EXIT,
++  REPORTED_ENV_VARS,
++  buildHealthReport,
++  deriveStatus,
++  doctorExitCode,
++  isConfiguredValue,
++  parseHealthReport,
++  renderDoctorReport,
++  type HealthInputs,
++  type HealthReport,
++} from "../../../shared/health";
++import { LEGAL_ENTITY, type LegalEntity } from "../../../shared/legal-entity";
++import { PILOT_OFFER_SERVER_CONFIG } from "../../../shared/schema";
++
++/*
++ * The go-live scoreboard.
++ *
++ * /api/health and `pnpm doctor` both read shared/health.ts. These tests pin
++ * the payload a monitor depends on, the three-way verdict, the doctor's exit
++ * codes, and the rule that no configured value ever leaves the server.
++ */
++
++const COMPLETE_ENTITY: LegalEntity = {
++  configured: true,
++  name: "Beispiel Energie GmbH",
++  street: "Beispielweg 1",
++  postalCode: "60311",
++  city: "Frankfurt am Main",
++  country: "Deutschland",
++  representedBy: "A. Beispiel",
++  phone: "+49 69 1234567",
++  email: "kontakt@energie-teilen.de",
++  registerCourt: "Amtsgericht Frankfurt am Main",
++  registerNumber: "HRB 123456",
++  vatId: "DE123456789",
++  contentResponsible: null,
++  disputeResolution: { participates: false, body: null },
++};
++
++/** Values shaped like real ones. None of them may appear in a report. */
++const SECRETS = {
++  STRIPE_SECRET_KEY: "sk_live_51AbCdEfGhIjKlMnOpQrStUvWx",
++  STRIPE_WEBHOOK_SECRET: "whsec_ZyXwVuTsRqPoNmLkJiHg1234",
++  STRIPE_PRICE_ET_ELIGIBILITY: "price_1QeligibilityAAAA",
++  STRIPE_PRICE_ET_STRUCTURING: "price_1QstructuringBBB",
++  STRIPE_PRICE_ET_MANDATE: "price_1QmandateCCCCCCCC",
++  RESEND_API_KEY: "re_AbCdEfGhIjKlMnOpQrStUv",
++  RESEND_FROM_EMAIL: "Energie Teilen <noreply@beispiel-domain.de>",
++  LEAD_NOTIFICATION_EMAIL: "auftraege@beispiel-domain.de",
++  UPSTASH_REDIS_REST_URL: "https://eu1-sample-12345.upstash.io",
++  UPSTASH_REDIS_REST_TOKEN: "AXkXASQgZmFrZS10b2tlbi12YWx1ZQ",
++  ADMIN_API_TOKEN: "0123456789abcdef0123456789abcdef",
++  APP_URL: "https://beispiel-domain.de",
++  ET_API_KEYS: "kunde:" + "a".repeat(64),
++};
++
++function inputs(over: Partial<HealthInputs> = {}): HealthInputs {
++  return {
++    env: SECRETS,
++    legalEntity: COMPLETE_ENTITY,
++    apiKeysConfigured: true,
++    production: true,
++    ...over,
++  };
++}
++
++const NOW = new Date("2026-09-11T12:00:00.000Z");
++const cap = (r: HealthReport, id: string) => {
++  const found = r.capabilities.find((c) => c.id === id);
++  if (!found) throw new Error(`capability ${id} not in report`);
++  return found;
++};
++
++describe("the capability register", () => {
++  it("is ordered by what it costs to leave broken", () => {
++    expect(CAPABILITY_IDS).toEqual([
++      "stripe_secret_key",
++      "stripe_price_et_eligibility",
++      "stripe_price_et_structuring",
++      "stripe_price_et_mandate",
++      "app_url",
++      "stripe_webhook_secret",
++      "legal_entity",
++      "resend_api_key",
++      "resend_from_email",
++      "lead_notification_email",
++      "durable_kv",
++      "admin_api_token",
++      "api_keys",
++    ]);
++  });
++
++  it("has a price capability for every sellable tier, read from the server config", () => {
++    for (const code of Object.keys(PILOT_OFFER_SERVER_CONFIG)) {
++      expect(CAPABILITY_IDS).toContain(`stripe_price_${code}`);
++    }
++  });
++
++  it("gives every capability a cost and a fix, not just a boolean", () => {
++    const r = buildHealthReport(inputs({ env: {} }), NOW);
++    for (const c of r.capabilities) {
++      expect(c.label.length, c.id).toBeGreaterThan(3);
++      expect(c.cost_if_missing.length, c.id).toBeGreaterThan(30);
++      expect(c.fix.length, c.id).toBeGreaterThan(20);
++      expect(c.env.length, c.id).toBeGreaterThan(0);
++    }
++  });
++
++  it("separates revenue blockers from fulfilment gaps from optional surfaces", () => {
++    const r = buildHealthReport(inputs(), NOW);
++    const by = (s: string) => r.capabilities.filter((c) => c.severity === s).map((c) => c.id);
++    expect(by("revenue_blocker")).toEqual([
++      "stripe_secret_key",
++      "stripe_price_et_eligibility",
++      "stripe_price_et_structuring",
++      "stripe_price_et_mandate",
++      "app_url",
++      "stripe_webhook_secret",
++      "legal_entity",
++    ]);
++    expect(by("fulfilment")).toEqual([
++      "resend_api_key",
++      "resend_from_email",
++      "lead_notification_email",
++      "durable_kv",
++      "admin_api_token",
++    ]);
++    expect(by("optional")).toEqual(["api_keys"]);
++  });
++});
++
++describe("payload shape", () => {
++  it("pins the top-level keys a monitor reads", () => {
++    const r = buildHealthReport(inputs(), NOW);
++    expect(Object.keys(r).sort()).toEqual(
++      [
++        "capabilities",
++        "checks",
++        "env",
++        "failing",
++        "ok",
++        "revenueBlocked",
++        "status",
++        "stripeMode",
++        "summary",
++        "timestamp",
++      ].sort(),
++    );
++    expect(r.timestamp).toBe("2026-09-11T12:00:00.000Z");
++  });
++
++  it("pins the fields of each capability", () => {
++    const r = buildHealthReport(inputs({ env: {} }), NOW);
++    for (const c of r.capabilities) {
++      expect(Object.keys(c).sort()).toEqual(
++        ["cost_if_missing", "env", "fix", "id", "label", "present", "problem", "severity"].sort(),
++      );
++      expect(typeof c.present).toBe("boolean");
++    }
++  });
++
++  it("reports presence of exactly the documented variables, as booleans", () => {
++    const r = buildHealthReport(inputs({ env: { APP_URL: "https://x.de", STRIPE_SECRET_KEY: "" } }), NOW);
++    expect(Object.keys(r.env)).toEqual([...REPORTED_ENV_VARS]);
++    for (const v of Object.values(r.env)) expect(typeof v).toBe("boolean");
++    expect(r.env.APP_URL).toBe(true);
++    expect(r.env.STRIPE_SECRET_KEY).toBe(false);
++  });
++
++  it("keeps the legacy failing/checks lists, without optional surfaces", () => {
++    const r = buildHealthReport(inputs({ env: {}, apiKeysConfigured: false }), NOW);
++    expect(r.checks.map((c) => c.check)).not.toContain("api_keys");
++    expect(r.failing.map((c) => c.check)).not.toContain("api_keys");
++    expect(r.failing.every((f) => f.impact.length > 0)).toBe(true);
++  });
++});
++
++describe("the verdict", () => {
++  it("is ok only when every revenue and fulfilment capability is present", () => {
++    const r = buildHealthReport(inputs(), NOW);
++    expect(r.status).toBe("ok");
++    expect(r.ok).toBe(true);
++    expect(r.revenueBlocked).toBe(false);
++    expect(r.failing).toEqual([]);
++  });
++
++  it("is ok without API keys — an optional surface never fails the deployment", () => {
++    const env: Record<string, string> = { ...SECRETS };
++    delete env.ET_API_KEYS;
++    const r = buildHealthReport(inputs({ env, apiKeysConfigured: false }), NOW);
++    expect(r.status).toBe("ok");
++    expect(cap(r, "api_keys").present).toBe(false);
++    expect(r.summary.missingOptional).toBe(1);
++  });
++
++  it("is blocked, not ok, when Stripe is missing", () => {
++    const env: Record<string, string> = { ...SECRETS };
++    delete env.STRIPE_SECRET_KEY;
++    const r = buildHealthReport(inputs({ env }), NOW);
++    expect(r.status).toBe("blocked");
++    expect(r.ok).toBe(false);
++    expect(r.revenueBlocked).toBe(true);
++    expect(r.stripeMode).toBeNull();
++  });
++
++  it("is blocked when a single tier has no price", () => {
++    const env: Record<string, string> = { ...SECRETS };
++    delete env.STRIPE_PRICE_ET_MANDATE;
++    const r = buildHealthReport(inputs({ env }), NOW);
++    expect(r.status).toBe("blocked");
++    expect(r.failing.map((f) => f.check)).toEqual(["stripe_price_et_mandate"]);
++  });
++
++  it("is blocked while the operator record is not configured — the shipped default", () => {
++    expect(LEGAL_ENTITY.configured).toBe(false);
++    const r = buildHealthReport(inputs({ legalEntity: LEGAL_ENTITY }), NOW);
++    expect(r.status).toBe("blocked");
++    expect(cap(r, "legal_entity").present).toBe(false);
++    expect(cap(r, "legal_entity").problem).toBeNull();
++  });
++
++  it("does not trust configured: true over the record itself", () => {
++    const r = buildHealthReport(
++      inputs({ legalEntity: { ...COMPLETE_ENTITY, name: "[FIRMENNAME]", phone: "" } }),
++      NOW,
++    );
++    const le = cap(r, "legal_entity");
++    expect(le.present).toBe(false);
++    expect(le.problem).toMatch(/name/);
++    expect(le.problem).toMatch(/phone/);
++    expect(le.problem).not.toContain("[FIRMENNAME]");
++  });
++
++  it("is degraded, not blocked, when only fulfilment is missing", () => {
++    const env: Record<string, string> = { ...SECRETS };
++    delete env.RESEND_API_KEY;
++    delete env.UPSTASH_REDIS_REST_TOKEN;
++    const r = buildHealthReport(inputs({ env }), NOW);
++    expect(r.status).toBe("degraded");
++    expect(r.revenueBlocked).toBe(false);
++    expect(r.summary.missingFulfilment).toBe(2);
++    expect(cap(r, "durable_kv").problem).toMatch(/Token fehlt/);
++  });
++
++  it("reports everything missing on an empty environment", () => {
++    const r = buildHealthReport(
++      inputs({ env: {}, legalEntity: LEGAL_ENTITY, apiKeysConfigured: false }),
++      NOW,
++    );
++    expect(r.status).toBe("blocked");
++    expect(r.summary).toEqual({
++      total: 13,
++      present: 0,
++      missingRevenueBlockers: 7,
++      missingFulfilment: 5,
++      missingOptional: 1,
++    });
++  });
++
++  it("derives the status from the capabilities alone", () => {
++    const r = buildHealthReport(inputs(), NOW);
++    expect(deriveStatus(r.capabilities)).toBe("ok");
++    const broken = r.capabilities.map((c) =>
++      c.id === "admin_api_token" ? { ...c, present: false } : c,
++    );
++    expect(deriveStatus(broken)).toBe("degraded");
++  });
++});
++
++describe("usability, not mere presence", () => {
++  it("does not count a value copied from .env.example as configuration", () => {
++    const r = buildHealthReport(
++      inputs({
++        env: {
++          ...SECRETS,
++          STRIPE_SECRET_KEY: "sk_test_...",
++          STRIPE_WEBHOOK_SECRET: "whsec_...",
++          STRIPE_PRICE_ET_ELIGIBILITY: "price_...",
++          RESEND_API_KEY: "re_...",
++        },
++      }),
++      NOW,
++    );
++    for (const id of ["stripe_secret_key", "stripe_webhook_secret", "stripe_price_et_eligibility", "resend_api_key"]) {
++      expect(cap(r, id).present, id).toBe(false);
++      expect(cap(r, id).problem, id).toMatch(/\.env\.example/);
++    }
++    // The raw presence map still says the variable is set; the scoreboard says it is useless.
++    expect(r.env.STRIPE_SECRET_KEY).toBe(true);
++    expect(r.status).toBe("blocked");
++    expect(isConfiguredValue("sk_test_...")).toBe(false);
++    expect(isConfiguredValue("  ")).toBe(false);
++    expect(isConfiguredValue(undefined)).toBe(false);
++  });
++
++  it("refuses a localhost or plain-http APP_URL in production, accepts it locally", () => {
++    for (const url of ["http://localhost:3000", "http://beispiel-domain.de", "kein-url"]) {
++      const prod = buildHealthReport(inputs({ env: { ...SECRETS, APP_URL: url } }), NOW);
++      expect(cap(prod, "app_url").present, url).toBe(false);
++      expect(cap(prod, "app_url").problem, url).toBeTruthy();
++    }
++    const dev = buildHealthReport(
++      inputs({ production: false, env: { ...SECRETS, APP_URL: "http://localhost:3000" } }),
++      NOW,
++    );
++    expect(cap(dev, "app_url").present).toBe(true);
++  });
++
++  it("refuses values that do not have the shape the integration requires", () => {
++    const r = buildHealthReport(
++      inputs({
++        env: {
++          ...SECRETS,
++          STRIPE_SECRET_KEY: "pk_live_51AbCdEfGhIjKlMn",
++          STRIPE_PRICE_ET_STRUCTURING: "prod_1Qabc",
++          LEAD_NOTIFICATION_EMAIL: "kein postfach",
++          ADMIN_API_TOKEN: "kurz",
++          UPSTASH_REDIS_REST_URL: "redis://intern:6379",
++        },
++      }),
++      NOW,
++    );
++    expect(cap(r, "stripe_secret_key").present).toBe(false);
++    expect(cap(r, "stripe_price_et_structuring").present).toBe(false);
++    expect(cap(r, "lead_notification_email").present).toBe(false);
++    expect(cap(r, "admin_api_token").problem).toMatch(/16 Zeichen/);
++    expect(cap(r, "durable_kv").problem).toMatch(/https/);
++  });
++
++  it("flags ET_API_KEYS that are set but parse to nothing", () => {
++    const r = buildHealthReport(
++      inputs({ env: { ...SECRETS, ET_API_KEYS: "kaputt" }, apiKeysConfigured: false }),
++      NOW,
++    );
++    expect(cap(r, "api_keys").present).toBe(false);
++    expect(cap(r, "api_keys").problem).toMatch(/label:sha256/);
++  });
++
++  it("names the Stripe mode, because test mode moves no real money", () => {
++    expect(buildHealthReport(inputs(), NOW).stripeMode).toBe("live");
++    expect(
++      buildHealthReport(inputs({ env: { ...SECRETS, STRIPE_SECRET_KEY: "sk_test_51AbCdEf" } }), NOW)
++        .stripeMode,
++    ).toBe("test");
++    expect(
++      buildHealthReport(inputs({ env: { ...SECRETS, STRIPE_SECRET_KEY: "rk_live_51AbCdEf" } }), NOW)
++        .stripeMode,
++    ).toBe("live");
++  });
++});
++
++describe("no secret leaves the server", () => {
++  it("never echoes a configured value, in the report or in the doctor output", () => {
++    const report = buildHealthReport(inputs(), NOW);
++    const withProblems = buildHealthReport(
++      inputs({ env: { ...SECRETS, ADMIN_API_TOKEN: "kurz-aber-geheim", STRIPE_SECRET_KEY: "pk_live_geheim123" } }),
++      NOW,
++    );
++    for (const r of [report, withProblems]) {
++      const text = JSON.stringify(r) + renderDoctorReport(r, "https://beispiel-domain.de").join("\n");
++      for (const [name, value] of Object.entries(SECRETS)) {
++        if (name === "APP_URL") continue; // the public origin is not a secret
++        expect(text.includes(value), name).toBe(false);
++      }
++      expect(text).not.toContain("kurz-aber-geheim");
++      expect(text).not.toContain("pk_live_geheim123");
++    }
++  });
++
++  it("contains nothing the e2e security suite would flag as a secret", () => {
++    // Same pattern as e2e/security.spec.ts, applied to every state.
++    const SECRET_SHAPE = /sk_(live|test)_|whsec_|re_[A-Za-z0-9]{16,}/;
++    for (const r of [
++      buildHealthReport(inputs(), NOW),
++      buildHealthReport(inputs({ env: {}, legalEntity: LEGAL_ENTITY, apiKeysConfigured: false }), NOW),
++    ]) {
++      expect(JSON.stringify(r)).not.toMatch(SECRET_SHAPE);
++    }
++  });
++});
++
++describe("pnpm doctor", () => {
++  it("exits 2 when there is nothing to read", () => {
++    expect(doctorExitCode(null)).toBe(DOCTOR_EXIT.unreachable);
++    expect(DOCTOR_EXIT.unreachable).toBe(2);
++  });
++
++  it("exits 2 on a deployment that predates the scoreboard, rather than guessing", () => {
++    const legacy = {
++      status: "degraded",
++      ok: false,
++      failing: [{ check: "stripe", impact: "x" }],
++      checks: [{ check: "stripe", ok: false }],
++      config: { stripe: false },
++    };
++    expect(parseHealthReport(legacy)).toBeNull();
++    expect(doctorExitCode(parseHealthReport(legacy))).toBe(2);
++    expect(parseHealthReport("<!doctype html>")).toBeNull();
++    expect(parseHealthReport({ status: "ok", capabilities: [{ id: "x" }] })).toBeNull();
++  });
++
++  it("exits 1 on any revenue blocker", () => {
++    const r = parseHealthReport(
++      JSON.parse(JSON.stringify(buildHealthReport(inputs({ legalEntity: LEGAL_ENTITY }), NOW))),
++    );
++    expect(r).not.toBeNull();
++    expect(doctorExitCode(r)).toBe(DOCTOR_EXIT.revenueBlocked);
++    expect(DOCTOR_EXIT.revenueBlocked).toBe(1);
++  });
++
++  it("exits 0 when only fulfilment is missing — a warning, not a red build", () => {
++    const env: Record<string, string> = { ...SECRETS };
++    delete env.ADMIN_API_TOKEN;
++    const r = buildHealthReport(inputs({ env }), NOW);
++    expect(r.status).toBe("degraded");
++    expect(doctorExitCode(r)).toBe(DOCTOR_EXIT.ok);
++    expect(DOCTOR_EXIT.ok).toBe(0);
++  });
++
++  it("exits 0 when everything is present", () => {
++    expect(doctorExitCode(buildHealthReport(inputs(), NOW))).toBe(0);
++  });
++
++  it("fails closed when a report's status and scoreboard disagree", () => {
++    const r = buildHealthReport(inputs({ legalEntity: LEGAL_ENTITY }), NOW);
++    expect(doctorExitCode({ ...r, status: "ok" })).toBe(1);
++  });
++
++  it("prints what each blocker costs and how to fix it, blockers first", () => {
++    const r = buildHealthReport(
++      inputs({ env: {}, legalEntity: LEGAL_ENTITY, apiKeysConfigured: false }),
++      NOW,
++    );
++    const text = renderDoctorReport(r, "https://beispiel-domain.de").join("\n");
++    expect(text).toMatch(/UMSATZ BLOCKIERT — 7 Voraussetzung/);
++    for (const c of r.capabilities) {
++      expect(text).toContain(c.cost_if_missing);
++      expect(text).toContain(c.fix);
++    }
++    expect(text.indexOf("UMSATZ BLOCKIERT")).toBeLessThan(text.indexOf("EINGESCHRÄNKT"));
++    expect(text.indexOf("EINGESCHRÄNKT")).toBeLessThan(text.indexOf("OPTIONAL"));
++  });
++
++  it("says so when Stripe is in test mode, and gives the verification sequence", () => {
++    const r = buildHealthReport(
++      inputs({ env: { ...SECRETS, STRIPE_SECRET_KEY: "sk_test_51AbCdEf" } }),
++      NOW,
++    );
++    const text = renderDoctorReport(r, "https://beispiel-domain.de").join("\n");
++    expect(text).toMatch(/Testmodus/);
++    expect(text).toContain("stripe listen --forward-to https://beispiel-domain.de/api/stripe/webhook");
++    expect(text).toMatch(/nur noch Kunden/);
++  });
++});
+diff --git a/docs/RUNBOOK.md b/docs/RUNBOOK.md
+index ae3c967..e2bccad 100644
+--- a/docs/RUNBOOK.md
++++ b/docs/RUNBOOK.md
+@@ -13,35 +13,66 @@ pnpm e2e            # browsers: reachability, funnel, a11y, security, budgets
+ 
+ ## Deployment checklist
+ 
+-Work top to bottom. Everything above the line blocks a launch that takes money.
++Work top to bottom. `GET /api/health` and `pnpm doctor` read the same register
++(`shared/health.ts`), so the ids in brackets are what they report.
++
++**Revenue blockers** — while any is missing, health says `blocked`, the
++doctor exits 1, and no euro can move.
++
++1. `STRIPE_SECRET_KEY` [`stripe_secret_key`] — test key first, live key after
++   a successful test purchase. Health reports the mode as `stripeMode`.
++2. `STRIPE_PRICE_ET_ELIGIBILITY`, `STRIPE_PRICE_ET_STRUCTURING`,
++   `STRIPE_PRICE_ET_MANDATE` [`stripe_price_et_*`] — one-time EUR prices.
++   Server-side only; the browser never learns a price ID.
++3. `APP_URL` [`app_url`] — the public https origin. Used for Stripe return
++   URLs; a localhost or plain-http value is refused in production.
++4. `STRIPE_WEBHOOK_SECRET` [`stripe_webhook_secret`] — endpoint
++   `<APP_URL>/api/stripe/webhook` for `checkout.session.completed` and
++   `checkout.session.async_payment_succeeded`.
++5. `shared/legal-entity.ts` [`legal_entity`] — fill every field, set
++   `configured: true`. Health checks the record itself, not only the flag.
++   Verify: `RELEASE_CHECK=1 pnpm test -- client/src/lib/legal-entity.test.ts`
+ 
+-**Blocking**
++**Fulfilment** — payment works, delivery or record-keeping does not. Health
++says `degraded`; the doctor prints them and exits 0.
+ 
+-1. `shared/legal-entity.ts` — fill every field, set `configured: true`.
+-   Verify: `RELEASE_CHECK=1 pnpm test -- client/src/lib/legal-entity.test.ts`
+-2. `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
+-3. `STRIPE_PRICE_ET_ELIGIBILITY`, `STRIPE_PRICE_ET_STRUCTURING`,
+-   `STRIPE_PRICE_ET_MANDATE`
+-4. `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `LEAD_NOTIFICATION_EMAIL`
+-5. `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` — without these a paid
+-   order is not durably enumerable.
+-6. `APP_URL` — used for Stripe return URLs.
+-7. `pnpm fonts:fetch` and commit the two `.woff2` files.
++6. `RESEND_API_KEY` [`resend_api_key`], `RESEND_FROM_EMAIL`
++   [`resend_from_email`] on a Resend-verified domain, `LEAD_NOTIFICATION_EMAIL`
++   [`lead_notification_email`] — domain mailboxes only.
++7. `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` [`durable_kv`] —
++   without these a paid order is not durably enumerable.
++8. `ADMIN_API_TOKEN` [`admin_api_token`] — at least 32 random characters;
++   below 16 the admin surface stays disabled.
+ 
+-**Recommended**
++**Optional** — reported, never changes the status.
+ 
+-8. `ADMIN_API_TOKEN` (≥ 16 chars) for the order list.
+-9. `ET_API_KEYS` for the v1 API — issue with `pnpm apikey:new <label>`.
+-10. `ET_PILOT_RESPONSE_WINDOW`, `ET_CUSTOMER_REPLY_TO`.
++9. `ET_API_KEYS` [`api_keys`] for the v1 API — issue with
++   `pnpm apikey:new <label>`.
++10. `ET_PILOT_RESPONSE_WINDOW`, `ET_CUSTOMER_REPLY_TO` (not scored).
++11. `pnpm fonts:fetch` and commit the two `.woff2` files (not scored).
++
++A value copied verbatim from `.env.example` (ending in `...`) counts as not
++configured, and health says so.
+ 
+ **Confirm after deploying**
+ 
+ ```bash
++pnpm doctor                          # APP_URL if set, else the public host
++pnpm doctor https://<host>
+ curl -s https://<host>/api/health | jq '.status, .failing'
+ ```
+ 
+-`"ok"` means every capability above is present. `"degraded"` lists exactly what
+-is missing and what it costs. A monitor should alert on `status != "ok"`.
++| `status` | Meaning | `pnpm doctor` exit |
++|---|---|---|
++| `ok` | every revenue blocker and fulfilment capability present | 0 |
++| `degraded` | money can move; fulfilment is missing something | 0 |
++| `blocked` | at least one revenue blocker is missing | 1 |
++| — | site unreachable, or it answers without a scoreboard | 2 |
++
++Each entry in `.capabilities` carries `id`, `severity`, `present`,
++`cost_if_missing`, `fix` and, when a value is set but unusable, `problem`.
++`.env` reports the presence of each variable as a boolean. No value is ever
++returned. A monitor should alert on `status != "ok"`.
+ 
+ ## Issuing an API key
+ 
+@@ -87,7 +118,8 @@ full fallback stack — but the intended typography needs them present.
+ 
+ | Signal | Meaning |
+ |---|---|
+-| `/api/health` `status != "ok"` | a revenue-critical capability is missing |
++| `/api/health` `status == "blocked"` | no payment can be taken |
++| `/api/health` `status == "degraded"` | payments work, fulfilment is incomplete |
+ | Stripe webhook 4xx/5xx rate | payments are settling without fulfilment |
+ | `/api/lead` 5xx rate | leads are being lost |
+ | E2E failure on main | a shipped regression |
+diff --git a/e2e/api.spec.ts b/e2e/api.spec.ts
+index 602b6fa..13745fd 100644
+--- a/e2e/api.spec.ts
++++ b/e2e/api.spec.ts
+@@ -243,6 +243,19 @@ test.describe("health and caching", () => {
+     expect(res.status()).toBe(200);
+     const body = await res.json();
+     expect(body).toHaveProperty("status");
++    // The go-live scoreboard: a verdict, and for every capability what its
++    // absence costs and how to fix it. Presence only — never a value.
++    expect(["ok", "degraded", "blocked"]).toContain(body.status);
++    expect(body.revenueBlocked).toBe(body.status === "blocked");
++    expect(Array.isArray(body.capabilities)).toBe(true);
++    for (const c of body.capabilities) {
++      expect(typeof c.id).toBe("string");
++      expect(typeof c.present).toBe("boolean");
++      expect(["revenue_blocker", "fulfilment", "optional"]).toContain(c.severity);
++      expect(c.cost_if_missing.length).toBeGreaterThan(0);
++      expect(c.fix.length).toBeGreaterThan(0);
++    }
++    for (const v of Object.values(body.env)) expect(typeof v).toBe("boolean");
+   });
+ 
+   test("API responses are never cached", async ({ request }) => {
+diff --git a/package.json b/package.json
+index 9481ce6..3f2cdaf 100644
+--- a/package.json
++++ b/package.json
+@@ -17,6 +17,7 @@
+     "verify": "pnpm check && pnpm test && pnpm build",
+     "dev:kv": "node scripts/dev-kv.mjs",
+     "apikey:new": "node scripts/apikey.mjs",
++    "doctor": "tsx scripts/doctor.ts",
+     "format": "prettier --write .",
+     "fonts:fetch": "node scripts/fetch-fonts.mjs",
+     "e2e": "playwright test",
+diff --git a/scripts/doctor.ts b/scripts/doctor.ts
+new file mode 100644
+index 0000000..4ef92ec
+--- /dev/null
++++ b/scripts/doctor.ts
+@@ -0,0 +1,69 @@
++/**
++ * scripts/doctor.ts — the go-live gate.
++ *
++ * The funnel can be deployed in full and still take zero euros, because what
++ * stops it is configuration, not code. This reads /api/health and prints the
++ * scoreboard: what is missing, what it costs while it stays missing, and the
++ * exact fix — revenue blockers first, then fulfilment gaps, then optional
++ * surfaces.
++ *
++ * All judgement lives in shared/health.ts, the same register the endpoint is
++ * built from; this file only fetches and prints. It never sees a secret:
++ * /api/health reports presence, not values.
++ *
++ *   pnpm doctor                         # APP_URL if set, else the public host
++ *   pnpm doctor http://localhost:3000
++ *
++ * Exit codes (DOCTOR_EXIT):
++ *   0  no revenue blocker (fulfilment gaps are printed, not failed)
++ *   1  at least one revenue blocker — money cannot move
++ *   2  site unreachable, or it answered without a scoreboard
++ */
++
++import {
++  DOCTOR_EXIT,
++  doctorExitCode,
++  parseHealthReport,
++  renderDoctorReport,
++} from "../shared/health.js";
++import { siteOrigin } from "../shared/routes.js";
++
++const TIMEOUT_MS = 15_000;
++
++async function main(): Promise<number> {
++  const base = (process.argv[2] || siteOrigin()).replace(/\/+$/, "");
++  process.stdout.write(`Prüfe ${base}/api/health …\n\n`);
++
++  let body: unknown;
++  try {
++    const res = await fetch(`${base}/api/health?cb=${Date.now()}`, {
++      headers: { "cache-control": "no-cache", accept: "application/json" },
++      signal: AbortSignal.timeout(TIMEOUT_MS),
++    });
++    if (!res.ok) throw new Error(`HTTP ${res.status}`);
++    body = await res.json();
++  } catch (err) {
++    process.stdout.write(`Website nicht erreichbar: ${String(err)}\n`);
++    process.stdout.write("Ist sie deployt, und stimmt die Adresse?\n");
++    return DOCTOR_EXIT.unreachable;
++  }
++
++  const report = parseHealthReport(body);
++  if (!report) {
++    process.stdout.write(
++      "Die Website antwortet, aber ohne Scoreboard. Vermutlich läuft ein Deployment von vor diesem Stand — neu deployen und erneut prüfen.\n",
++    );
++    return DOCTOR_EXIT.unreachable;
++  }
++
++  for (const line of renderDoctorReport(report, base)) process.stdout.write(`${line}\n`);
++  return doctorExitCode(report);
++}
++
++main().then(
++  (code) => process.exit(code),
++  (err) => {
++    process.stdout.write(`Doctor ist abgebrochen: ${String(err)}\n`);
++    process.exit(DOCTOR_EXIT.unreachable);
++  },
++);
+diff --git a/server/index.ts b/server/index.ts
+index e87bcfb..072ef23 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -12,7 +12,7 @@
+  *   POST /api/admin/orders/:ref/stage → advance a ledger stage (Bearer)
+  *   POST /api/stripe/webhook    → verified Stripe webhook (raw body, idempotent)
+  *                                 sends operator notification AND customer confirmation
+- *   GET  /api/health            → config presence check (no secrets exposed)
++ *   GET  /api/health            → go-live scoreboard: presence, cost, fix (no secrets)
+  *   GET  /*                     → serves the SPA (Vite build)
+  *
+  * Durability:
+@@ -50,6 +50,7 @@ import {
+ } from "../shared/schema.js";
+ import { toPilotOrder } from "../shared/pilot-order.js";
+ import { LEGAL_ENTITY } from "../shared/legal-entity.js";
++import { buildHealthReport } from "../shared/health.js";
+ import { securityHeadersMiddleware } from "./security-headers.js";
+ import {
+   advanceStage,
+@@ -911,20 +912,33 @@ export async function buildApp(): Promise<Express> {
+   /*
+    * Health.
+    *
+-   * A monitor has to be able to tell the difference between "running" and
+-   * "able to do its job". Reporting ok:true on a deployment that cannot take a
+-   * payment or send an email is a fake success in the one place that exists to
+-   * detect failure, so the verdict is DERIVED from what is actually
+-   * configured, and the response says which checks decided it.
++   * The go-live scoreboard. A monitor has to be able to tell "running" from
++   * "able to take money". Reporting ok on a deployment that cannot take a
++   * payment would be a fake success in the one place that exists to detect
++   * failure, so the verdict is DERIVED from the capability register in
++   * shared/health.ts — the same register `pnpm doctor` renders — and the body
++   * says which capability decided it, what its absence costs and how to fix it.
+    *
+-   *   ok       — every capability the funnel needs is present
+-   *   degraded — it serves traffic, but at least one revenue-critical
+-   *              capability is missing
++   *   ok       — every revenue blocker and every fulfilment capability present
++   *   degraded — money can move; delivery or record-keeping cannot fully
++   *   blocked  — at least one revenue blocker is missing: no euro can move
+    *
+-   * The HTTP status stays 200 for both, so an uptime probe still sees the
+-   * process as alive; the body carries the verdict.
++   * Presence and usability only, never a value. The HTTP status stays 200 for
++   * all three, so an uptime probe still sees the process as alive; the body
++   * carries the verdict.
+    */
+   app.get("/api/health", async (_req: Request, res: Response) => {
++    const report = buildHealthReport({
++      env: process.env,
++      legalEntity: LEGAL_ENTITY,
++      apiKeysConfigured: apiKeysConfigured(),
++      production: process.env.NODE_ENV === "production",
++    });
++
++    /*
++     * Legacy flat view, kept byte-compatible for smoke-test.sh and existing
++     * monitors. The scoreboard above is the authority; this is a projection.
++     */
+     const config = {
+       stripe: Boolean(process.env.STRIPE_SECRET_KEY),
+       stripeWebhook: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
+@@ -953,28 +967,8 @@ export async function buildApp(): Promise<Express> {
+       legalEntity: LEGAL_ENTITY.configured,
+     };
+ 
+-    /** Each entry is a capability the product cannot do without. */
+-    const checks: { name: string; ok: boolean; impact: string }[] = [
+-      { name: "stripe", ok: config.stripe, impact: "Zahlungen können nicht entgegengenommen werden." },
+-      { name: "stripe_webhook", ok: config.stripeWebhook, impact: "Zahlungsereignisse können nicht verifiziert werden." },
+-      { name: "prices", ok: Object.values(config.prices).every(Boolean), impact: "Mindestens eine Angebotsstufe hat keinen Preis." },
+-      { name: "email", ok: config.resend, impact: "Bestätigungen und Berichte können nicht versendet werden." },
+-      { name: "durable_orders", ok: config.durableOrders, impact: "Bezahlte Aufträge sind nicht dauerhaft auflistbar." },
+-      { name: "legal_entity", ok: config.legalEntity, impact: "Impressumspflichtige Angaben sind nicht hinterlegt." },
+-    ];
+-
+-    const failing = checks.filter((c) => !c.ok);
+-    const status: "ok" | "degraded" = failing.length === 0 ? "ok" : "degraded";
+-
+     res.setHeader("Cache-Control", "no-store");
+-    res.json({
+-      status,
+-      ok: status === "ok",
+-      timestamp: new Date().toISOString(),
+-      failing: failing.map((c) => ({ check: c.name, impact: c.impact })),
+-      checks: checks.map((c) => ({ check: c.name, ok: c.ok })),
+-      config,
+-    });
++    res.json({ ...report, config });
+   });
+ 
+   app.all("/api/*", (_req: Request, res: Response) =>
+diff --git a/shared/health.ts b/shared/health.ts
+new file mode 100644
+index 0000000..44fce05
+--- /dev/null
++++ b/shared/health.ts
+@@ -0,0 +1,547 @@
++/**
++ * shared/health.ts
++ *
++ * The go-live scoreboard: one register of every capability the paid funnel
++ * depends on, and one pure function that turns configuration presence into a
++ * verdict an operator can act on.
++ *
++ * Why this exists. The funnel can be fully deployed and still take zero euros,
++ * because the things that stop it are not code: a Stripe key, three price IDs,
++ * a webhook secret, the operator's own identity. /api/health and `pnpm doctor`
++ * both read THIS register, so the endpoint a monitor polls and the checklist a
++ * human follows cannot disagree about what is missing, what it costs, or how
++ * to fix it.
++ *
++ * Three severities, because they have different consequences:
++ *
++ *   revenue_blocker — money cannot be taken, or must not be taken yet.
++ *                     Any one of these missing makes the status "blocked" and
++ *                     `pnpm doctor` exit 1.
++ *   fulfilment      — payment would work; delivery, record-keeping or
++ *                     operator visibility would not. Status "degraded".
++ *   optional        — a product surface stays closed. Reported, never fails.
++ *
++ * Rules this module keeps:
++ *
++ *   - It reports PRESENCE and USABILITY, never a value. No function here
++ *     returns, echoes or hashes a configured string; problems are described
++ *     in words ("hat nicht die Form einer Stripe-Preis-ID"), not by quoting.
++ *   - A value copied verbatim from .env.example ("...") is not configuration.
++ *     Counting it as present would be a fake green in the one place that
++ *     exists to detect failure.
++ *   - It performs no I/O. The server passes in process.env and the few facts
++ *     only it can compute; the tests pass in whatever they like.
++ *
++ * DOM-free and dependency-light, so the doctor script can import it through
++ * tsx and the unit suite can pin it without a running server.
++ */
++
++import { PILOT_OFFER_SERVER_CONFIG, type PilotOfferCode } from "./schema.js";
++import { validateLegalEntity, type LegalEntity } from "./legal-entity.js";
++
++// ============================================================================
++// TYPES
++// ============================================================================
++
++export const CAPABILITY_SEVERITIES = ["revenue_blocker", "fulfilment", "optional"] as const;
++export type CapabilitySeverity = (typeof CAPABILITY_SEVERITIES)[number];
++
++export const HEALTH_STATUSES = ["ok", "degraded", "blocked"] as const;
++export type HealthStatus = (typeof HEALTH_STATUSES)[number];
++
++/** Environment variables whose presence the health endpoint reports. Names only. */
++export const REPORTED_ENV_VARS = [
++  "APP_URL",
++  "STRIPE_SECRET_KEY",
++  "STRIPE_WEBHOOK_SECRET",
++  "STRIPE_PRICE_ET_ELIGIBILITY",
++  "STRIPE_PRICE_ET_STRUCTURING",
++  "STRIPE_PRICE_ET_MANDATE",
++  "RESEND_API_KEY",
++  "RESEND_FROM_EMAIL",
++  "LEAD_NOTIFICATION_EMAIL",
++  "UPSTASH_REDIS_REST_URL",
++  "UPSTASH_REDIS_REST_TOKEN",
++  "ADMIN_API_TOKEN",
++  "ET_API_KEYS",
++] as const;
++export type ReportedEnvVar = (typeof REPORTED_ENV_VARS)[number];
++
++export type EnvLike = Readonly<Record<string, string | undefined>>;
++
++export type CapabilityState = {
++  /** Stable machine id. Monitors and the doctor key on this. */
++  id: string;
++  /** Short German label. */
++  label: string;
++  severity: CapabilitySeverity;
++  /** True only when configured AND usable. */
++  present: boolean;
++  /** Names of the variables (or the file) that supply it. Never values. */
++  env: string[];
++  /** What it costs while it stays missing, in plain German. */
++  cost_if_missing: string;
++  /** The exact operator action that resolves it. */
++  fix: string;
++  /** Set when something IS configured but cannot be used. Never quotes the value. */
++  problem: string | null;
++};
++
++export type StripeMode = "live" | "test" | null;
++
++export type HealthReport = {
++  status: HealthStatus;
++  /** True only for status "ok". Kept for monitors that read a boolean. */
++  ok: boolean;
++  timestamp: string;
++  /** True when at least one revenue blocker is missing. */
++  revenueBlocked: boolean;
++  /** Derived from the key prefix. Test mode moves no real money. */
++  stripeMode: StripeMode;
++  summary: {
++    total: number;
++    present: number;
++    missingRevenueBlockers: number;
++    missingFulfilment: number;
++    missingOptional: number;
++  };
++  /** The scoreboard, ordered by what it costs to leave broken. */
++  capabilities: CapabilityState[];
++  /** Presence of each reported variable. Booleans only. */
++  env: Record<ReportedEnvVar, boolean>;
++  /** Legacy shape: non-optional capabilities that are missing. */
++  failing: { check: string; impact: string }[];
++  /** Legacy shape: every non-optional capability. */
++  checks: { check: string; ok: boolean }[];
++};
++
++export type HealthInputs = {
++  env: EnvLike;
++  /** The operator record from shared/legal-entity.ts. */
++  legalEntity: LegalEntity;
++  /**
++   * Whether ET_API_KEYS parses to at least one valid entry. Computed by
++   * server/api-keys.ts, which owns that format, and passed in here so the
++   * parsing rule exists once.
++   */
++  apiKeysConfigured: boolean;
++  /** NODE_ENV === "production". Localhost and plain http are refused there. */
++  production: boolean;
++};
++
++// ============================================================================
++// VALUE CHECKS — shape only, never content
++// ============================================================================
++
++/** Trimmed, non-empty, and not a template value copied from .env.example. */
++export function isConfiguredValue(value: string | undefined): value is string {
++  if (typeof value !== "string") return false;
++  const v = value.trim();
++  if (v.length === 0) return false;
++  // .env.example ships "sk_test_...", "whsec_...", "price_...", "re_...".
++  if (/(\.\.\.|…)\s*$/.test(v)) return false;
++  return true;
++}
++
++const EMAIL_PATTERN = /[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+/;
++
++function stripeModeOf(key: string | undefined): StripeMode {
++  if (!isConfiguredValue(key)) return null;
++  if (/^(sk|rk)_live_/.test(key.trim())) return "live";
++  if (/^(sk|rk)_test_/.test(key.trim())) return "test";
++  return null;
++}
++
++type Check = { present: boolean; problem: string | null };
++
++const MISSING: Check = { present: false, problem: null };
++const PRESENT: Check = { present: true, problem: null };
++const unusable = (problem: string): Check => ({ present: false, problem });
++
++/** A set-but-template value is reported as a problem, not as silence. */
++function templateOr(value: string | undefined, next: (v: string) => Check): Check {
++  if (typeof value === "string" && value.trim().length > 0 && !isConfiguredValue(value)) {
++    return unusable("Enthält noch den Beispielwert aus .env.example.");
++  }
++  if (!isConfiguredValue(value)) return MISSING;
++  return next(value.trim());
++}
++
++function checkAppUrl(value: string | undefined, production: boolean): Check {
++  return templateOr(value, (v) => {
++    let url: URL;
++    try {
++      url = new URL(v);
++    } catch {
++      return unusable("Gesetzt, aber keine absolute Adresse.");
++    }
++    if (url.protocol !== "https:" && url.protocol !== "http:") {
++      return unusable("Gesetzt, aber keine http(s)-Adresse.");
++    }
++    if (production) {
++      if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])$/i.test(url.hostname)) {
++        return unusable("Zeigt im Produktivbetrieb auf eine lokale Adresse; Stripe leitet Käufer dorthin zurück.");
++      }
++      if (url.protocol !== "https:") {
++        return unusable("Im Produktivbetrieb ohne https.");
++      }
++    }
++    return PRESENT;
++  });
++}
++
++function checkPrefix(value: string | undefined, pattern: RegExp, problem: string): Check {
++  return templateOr(value, (v) => (pattern.test(v) ? PRESENT : unusable(problem)));
++}
++
++function checkEmail(value: string | undefined): Check {
++  return templateOr(value, (v) =>
++    EMAIL_PATTERN.test(v) ? PRESENT : unusable("Gesetzt, aber enthält keine E-Mail-Adresse."),
++  );
++}
++
++// ============================================================================
++// THE REGISTER
++// ============================================================================
++
++type CapabilityDefinition = Omit<CapabilityState, "present" | "problem"> & {
++  evaluate: (inputs: HealthInputs) => Check;
++};
++
++function priceCapability(code: PilotOfferCode): CapabilityDefinition {
++  const cfg = PILOT_OFFER_SERVER_CONFIG[code];
++  const envVar = cfg.stripePriceEnvVar;
++  return {
++    id: `stripe_price_${code}`,
++    label: `Stripe-Preis „${cfg.label}“`,
++    severity: "revenue_blocker",
++    env: [envVar],
++    cost_if_missing: `Die Stufe „${cfg.label}“ hat keinen Preis. Ihr Checkout antwortet mit 503; wer diese Stufe wählt, kann nicht bezahlen.`,
++    fix: `In Stripe ein einmaliges Produkt mit Preis in EUR anlegen und die Preis-ID (beginnt mit price_) als ${envVar} setzen. Nur serverseitig — der Browser erfährt keine Preis-ID.`,
++    evaluate: ({ env }) =>
++      checkPrefix(env[envVar], /^price_[A-Za-z0-9]+$/, "Gesetzt, aber keine Stripe-Preis-ID."),
++  };
++}
++
++/**
++ * Ordered by what it costs to leave broken, not by where it sits in the stack:
++ * first what stops a payment, then what stops a paid order being recorded and
++ * delivered, then what keeps a product surface closed.
++ */
++const REGISTER: CapabilityDefinition[] = [
++  {
++    id: "stripe_secret_key",
++    label: "Stripe Secret Key",
++    severity: "revenue_blocker",
++    env: ["STRIPE_SECRET_KEY"],
++    cost_if_missing:
++      "Der Checkout antwortet jedem Besucher mit 503. Es ist keine Zahlung möglich, egal wie gut der Rest funktioniert.",
++    fix: "Stripe → Developers → API keys: den Secret Key als STRIPE_SECRET_KEY in Vercel setzen (Production), dann neu deployen. Zuerst den Testschlüssel, nach einem erfolgreichen Testkauf den Live-Schlüssel.",
++    evaluate: ({ env }) =>
++      checkPrefix(
++        env.STRIPE_SECRET_KEY,
++        /^(sk|rk)_(live|test)_[A-Za-z0-9]+$/,
++        "Gesetzt, aber hat nicht die Form eines Stripe-Secret-Keys.",
++      ),
++  },
++  ...(Object.keys(PILOT_OFFER_SERVER_CONFIG) as PilotOfferCode[]).map(priceCapability),
++  {
++    id: "app_url",
++    label: "Öffentliche Adresse (APP_URL)",
++    severity: "revenue_blocker",
++    env: ["APP_URL"],
++    cost_if_missing:
++      "Stripe leitet Käufer nach der Zahlung auf localhost statt auf diese Website zurück. Die Bestätigungsseite erscheint nie, der Käufer sieht einen Fehler.",
++    fix: "APP_URL auf die öffentliche https-Adresse der Website setzen (ohne abschließenden Schrägstrich), dann neu deployen.",
++    evaluate: ({ env, production }) => checkAppUrl(env.APP_URL, production),
++  },
++  {
++    id: "stripe_webhook_secret",
++    label: "Stripe Webhook Secret",
++    severity: "revenue_blocker",
++    env: ["STRIPE_WEBHOOK_SECRET"],
++    cost_if_missing:
++      "Zahlungen gehen ein, aber nichts wird erfasst: kein Auftrag im Ledger, keine Bestätigung an den Kunden. Der Webhook antwortet mit 503, bis das Secret gesetzt ist.",
++    fix: "Stripe → Developers → Webhooks: Endpoint <APP_URL>/api/stripe/webhook für checkout.session.completed und checkout.session.async_payment_succeeded anlegen und dessen Signing Secret als STRIPE_WEBHOOK_SECRET setzen.",
++    evaluate: ({ env }) =>
++      checkPrefix(
++        env.STRIPE_WEBHOOK_SECRET,
++        /^whsec_[A-Za-z0-9+/=]+$/,
++        "Gesetzt, aber hat nicht die Form eines Stripe-Signing-Secrets.",
++      ),
++  },
++  {
++    id: "legal_entity",
++    label: "Anbieterangaben (Impressum)",
++    severity: "revenue_blocker",
++    env: ["shared/legal-entity.ts"],
++    cost_if_missing:
++      "Impressum, AGB und Bestätigungen nennen keinen Anbieter. Eine Seite, die Geld annimmt, ohne ihren Betreiber zu nennen, ist nicht veröffentlichungsfähig; der Release-Check schlägt fehl.",
++    fix: "shared/legal-entity.ts mit den echten Angaben füllen und configured auf true setzen. Prüfen mit: RELEASE_CHECK=1 pnpm test -- client/src/lib/legal-entity.test.ts",
++    evaluate: ({ legalEntity }) => {
++      const problems = validateLegalEntity(legalEntity);
++      if (!legalEntity.configured) return MISSING;
++      if (problems.length > 0) {
++        return unusable(
++          `configured ist true, aber ${problems.length} Angabe(n) fehlen oder sind Platzhalter: ${problems
++            .map((p) => p.field)
++            .join(", ")}.`,
++        );
++      }
++      return PRESENT;
++    },
++  },
++  {
++    id: "resend_api_key",
++    label: "E-Mail-Versand (Resend)",
++    severity: "fulfilment",
++    env: ["RESEND_API_KEY"],
++    cost_if_missing:
++      "Der Kunde zahlt und erhält nichts von Ihnen. Leads und Zahlungsmeldungen erreichen niemanden — ohne Ledger ist damit auch der letzte Auftragsnachweis weg. Erstattungsrisiko.",
++    fix: "Bei Resend die eigene Domain verifizieren und den API-Key als RESEND_API_KEY setzen.",
++    evaluate: ({ env }) => templateOr(env.RESEND_API_KEY, () => PRESENT),
++  },
++  {
++    id: "resend_from_email",
++    label: "Absenderadresse",
++    severity: "fulfilment",
++    env: ["RESEND_FROM_EMAIL"],
++    cost_if_missing:
++      "Versendet wird mit dem eingebauten Standardabsender. Ist dessen Domain bei Resend nicht verifiziert, wird jede Bestätigung abgelehnt.",
++    fix: "RESEND_FROM_EMAIL auf einen Absender der bei Resend verifizierten Domain setzen, Format: Energie Teilen <noreply@ihre-domain.de>. Keine private Postfachadresse.",
++    evaluate: ({ env }) => checkEmail(env.RESEND_FROM_EMAIL),
++  },
++  {
++    id: "lead_notification_email",
++    label: "Postfach für Leads und Aufträge",
++    severity: "fulfilment",
++    env: ["LEAD_NOTIFICATION_EMAIL"],
++    cost_if_missing:
++      "Neue Leads und bezahlte Aufträge werden niemandem gemeldet. Die Kundenbestätigung nennt eine Standardadresse, falls ET_CUSTOMER_REPLY_TO fehlt.",
++    fix: "LEAD_NOTIFICATION_EMAIL auf ein überwachtes Postfach der eigenen Domain setzen.",
++    evaluate: ({ env }) => checkEmail(env.LEAD_NOTIFICATION_EMAIL),
++  },
++  {
++    id: "durable_kv",
++    label: "Auftrags-Ledger (Upstash Redis)",
++    severity: "fulfilment",
++    env: ["UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"],
++    cost_if_missing:
++      "Ein bezahlter Auftrag existiert nur in Stripe und in einer E-Mail: nicht auflistbar, nicht nachverfolgbar. Rate-Limits gelten nur pro Instanz, die Webhook-Idempotenz ist nur bestmöglich.",
++    fix: "Bei Upstash eine Redis-Datenbank anlegen und UPSTASH_REDIS_REST_URL sowie UPSTASH_REDIS_REST_TOKEN setzen.",
++    evaluate: ({ env }) => {
++      const url = templateOr(env.UPSTASH_REDIS_REST_URL, (v) =>
++        /^https:\/\//.test(v) ? PRESENT : unusable("UPSTASH_REDIS_REST_URL ist keine https-Adresse."),
++      );
++      const token = templateOr(env.UPSTASH_REDIS_REST_TOKEN, () => PRESENT);
++      if (url.present && token.present) return PRESENT;
++      if (url.problem) return url;
++      if (token.problem) return token;
++      if (url.present) return unusable("Nur UPSTASH_REDIS_REST_URL ist gesetzt; der Token fehlt.");
++      if (token.present) return unusable("Nur UPSTASH_REDIS_REST_TOKEN ist gesetzt; die URL fehlt.");
++      return MISSING;
++    },
++  },
++  {
++    id: "admin_api_token",
++    label: "Admin-Zugang zum Ledger",
++    severity: "fulfilment",
++    env: ["ADMIN_API_TOKEN"],
++    cost_if_missing:
++      "Offene Aufträge, ihr Wert und was überfällig ist, lassen sich nicht abrufen. /api/admin/orders bleibt deaktiviert.",
++    fix: "ADMIN_API_TOKEN auf mindestens 32 zufällige Zeichen setzen: openssl rand -hex 32",
++    evaluate: ({ env }) =>
++      templateOr(env.ADMIN_API_TOKEN, (v) =>
++        v.length >= 16
++          ? PRESENT
++          : unusable("Kürzer als 16 Zeichen; die Admin-Schnittstelle bleibt deshalb deaktiviert."),
++      ),
++  },
++  {
++    id: "api_keys",
++    label: "API-Schlüssel für /api/v1",
++    severity: "optional",
++    env: ["ET_API_KEYS"],
++    cost_if_missing:
++      "Die Rechen-API antwortet jedem mit 401. Kein Integrator kann sie nutzen, und es gibt keinen API-Zugang, der verkauft werden könnte.",
++    fix: "Einen Schlüssel ausgeben mit: pnpm apikey:new <kunde>. Nur das Paar label:hash in ET_API_KEYS eintragen, nie den Klartext.",
++    evaluate: ({ env, apiKeysConfigured }) => {
++      if (apiKeysConfigured) return PRESENT;
++      if (typeof env.ET_API_KEYS === "string" && env.ET_API_KEYS.trim().length > 0) {
++        return unusable("Gesetzt, aber ohne gültigen Eintrag der Form label:sha256-hash.");
++      }
++      return MISSING;
++    },
++  },
++];
++
++/** Capability ids in scoreboard order. Pinned by the tests. */
++export const CAPABILITY_IDS: readonly string[] = REGISTER.map((c) => c.id);
++
++// ============================================================================
++// THE VERDICT
++// ============================================================================
++
++export function evaluateCapabilities(inputs: HealthInputs): CapabilityState[] {
++  return REGISTER.map(({ evaluate, ...def }) => {
++    const { present, problem } = evaluate(inputs);
++    return { ...def, env: [...def.env], present, problem };
++  });
++}
++
++export function deriveStatus(capabilities: CapabilityState[]): HealthStatus {
++  const missing = capabilities.filter((c) => !c.present);
++  if (missing.some((c) => c.severity === "revenue_blocker")) return "blocked";
++  if (missing.some((c) => c.severity === "fulfilment")) return "degraded";
++  return "ok";
++}
++
++export function buildHealthReport(inputs: HealthInputs, now: Date = new Date()): HealthReport {
++  const capabilities = evaluateCapabilities(inputs);
++  const status = deriveStatus(capabilities);
++  const missing = (s: CapabilitySeverity) =>
++    capabilities.filter((c) => c.severity === s && !c.present).length;
++  const gating = capabilities.filter((c) => c.severity !== "optional");
++
++  const env = Object.fromEntries(
++    REPORTED_ENV_VARS.map((name) => {
++      const raw = inputs.env[name];
++      return [name, typeof raw === "string" && raw.trim().length > 0];
++    }),
++  ) as Record<ReportedEnvVar, boolean>;
++
++  return {
++    status,
++    ok: status === "ok",
++    timestamp: now.toISOString(),
++    revenueBlocked: status === "blocked",
++    stripeMode: stripeModeOf(inputs.env.STRIPE_SECRET_KEY),
++    summary: {
++      total: capabilities.length,
++      present: capabilities.filter((c) => c.present).length,
++      missingRevenueBlockers: missing("revenue_blocker"),
++      missingFulfilment: missing("fulfilment"),
++      missingOptional: missing("optional"),
++    },
++    capabilities,
++    env,
++    failing: gating
++      .filter((c) => !c.present)
++      .map((c) => ({ check: c.id, impact: c.cost_if_missing })),
++    checks: gating.map((c) => ({ check: c.id, ok: c.present })),
++  };
++}
++
++// ============================================================================
++// THE DOCTOR — reading a report back
++// ============================================================================
++
++/** Exit codes of `pnpm doctor`. */
++export const DOCTOR_EXIT = {
++  /** No revenue blocker. Fulfilment gaps are printed but do not fail. */
++  ok: 0,
++  /** At least one revenue blocker: money cannot move. */
++  revenueBlocked: 1,
++  /** The site could not be reached, or did not answer with a scoreboard. */
++  unreachable: 2,
++} as const;
++export type DoctorExitCode = (typeof DOCTOR_EXIT)[keyof typeof DOCTOR_EXIT];
++
++/**
++ * Structural check of a /api/health body. Returns null for anything that is
++ * not a scoreboard — including a deployment older than the scoreboard — so the
++ * doctor never guesses a verdict from a shape it does not understand.
++ */
++export function parseHealthReport(body: unknown): HealthReport | null {
++  if (typeof body !== "object" || body === null) return null;
++  const b = body as Partial<HealthReport>;
++  if (!HEALTH_STATUSES.includes(b.status as HealthStatus)) return null;
++  if (!Array.isArray(b.capabilities) || b.capabilities.length === 0) return null;
++  for (const c of b.capabilities as Partial<CapabilityState>[]) {
++    if (
++      typeof c?.id !== "string" ||
++      typeof c.present !== "boolean" ||
++      !CAPABILITY_SEVERITIES.includes(c.severity as CapabilitySeverity) ||
++      typeof c.cost_if_missing !== "string" ||
++      typeof c.fix !== "string"
++    ) {
++      return null;
++    }
++  }
++  return b as HealthReport;
++}
++
++/**
++ * The verdict is recomputed from the capabilities rather than read from
++ * `status`, so a report whose summary and scoreboard disagree fails closed.
++ */
++export function doctorExitCode(report: HealthReport | null): DoctorExitCode {
++  if (!report) return DOCTOR_EXIT.unreachable;
++  const blocked = report.capabilities.some((c) => c.severity === "revenue_blocker" && !c.present);
++  return blocked || report.status === "blocked" ? DOCTOR_EXIT.revenueBlocked : DOCTOR_EXIT.ok;
++}
++
++const MARK: Record<CapabilitySeverity, string> = {
++  revenue_blocker: "✗",
++  fulfilment: "!",
++  optional: "·",
++};
++
++/** Plain-text checklist. The doctor prints it; the tests read it. */
++export function renderDoctorReport(report: HealthReport, base: string): string[] {
++  const out: string[] = [];
++  for (const c of report.capabilities) {
++    out.push(`  ${c.present ? "✓" : MARK[c.severity]} ${c.label}${c.problem ? ` — ${c.problem}` : ""}`);
++  }
++  out.push("");
++
++  const section = (severity: CapabilitySeverity) =>
++    report.capabilities.filter((c) => c.severity === severity && !c.present);
++  const describe = (c: CapabilityState, prefix: string) => {
++    out.push(`${prefix} ${c.label} [${c.id}]`);
++    if (c.problem) out.push(`   Befund: ${c.problem}`);
++    out.push(`   Kostet Sie: ${c.cost_if_missing}`);
++    out.push(`   Behebung: ${c.fix}`);
++    out.push("");
++  };
++
++  const blockers = section("revenue_blocker");
++  if (blockers.length > 0) {
++    out.push(
++      `UMSATZ BLOCKIERT — ${blockers.length} Voraussetzung(en) für Zahlungen fehlen. Solange sie fehlen, bewegt sich kein Euro.`,
++    );
++    out.push("");
++    blockers.forEach((c, i) => describe(c, `${i + 1}.`));
++  } else {
++    out.push("Zahlungsweg ist konfiguriert.");
++    if (report.stripeMode === "test") {
++      out.push(
++        "Stripe läuft im Testmodus: der Weg ist prüfbar, aber es fließt kein echtes Geld. Nach dem Testkauf auf den Live-Schlüssel wechseln.",
++      );
++    }
++    out.push("Bevor Sie sich darauf verlassen, einmal von Ende zu Ende durchspielen:");
++    out.push(`  stripe listen --forward-to ${base}/api/stripe/webhook`);
++    out.push("  dann eine Stufe mit der Testkarte 4242 4242 4242 4242 kaufen und prüfen:");
++    out.push("  Bestätigungsseite → Kunden-E-Mail → Auftrag in /api/admin/orders");
++    out.push("");
++  }
++
++  const degraded = section("fulfilment");
++  if (degraded.length > 0) {
++    out.push("EINGESCHRÄNKT — Zahlung würde funktionieren, die Erfüllung nicht vollständig.");
++    out.push("");
++    degraded.forEach((c) => describe(c, "·"));
++  }
++
++  const optional = section("optional");
++  if (optional.length > 0) {
++    out.push("OPTIONAL — geschlossene Produktflächen, kein Einfluss auf den Status.");
++    out.push("");
++    optional.forEach((c) => describe(c, "·"));
++  }
++
++  if (blockers.length === 0 && degraded.length === 0) {
++    out.push("Alles konfiguriert. Zwischen Ihnen und Umsatz stehen jetzt nur noch Kunden.");
++  }
++  return out;
++}
+diff --git a/shared/legal-entity.ts b/shared/legal-entity.ts
+index 35cd0cf..cbccaf4 100644
+--- a/shared/legal-entity.ts
++++ b/shared/legal-entity.ts
+@@ -11,7 +11,7 @@
+  * So this file has exactly two states:
+  *
+  *   configured: false — the details are not yet supplied. The legal pages say
+- *     so plainly, the health endpoint reports the deployment as degraded, and
++ *     so plainly, the health endpoint reports the deployment as blocked, and
+  *     legal-entity.test.ts fails, which stops a release that would otherwise
+  *     publish empty obligations.
+  *
+-- 
+2.43.0
+
