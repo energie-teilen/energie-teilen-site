@@ -27,6 +27,7 @@ import {
   type GridConnection,
   type Storage,
 } from "../../../shared/messkonzept";
+import { contactEmail, operatorLocality } from "../../../shared/legal-entity";
 
 /** The metering answers the qualification questions do not cover. */
 export type MesskonzeptAnswers = {
@@ -40,18 +41,17 @@ export type ScenarioBundle = {
 };
 
 const BRAND = { green: "#1d493a", greenDk: "#143528", gold: "#c79236", brown: "#94735b", ink: "#1a1a1a", muted: "#6b6b6b", line: "#e2e2dc", panel: "#fafaf7" };
-// ── Edit contact + links in ONE place ──
+// ── Brand and links in ONE place. Operator identity is NOT set here: ──
+// the contact mailbox and the locality come from shared/legal-entity.ts, so a
+// report a customer forwards to an owner or a bank names the same operator as
+// the imprint, and names no city the record does not state.
 const CONTACT = {
   company: "Energie Teilen",
   tagline: "Bezahlte Pilotaufnahme für lokale Energieprojekte",
-  // Domain address only. A personal Gmail on a document a customer forwards
-  // to an owner or a bank costs more credibility than it saves setup time.
-  email: "kontakt@energie-teilen.de",
   web: "energie-teilen-site.vercel.app",
   webUrl: "https://energie-teilen-site.vercel.app/",
   rechnerUrl: "https://energie-teilen-site.vercel.app/#rechner",
   pilotUrl: "https://energie-teilen-site.vercel.app/#pilot-start",
-  ort: "Frankfurt · Deutschland",
 };
 
 const eur = (n: number) => new Intl.NumberFormat("de-DE", { maximumFractionDigits: 0 }).format(Math.round(n)) + " €";
@@ -76,14 +76,22 @@ function chrome(doc: jsPDF, pageW: number, pageH: number, margin: number, pageNo
   doc.setDrawColor(BRAND.line).setLineWidth(0.5).line(margin, fy, pageW - margin, fy);
   doc.setFont("helvetica", "bold").setFontSize(8).setTextColor(BRAND.green).text(CONTACT.company, margin, fy + 14);
   doc.setFont("helvetica", "normal").setFontSize(8);
-  // clickable email + web
-  doc.setTextColor(BRAND.muted).textWithLink(CONTACT.email, margin, fy + 26, { url: `mailto:${CONTACT.email}` });
-  const exW = doc.getTextWidth(CONTACT.email);
-  doc.text("   ·   ", margin + exW, fy + 26);
-  const sepW = doc.getTextWidth("   ·   ");
-  doc.setTextColor(BRAND.green).textWithLink(CONTACT.web, margin + exW + sepW, fy + 26, { url: CONTACT.webUrl });
-  const wbW = doc.getTextWidth(CONTACT.web);
-  doc.setTextColor(BRAND.muted).text(`   ·   ${CONTACT.ort}`, margin + exW + sepW + wbW, fy + 26);
+  // clickable email + web, then the locality only if the operator record states one
+  const email = contactEmail();
+  const locality = operatorLocality();
+  const sep = "   ·   ";
+  const sepW = doc.getTextWidth(sep);
+  let x = margin;
+  if (email) {
+    doc.setTextColor(BRAND.muted).textWithLink(email, x, fy + 26, { url: `mailto:${email}` });
+    x += doc.getTextWidth(email);
+    doc.text(sep, x, fy + 26);
+    x += sepW;
+  }
+  doc.setTextColor(BRAND.green).textWithLink(CONTACT.web, x, fy + 26, { url: CONTACT.webUrl });
+  x += doc.getTextWidth(CONTACT.web);
+  if (locality) doc.setTextColor(BRAND.muted).text(`${sep}${locality}`, x, fy + 26);
+  doc.setTextColor(BRAND.muted);
   doc.text(`Seite ${pageNo}/${pageCount}`, pageW - margin, fy + 14, { align: "right" });
   doc.setFontSize(7).setTextColor("#a8a8a0");
   doc.text(CONTACT.tagline, pageW - margin, fy + 26, { align: "right" });

@@ -23,6 +23,13 @@
  * imprint, it is a page that fails its only purpose.
  *
  * To go live: fill every field below and set configured to true.
+ *
+ * This is the ONLY place the operator is described. The imprint, the privacy
+ * notice, the terms, the footer, the PDF report, the confirmation email, the
+ * discovery files and the health endpoint all read it through the helpers at
+ * the end of this file; legal-identity.test.ts fails if a contact address or
+ * an operator location is written anywhere else. The required fields are
+ * documented in docs/RUNBOOK.md under "Operator identity".
  */
 
 export type LegalEntity = {
@@ -165,3 +172,54 @@ export function formattedAddress(entity: LegalEntity = LEGAL_ENTITY): string[] |
 /** Shown in place of the details while they are not available. */
 export const LEGAL_ENTITY_PENDING_DE =
   "Die vollständigen Anbieterangaben werden derzeit hinterlegt und sind in Kürze an dieser Stelle abrufbar. Bis dahin erreichen Sie uns unter der angegebenen E-Mail-Adresse.";
+
+// ============================================================================
+// READ-ONLY VIEWS — what every other surface is allowed to show
+// ============================================================================
+
+const EMAIL_SHAPE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+/**
+ * The one public contact mailbox.
+ *
+ * Shown even before the record is publishable, because it is how a visitor
+ * reaches the operator in the meantime (see LEGAL_ENTITY_PENDING_DE). Null if
+ * the field does not hold an address, so no surface renders a broken mailto.
+ */
+export function contactEmail(entity: LegalEntity = LEGAL_ENTITY): string | null {
+  const email = entity.email.trim();
+  return EMAIL_SHAPE.test(email) ? email : null;
+}
+
+/** Registered name, or null while the record is not publishable. */
+export function operatorName(entity: LegalEntity = LEGAL_ENTITY): string | null {
+  return legalEntityPublishable(entity) ? entity.name : null;
+}
+
+/**
+ * "City, Country", or null while the record is not publishable.
+ *
+ * A locality is a claim about where the operator is. A surface that shows one
+ * the record does not state is inventing it, so every caller omits the line
+ * on null rather than falling back to a plausible city.
+ */
+export function operatorLocality(entity: LegalEntity = LEGAL_ENTITY): string | null {
+  return legalEntityPublishable(entity) ? `${entity.city}, ${entity.country}` : null;
+}
+
+/**
+ * The consumer dispute-resolution statement, or null while the record is not
+ * publishable.
+ *
+ * `participates: false` is the record's default, not a decision anyone has
+ * taken. Declaring "not willing and not obliged" on behalf of an operator who
+ * has not yet been named would publish a default as a fact.
+ */
+export function disputeResolutionStatement(entity: LegalEntity = LEGAL_ENTITY): string | null {
+  if (!legalEntityPublishable(entity)) return null;
+  const { participates, body } = entity.disputeResolution;
+  if (participates && body) {
+    return `Der Anbieter nimmt am Streitbeilegungsverfahren vor folgender Stelle teil: ${body}`;
+  }
+  return "Der Anbieter ist nicht bereit und nicht verpflichtet, an Streitbeilegungsverfahren vor einer Verbraucherschlichtungsstelle teilzunehmen.";
+}

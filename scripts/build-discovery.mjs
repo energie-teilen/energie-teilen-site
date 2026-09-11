@@ -347,8 +347,7 @@ writeFileSync(
 User-agent: *
 Allow: /
 Citation-required: yes
-Contact: kontakt@energie-teilen.de
-
+${manifests.contactEmail() ? `Contact: ${manifests.contactEmail()}\n` : ""}
 Index: ${ORIGIN}/llms.txt
 Full-index: ${ORIGIN}/llms-full.txt
 API: ${ORIGIN}/openapi.json

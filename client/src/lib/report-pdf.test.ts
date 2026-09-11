@@ -4,6 +4,7 @@ import { calculateMieterstrom, DEFAULTS } from "./mieterstrom";
 import { ASSUMPTION_SET, MODEL_VERSION } from "../../../shared/assumptions";
 import type { QualificationFacts } from "../../../shared/eligibility";
 import type { MesskonzeptAnswers } from "./report-pdf";
+import { contactEmail, legalEntityPublishable } from "../../../shared/legal-entity";
 
 const QUALIFIED: QualificationFacts = {
   ownerConstellation: "single_owner",
@@ -49,6 +50,15 @@ describe("buildReportDoc", () => {
     expect(raw).toContain("2026-09-06");
     expect(raw).toMatch(/DE/);
     expect(raw).toMatch(/EUR/);
+  });
+
+  // The report names the operator exactly as the operator record does: the
+  // record's mailbox, and no city the record does not state.
+  it("takes the contact from the operator record and invents no location", () => {
+    const raw = renderText();
+    const email = contactEmail();
+    if (email) expect(raw).toContain(email);
+    if (!legalEntityPublishable()) expect(raw).not.toContain("Frankfurt");
   });
 
   // P0.4 — the report must not present placeholders as facts.

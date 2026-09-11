@@ -12,6 +12,7 @@ import { AllocationPanel } from "@/components/AllocationPanel";
 import { MarktkommunikationPanel } from "@/components/MarktkommunikationPanel";
 import type { QualificationFacts } from "../../../shared/eligibility";
 import { evaluateEligibility } from "../../../shared/eligibility";
+import { operatorLocality } from "../../../shared/legal-entity";
 import { track } from "@/lib/analytics";
 import {
   Suspense,
@@ -981,7 +982,7 @@ export default function Home() {
                   <HeroRotator images={HERO_IMAGES} intervalMs={6000} />
                 </div>
                 <div className="hero-note lg:absolute lg:-bottom-6 lg:-left-12">
-                  <span className="hero-note-label">Frankfurt · Deutschland</span>
+                  <span className="hero-note-label">{operatorLocality() ?? "Deutschland"}</span>
                   <p>
                     Energie Teilen verbindet anspruchsvolle Projektkommunikation mit
                     einer klaren bezahlten Einstiegslinie, damit aus Interesse eine

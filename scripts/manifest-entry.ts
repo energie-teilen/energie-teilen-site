@@ -17,3 +17,4 @@ export {
   toolByName,
   toolListPayload,
 } from "../shared/mcp.js";
+export { contactEmail } from "../shared/legal-entity.js";

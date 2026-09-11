@@ -2,6 +2,8 @@ import { LegalLayout, LegalSection, PendingDetail } from "@/components/LegalLayo
 import {
   LEGAL_ENTITY,
   LEGAL_ENTITY_PENDING_DE,
+  contactEmail,
+  disputeResolutionStatement,
   formattedAddress,
   legalEntityPublishable,
 } from "../../../../shared/legal-entity";
@@ -21,6 +23,8 @@ import {
 export default function Impressum() {
   const publishable = legalEntityPublishable();
   const address = formattedAddress();
+  const email = contactEmail();
+  const dispute = disputeResolutionStatement();
 
   return (
     <LegalLayout
@@ -58,7 +62,7 @@ export default function Impressum() {
       <LegalSection title="Kontakt">
         <p>
           E-Mail:{" "}
-          <a href={`mailto:${LEGAL_ENTITY.email}`}>{LEGAL_ENTITY.email}</a>
+          {email ? <a href={`mailto:${email}`}>{email}</a> : <PendingDetail label="E-Mail-Adresse" />}
         </p>
         <p>
           Telefon:{" "}
@@ -100,18 +104,7 @@ export default function Impressum() {
       ) : null}
 
       <LegalSection title="Verbraucherstreitbeilegung">
-        {LEGAL_ENTITY.disputeResolution.participates && LEGAL_ENTITY.disputeResolution.body ? (
-          <p>
-            Der Anbieter nimmt am Streitbeilegungsverfahren vor folgender Stelle teil:{" "}
-            {LEGAL_ENTITY.disputeResolution.body}
-          </p>
-        ) : (
-          <p>
-            Der Anbieter ist nicht bereit und nicht verpflichtet, an
-            Streitbeilegungsverfahren vor einer Verbraucherschlichtungsstelle
-            teilzunehmen.
-          </p>
-        )}
+        {dispute ? <p>{dispute}</p> : <PendingDetail label="Erklärung zur Verbraucherstreitbeilegung" />}
       </LegalSection>
 
       <LegalSection title="Haftung für Inhalte und Links">

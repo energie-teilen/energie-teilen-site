@@ -139,9 +139,9 @@
 
     <!-- =========================================================
          STRUCTURED DATA — single @graph node
-         Combines Organization, WebSite, LocalBusiness, Service,
-         FAQPage, HowTo. Cross-referenced via @id so Google
-         understands they describe the same entity. No prices.
+         Combines Organization, WebSite, Service, FAQPage, HowTo.
+         Cross-referenced via @id so Google understands they describe
+         the same entity. No prices.
          ========================================================= -->
     <script type="application/ld+json">
       {
@@ -174,12 +174,6 @@
               "email": "kontakt@energie-teilen.de",
               "areaServed": "DE",
               "availableLanguage": ["German"]
-            },
-            "address": {
-              "@type": "PostalAddress",
-              "addressLocality": "Frankfurt am Main",
-              "addressRegion": "Hessen",
-              "addressCountry": "DE"
             }
           },
           {
@@ -189,26 +183,6 @@
             "name": "Energie Teilen",
             "inLanguage": "de-DE",
             "publisher": { "@id": "https://energie-teilen-site.vercel.app/#organization" }
-          },
-          {
-            "@type": "LocalBusiness",
-            "@id": "https://energie-teilen-site.vercel.app/#localbusiness",
-            "name": "Energie Teilen",
-            "image": "https://energie-teilen-site.vercel.app/og-image.png",
-            "url": "https://energie-teilen-site.vercel.app",
-            "address": {
-              "@type": "PostalAddress",
-              "addressLocality": "Frankfurt am Main",
-              "addressRegion": "Hessen",
-              "addressCountry": "DE"
-            },
-            "areaServed": [
-              { "@type": "City", "name": "Frankfurt am Main" },
-              { "@type": "AdministrativeArea", "name": "Hessen" },
-              { "@type": "Country", "name": "Deutschland" }
-            ],
-            "priceRange": "€€",
-            "parentOrganization": { "@id": "https://energie-teilen-site.vercel.app/#organization" }
           },
           {
             "@type": "Service",

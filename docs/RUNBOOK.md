@@ -74,6 +74,44 @@ Each entry in `.capabilities` carries `id`, `severity`, `present`,
 `.env` reports the presence of each variable as a boolean. No value is ever
 returned. A monitor should alert on `status != "ok"`.
 
+## Operator identity
+
+`shared/legal-entity.ts` is the only place the operator is described. The
+imprint, privacy notice, terms, footer, PDF report, customer confirmation,
+`ai.txt` and `/api/health` all read it; `legal-identity.test.ts` fails if a
+contact address or an operator location is written anywhere else. Nothing in
+it may be guessed or defaulted — each value is a fact about one legal entity.
+
+| Field | Required | What goes in |
+|---|---|---|
+| `name` | yes | Registered name including legal form |
+| `street` | yes | Street and house number |
+| `postalCode` | yes | Postal code |
+| `city` | yes | City — also the locality shown in footer, hero and PDF |
+| `country` | yes | Country, written out |
+| `representedBy` | yes | Person(s) authorised to represent the entity |
+| `phone` | yes | A number that is actually answered |
+| `email` | yes | A monitored mailbox on your own domain. Shown before go-live as the only contact, so it must work today |
+| `registerCourt` | with `registerNumber` | Register court, or `null` for a form without registration |
+| `registerNumber` | with `registerCourt` | Register number, or `null` |
+| `vatId` | if issued | VAT identification number, or `null` |
+| `contentResponsible` | where applicable | `{ name, address }` of the person responsible for editorial content, or `null` |
+| `disputeResolution` | yes | `participates` and, if true, the `body`. Not shown until the record is publishable |
+| `configured` | last | Set to `true` only when everything above is real |
+
+While `configured` is `false` the legal pages say the details are being
+completed, the imprint shows no dispute-resolution declaration, the footer and
+PDF show the mailbox but no locality, and health reports `legal_entity` as a
+revenue blocker. Verify before deploying:
+
+```bash
+RELEASE_CHECK=1 pnpm test -- client/src/lib/legal-entity.test.ts
+```
+
+If `client/index.html` is changed, its contact email must equal `email`; a
+postal address may be added to its structured data only once the record is
+publishable.
+
 ## Issuing an API key
 
 ```bash

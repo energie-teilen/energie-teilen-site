@@ -1,5 +1,6 @@
 import { ArrowUpRight } from "lucide-react";
 import { navRoutes } from "../../../shared/routes";
+import { contactEmail, operatorLocality } from "../../../shared/legal-entity";
 
 /**
  * Energy Civic Ledger — footer.
@@ -11,7 +12,9 @@ import { navRoutes } from "../../../shared/routes";
  *     tool that exists is linked and none is advertised that does not.
  *   - A "Rechtliches" column for Impressum, Datenschutz and AGB.
  *   - Final CTA strip routes warm readers directly into the paid pilot intake.
- *   - Adds <address> with email + region for local SEO + machine-readable contact.
+ *   - <address> with the contact mailbox and, once the operator record is
+ *     publishable, its locality — both read from shared/legal-entity.ts. No
+ *     city is shown that the record does not state.
  *   - All design tokens, classes, and tone preserved.
  */
 
@@ -38,6 +41,8 @@ const legal = [
 ];
 
 export default function Footer() {
+  const email = contactEmail();
+  const locality = operatorLocality();
   const year = new Date().getFullYear();
 
   return (
@@ -136,13 +141,15 @@ export default function Footer() {
                 Operativer Kontakt
               </p>
               <address className="not-italic space-y-2 text-sm text-foreground">
-                <p>Frankfurt am Main, Deutschland</p>
-                <a
-                  href="mailto:kontakt@energie-teilen.de"
-                  className="block text-muted-foreground transition-opacity hover:opacity-70"
-                >
-                  kontakt@energie-teilen.de
-                </a>
+                {locality ? <p>{locality}</p> : null}
+                {email ? (
+                  <a
+                    href={`mailto:${email}`}
+                    className="block text-muted-foreground transition-opacity hover:opacity-70"
+                  >
+                    {email}
+                  </a>
+                ) : null}
               </address>
             </div>
 

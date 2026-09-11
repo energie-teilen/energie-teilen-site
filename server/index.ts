@@ -515,10 +515,12 @@ export async function buildApp(): Promise<Express> {
             alreadySent = fresh === null;
           }
 
+          // Last resort is the operator record's own mailbox — the same
+          // address the imprint and the PDF name — never a second literal.
           const replyTo =
             process.env.ET_CUSTOMER_REPLY_TO ||
             process.env.LEAD_NOTIFICATION_EMAIL ||
-            "kontakt@energie-teilen.de";
+            LEGAL_ENTITY.email;
 
           const [, customerSent] = await Promise.all([
             // Operator notification is nice-to-have: a slow inbox must never
