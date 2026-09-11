@@ -13,35 +13,66 @@ pnpm e2e            # browsers: reachability, funnel, a11y, security, budgets
 
 ## Deployment checklist
 
-Work top to bottom. Everything above the line blocks a launch that takes money.
+Work top to bottom. `GET /api/health` and `pnpm doctor` read the same register
+(`shared/health.ts`), so the ids in brackets are what they report.
 
-**Blocking**
+**Revenue blockers** — while any is missing, health says `blocked`, the
+doctor exits 1, and no euro can move.
 
-1. `shared/legal-entity.ts` — fill every field, set `configured: true`.
+1. `STRIPE_SECRET_KEY` [`stripe_secret_key`] — test key first, live key after
+   a successful test purchase. Health reports the mode as `stripeMode`.
+2. `STRIPE_PRICE_ET_ELIGIBILITY`, `STRIPE_PRICE_ET_STRUCTURING`,
+   `STRIPE_PRICE_ET_MANDATE` [`stripe_price_et_*`] — one-time EUR prices.
+   Server-side only; the browser never learns a price ID.
+3. `APP_URL` [`app_url`] — the public https origin. Used for Stripe return
+   URLs; a localhost or plain-http value is refused in production.
+4. `STRIPE_WEBHOOK_SECRET` [`stripe_webhook_secret`] — endpoint
+   `<APP_URL>/api/stripe/webhook` for `checkout.session.completed` and
+   `checkout.session.async_payment_succeeded`.
+5. `shared/legal-entity.ts` [`legal_entity`] — fill every field, set
+   `configured: true`. Health checks the record itself, not only the flag.
    Verify: `RELEASE_CHECK=1 pnpm test -- client/src/lib/legal-entity.test.ts`
-2. `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
-3. `STRIPE_PRICE_ET_ELIGIBILITY`, `STRIPE_PRICE_ET_STRUCTURING`,
-   `STRIPE_PRICE_ET_MANDATE`
-4. `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `LEAD_NOTIFICATION_EMAIL`
-5. `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` — without these a paid
-   order is not durably enumerable.
-6. `APP_URL` — used for Stripe return URLs.
-7. `pnpm fonts:fetch` and commit the two `.woff2` files.
 
-**Recommended**
+**Fulfilment** — payment works, delivery or record-keeping does not. Health
+says `degraded`; the doctor prints them and exits 0.
 
-8. `ADMIN_API_TOKEN` (≥ 16 chars) for the order list.
-9. `ET_API_KEYS` for the v1 API — issue with `pnpm apikey:new <label>`.
-10. `ET_PILOT_RESPONSE_WINDOW`, `ET_CUSTOMER_REPLY_TO`.
+6. `RESEND_API_KEY` [`resend_api_key`], `RESEND_FROM_EMAIL`
+   [`resend_from_email`] on a Resend-verified domain, `LEAD_NOTIFICATION_EMAIL`
+   [`lead_notification_email`] — domain mailboxes only.
+7. `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` [`durable_kv`] —
+   without these a paid order is not durably enumerable.
+8. `ADMIN_API_TOKEN` [`admin_api_token`] — at least 32 random characters;
+   below 16 the admin surface stays disabled.
+
+**Optional** — reported, never changes the status.
+
+9. `ET_API_KEYS` [`api_keys`] for the v1 API — issue with
+   `pnpm apikey:new <label>`.
+10. `ET_PILOT_RESPONSE_WINDOW`, `ET_CUSTOMER_REPLY_TO` (not scored).
+11. `pnpm fonts:fetch` and commit the two `.woff2` files (not scored).
+
+A value copied verbatim from `.env.example` (ending in `...`) counts as not
+configured, and health says so.
 
 **Confirm after deploying**
 
 ```bash
+pnpm doctor                          # APP_URL if set, else the public host
+pnpm doctor https://<host>
 curl -s https://<host>/api/health | jq '.status, .failing'
 ```
 
-`"ok"` means every capability above is present. `"degraded"` lists exactly what
-is missing and what it costs. A monitor should alert on `status != "ok"`.
+| `status` | Meaning | `pnpm doctor` exit |
+|---|---|---|
+| `ok` | every revenue blocker and fulfilment capability present | 0 |
+| `degraded` | money can move; fulfilment is missing something | 0 |
+| `blocked` | at least one revenue blocker is missing | 1 |
+| — | site unreachable, or it answers without a scoreboard | 2 |
+
+Each entry in `.capabilities` carries `id`, `severity`, `present`,
+`cost_if_missing`, `fix` and, when a value is set but unusable, `problem`.
+`.env` reports the presence of each variable as a boolean. No value is ever
+returned. A monitor should alert on `status != "ok"`.
 
 ## Issuing an API key
 
@@ -87,7 +118,8 @@ full fallback stack — but the intended typography needs them present.
 
 | Signal | Meaning |
 |---|---|
-| `/api/health` `status != "ok"` | a revenue-critical capability is missing |
+| `/api/health` `status == "blocked"` | no payment can be taken |
+| `/api/health` `status == "degraded"` | payments work, fulfilment is incomplete |
 | Stripe webhook 4xx/5xx rate | payments are settling without fulfilment |
 | `/api/lead` 5xx rate | leads are being lost |
 | E2E failure on main | a shipped regression |

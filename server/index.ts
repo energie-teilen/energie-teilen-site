@@ -12,7 +12,7 @@
  *   POST /api/admin/orders/:ref/stage → advance a ledger stage (Bearer)
  *   POST /api/stripe/webhook    → verified Stripe webhook (raw body, idempotent)
  *                                 sends operator notification AND customer confirmation
- *   GET  /api/health            → config presence check (no secrets exposed)
+ *   GET  /api/health            → go-live scoreboard: presence, cost, fix (no secrets)
  *   GET  /*                     → serves the SPA (Vite build)
  *
  * Durability:
@@ -50,6 +50,7 @@ import {
 } from "../shared/schema.js";
 import { toPilotOrder } from "../shared/pilot-order.js";
 import { LEGAL_ENTITY } from "../shared/legal-entity.js";
+import { buildHealthReport } from "../shared/health.js";
 import { securityHeadersMiddleware } from "./security-headers.js";
 import {
   advanceStage,
@@ -911,20 +912,33 @@ export async function buildApp(): Promise<Express> {
   /*
    * Health.
    *
-   * A monitor has to be able to tell the difference between "running" and
-   * "able to do its job". Reporting ok:true on a deployment that cannot take a
-   * payment or send an email is a fake success in the one place that exists to
-   * detect failure, so the verdict is DERIVED from what is actually
-   * configured, and the response says which checks decided it.
+   * The go-live scoreboard. A monitor has to be able to tell "running" from
+   * "able to take money". Reporting ok on a deployment that cannot take a
+   * payment would be a fake success in the one place that exists to detect
+   * failure, so the verdict is DERIVED from the capability register in
+   * shared/health.ts — the same register `pnpm doctor` renders — and the body
+   * says which capability decided it, what its absence costs and how to fix it.
    *
-   *   ok       — every capability the funnel needs is present
-   *   degraded — it serves traffic, but at least one revenue-critical
-   *              capability is missing
+   *   ok       — every revenue blocker and every fulfilment capability present
+   *   degraded — money can move; delivery or record-keeping cannot fully
+   *   blocked  — at least one revenue blocker is missing: no euro can move
    *
-   * The HTTP status stays 200 for both, so an uptime probe still sees the
-   * process as alive; the body carries the verdict.
+   * Presence and usability only, never a value. The HTTP status stays 200 for
+   * all three, so an uptime probe still sees the process as alive; the body
+   * carries the verdict.
    */
   app.get("/api/health", async (_req: Request, res: Response) => {
+    const report = buildHealthReport({
+      env: process.env,
+      legalEntity: LEGAL_ENTITY,
+      apiKeysConfigured: apiKeysConfigured(),
+      production: process.env.NODE_ENV === "production",
+    });
+
+    /*
+     * Legacy flat view, kept byte-compatible for smoke-test.sh and existing
+     * monitors. The scoreboard above is the authority; this is a projection.
+     */
     const config = {
       stripe: Boolean(process.env.STRIPE_SECRET_KEY),
       stripeWebhook: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
@@ -953,28 +967,8 @@ export async function buildApp(): Promise<Express> {
       legalEntity: LEGAL_ENTITY.configured,
     };
 
-    /** Each entry is a capability the product cannot do without. */
-    const checks: { name: string; ok: boolean; impact: string }[] = [
-      { name: "stripe", ok: config.stripe, impact: "Zahlungen können nicht entgegengenommen werden." },
-      { name: "stripe_webhook", ok: config.stripeWebhook, impact: "Zahlungsereignisse können nicht verifiziert werden." },
-      { name: "prices", ok: Object.values(config.prices).every(Boolean), impact: "Mindestens eine Angebotsstufe hat keinen Preis." },
-      { name: "email", ok: config.resend, impact: "Bestätigungen und Berichte können nicht versendet werden." },
-      { name: "durable_orders", ok: config.durableOrders, impact: "Bezahlte Aufträge sind nicht dauerhaft auflistbar." },
-      { name: "legal_entity", ok: config.legalEntity, impact: "Impressumspflichtige Angaben sind nicht hinterlegt." },
-    ];
-
-    const failing = checks.filter((c) => !c.ok);
-    const status: "ok" | "degraded" = failing.length === 0 ? "ok" : "degraded";
-
     res.setHeader("Cache-Control", "no-store");
-    res.json({
-      status,
-      ok: status === "ok",
-      timestamp: new Date().toISOString(),
-      failing: failing.map((c) => ({ check: c.name, impact: c.impact })),
-      checks: checks.map((c) => ({ check: c.name, ok: c.ok })),
-      config,
-    });
+    res.json({ ...report, config });
   });
 
   app.all("/api/*", (_req: Request, res: Response) =>

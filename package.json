@@ -17,6 +17,7 @@
     "verify": "pnpm check && pnpm test && pnpm build",
     "dev:kv": "node scripts/dev-kv.mjs",
     "apikey:new": "node scripts/apikey.mjs",
+    "doctor": "tsx scripts/doctor.ts",
     "format": "prettier --write .",
     "fonts:fetch": "node scripts/fetch-fonts.mjs",
     "e2e": "playwright test",

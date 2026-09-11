@@ -243,6 +243,19 @@ test.describe("health and caching", () => {
     expect(res.status()).toBe(200);
     const body = await res.json();
     expect(body).toHaveProperty("status");
+    // The go-live scoreboard: a verdict, and for every capability what its
+    // absence costs and how to fix it. Presence only — never a value.
+    expect(["ok", "degraded", "blocked"]).toContain(body.status);
+    expect(body.revenueBlocked).toBe(body.status === "blocked");
+    expect(Array.isArray(body.capabilities)).toBe(true);
+    for (const c of body.capabilities) {
+      expect(typeof c.id).toBe("string");
+      expect(typeof c.present).toBe("boolean");
+      expect(["revenue_blocker", "fulfilment", "optional"]).toContain(c.severity);
+      expect(c.cost_if_missing.length).toBeGreaterThan(0);
+      expect(c.fix.length).toBeGreaterThan(0);
+    }
+    for (const v of Object.values(body.env)) expect(typeof v).toBe("boolean");
   });
 
   test("API responses are never cached", async ({ request }) => {

@@ -11,7 +11,7 @@
  * So this file has exactly two states:
  *
  *   configured: false — the details are not yet supplied. The legal pages say
- *     so plainly, the health endpoint reports the deployment as degraded, and
+ *     so plainly, the health endpoint reports the deployment as blocked, and
  *     legal-entity.test.ts fails, which stops a release that would otherwise
  *     publish empty obligations.
  *
