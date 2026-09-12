@@ -1,0 +1,757 @@
+From 86c6ed39a08cfcb55fb7f8a421c249ad12506d62 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 11 Sep 2026 20:55:06 +0000
+Subject: [PATCH] feat(legal): one operator record behind every surface that
+ names the operator
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Why
+---
+shared/legal-entity.ts already gated the three legal pages, but the rest of
+the product described the operator on its own:
+
+  * the contact mailbox was typed out in the footer, the PDF report, the
+    customer-confirmation fallback and ai.txt - four more places to forget
+    when the address changes;
+  * "Frankfurt am Main" was shown as the operator's location in the footer,
+    the PDF ("Frankfurt · Deutschland"), the hero, and the structured data
+    (Organization.address plus a LocalBusiness node with a PostalAddress,
+    city-level areaServed and a priceRange) - while the record's city is
+    empty. That is an invented operator fact, published to every crawler;
+  * the imprint declared "nicht bereit und nicht verpflichtet" to consumer
+    dispute resolution while the operator is unnamed. participates: false
+    is the record's default, not anyone's declaration.
+
+This patch makes the record the only source and adds read-only views:
+contactEmail(), operatorName(), operatorLocality() and
+disputeResolutionStatement(). Name, locality and the dispute declaration are
+null until legalEntityPublishable(); the mailbox is shown before that because
+LEGAL_ENTITY_PENDING_DE tells visitors to use it.
+
+  * Footer: mailbox from the record; locality line only when publishable.
+  * PDF footer: mailbox from the record; locality appended only when
+    publishable (the brand line and site link are unchanged).
+  * Hero label: the record's locality, else "Deutschland" (the market, not an
+    operator address).
+  * Impressum: dispute-resolution statement from the record, "wird ergänzt"
+    until publishable; e-mail via contactEmail().
+  * Confirmation email: reply-to falls back to LEGAL_ENTITY.email instead of
+    a second literal.
+  * ai.txt: Contact line from the record (omitted if there is none).
+  * client/index.html: Organization.address and the LocalBusiness node
+    removed. The contact email stays and is pinned to the record by test.
+  * RUNBOOK: new "Operator identity" section documenting every field, what
+    each surface shows while configured is false, and the release check.
+
+Invariants preserved
+--------------------
+  * configured stays false; no name, street, city, phone, register entry or
+    VAT id is invented. The mailbox value is unchanged.
+  * Public legal pages say the details are being completed; they show no
+    bracketed placeholder and no operator-only note (guards still pass).
+  * Health reads the same record (0018): legal_entity stays a revenue blocker.
+  * No statutory paragraph number added anywhere.
+  * No change to routing, checkout, webhook, ledger or engines.
+
+Tests added
+-----------
+  client/src/lib/legal-identity.test.ts (11 cases):
+  * views: mailbox validity; name/locality withheld until publishable; the
+    dispute default is not published; views agree with the shipped record.
+  * tree guard over client/src, server, shared, scripts, api and
+    client/index.html: the operator mailbox is spelled out only in the record
+    and the static shell; any other address literal must be on a reasoned
+    allowlist (default sender, input placeholders, a format example).
+  * the static shell's addresses equal the record; no PostalAddress,
+    LocalBusiness or addressLocality while the record is not publishable;
+    no hard-coded operator city in shipped source.
+  * every surface that names a contact imports shared/legal-entity.
+  * RUNBOOK documents every field the release gate requires.
+  client/src/lib/report-pdf.test.ts: the rendered PDF carries the record's
+  mailbox and no invented city.
+
+Not in this patch
+-----------------
+  * Filling the record or setting configured: true - operator facts.
+  * Hard-coded vercel.app origin in index.html, report-pdf.ts and the build
+    scripts (0020).
+  * Rendering the operator's legal name in the PDF or confirmation email.
+  * Removing HTML comments from the static shell (0021).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FJwrn5CBbRT6xKGRqZJWkp
+---
+ client/index.html                     |  32 +---
+ client/src/components/Footer.tsx      |  23 ++-
+ client/src/lib/legal-identity.test.ts | 208 ++++++++++++++++++++++++++
+ client/src/lib/report-pdf.test.ts     |  10 ++
+ client/src/lib/report-pdf.ts          |  34 +++--
+ client/src/pages/Home.tsx             |   3 +-
+ client/src/pages/legal/Impressum.tsx  |  19 +--
+ docs/RUNBOOK.md                       |  38 +++++
+ scripts/build-discovery.mjs           |   3 +-
+ scripts/manifest-entry.ts             |   1 +
+ server/index.ts                       |   4 +-
+ shared/legal-entity.ts                |  58 +++++++
+ 12 files changed, 366 insertions(+), 67 deletions(-)
+ create mode 100644 client/src/lib/legal-identity.test.ts
+
+diff --git a/client/index.html b/client/index.html
+index cb5d223..3bc9ce9 100644
+--- a/client/index.html
++++ b/client/index.html
+@@ -139,9 +139,9 @@
+ 
+     <!-- =========================================================
+          STRUCTURED DATA — single @graph node
+-         Combines Organization, WebSite, LocalBusiness, Service,
+-         FAQPage, HowTo. Cross-referenced via @id so Google
+-         understands they describe the same entity. No prices.
++         Combines Organization, WebSite, Service, FAQPage, HowTo.
++         Cross-referenced via @id so Google understands they describe
++         the same entity. No prices.
+          ========================================================= -->
+     <script type="application/ld+json">
+       {
+@@ -174,12 +174,6 @@
+               "email": "kontakt@energie-teilen.de",
+               "areaServed": "DE",
+               "availableLanguage": ["German"]
+-            },
+-            "address": {
+-              "@type": "PostalAddress",
+-              "addressLocality": "Frankfurt am Main",
+-              "addressRegion": "Hessen",
+-              "addressCountry": "DE"
+             }
+           },
+           {
+@@ -190,26 +184,6 @@
+             "inLanguage": "de-DE",
+             "publisher": { "@id": "https://energie-teilen-site.vercel.app/#organization" }
+           },
+-          {
+-            "@type": "LocalBusiness",
+-            "@id": "https://energie-teilen-site.vercel.app/#localbusiness",
+-            "name": "Energie Teilen",
+-            "image": "https://energie-teilen-site.vercel.app/og-image.png",
+-            "url": "https://energie-teilen-site.vercel.app",
+-            "address": {
+-              "@type": "PostalAddress",
+-              "addressLocality": "Frankfurt am Main",
+-              "addressRegion": "Hessen",
+-              "addressCountry": "DE"
+-            },
+-            "areaServed": [
+-              { "@type": "City", "name": "Frankfurt am Main" },
+-              { "@type": "AdministrativeArea", "name": "Hessen" },
+-              { "@type": "Country", "name": "Deutschland" }
+-            ],
+-            "priceRange": "€€",
+-            "parentOrganization": { "@id": "https://energie-teilen-site.vercel.app/#organization" }
+-          },
+           {
+             "@type": "Service",
+             "@id": "https://energie-teilen-site.vercel.app/#pilot-service",
+diff --git a/client/src/components/Footer.tsx b/client/src/components/Footer.tsx
+index 8766271..4cf3174 100644
+--- a/client/src/components/Footer.tsx
++++ b/client/src/components/Footer.tsx
+@@ -1,5 +1,6 @@
+ import { ArrowUpRight } from "lucide-react";
+ import { navRoutes } from "../../../shared/routes";
++import { contactEmail, operatorLocality } from "../../../shared/legal-entity";
+ 
+ /**
+  * Energy Civic Ledger — footer.
+@@ -11,7 +12,9 @@ import { navRoutes } from "../../../shared/routes";
+  *     tool that exists is linked and none is advertised that does not.
+  *   - A "Rechtliches" column for Impressum, Datenschutz and AGB.
+  *   - Final CTA strip routes warm readers directly into the paid pilot intake.
+- *   - Adds <address> with email + region for local SEO + machine-readable contact.
++ *   - <address> with the contact mailbox and, once the operator record is
++ *     publishable, its locality — both read from shared/legal-entity.ts. No
++ *     city is shown that the record does not state.
+  *   - All design tokens, classes, and tone preserved.
+  */
+ 
+@@ -38,6 +41,8 @@ const legal = [
+ ];
+ 
+ export default function Footer() {
++  const email = contactEmail();
++  const locality = operatorLocality();
+   const year = new Date().getFullYear();
+ 
+   return (
+@@ -136,13 +141,15 @@ export default function Footer() {
+                 Operativer Kontakt
+               </p>
+               <address className="not-italic space-y-2 text-sm text-foreground">
+-                <p>Frankfurt am Main, Deutschland</p>
+-                <a
+-                  href="mailto:kontakt@energie-teilen.de"
+-                  className="block text-muted-foreground transition-opacity hover:opacity-70"
+-                >
+-                  kontakt@energie-teilen.de
+-                </a>
++                {locality ? <p>{locality}</p> : null}
++                {email ? (
++                  <a
++                    href={`mailto:${email}`}
++                    className="block text-muted-foreground transition-opacity hover:opacity-70"
++                  >
++                    {email}
++                  </a>
++                ) : null}
+               </address>
+             </div>
+ 
+diff --git a/client/src/lib/legal-identity.test.ts b/client/src/lib/legal-identity.test.ts
+new file mode 100644
+index 0000000..d71c673
+--- /dev/null
++++ b/client/src/lib/legal-identity.test.ts
+@@ -0,0 +1,208 @@
++import { describe, it, expect } from "vitest";
++import { readFileSync, readdirSync, statSync } from "fs";
++import { join, relative } from "path";
++import {
++  LEGAL_ENTITY,
++  REQUIRED_FIELDS,
++  contactEmail,
++  disputeResolutionStatement,
++  legalEntityPublishable,
++  operatorLocality,
++  operatorName,
++  type LegalEntity,
++} from "../../../shared/legal-entity";
++
++/*
++ * One record of who operates the site.
++ *
++ * shared/legal-entity.ts is the only place the operator is described. These
++ * guards encode defects that were actually shipped: a contact address typed
++ * into six files, a city ("Frankfurt am Main", in the footer, the PDF, the
++ * hero and a LocalBusiness node with a postal address in the structured data)
++ * that the record itself does not state, and an imprint that declared a
++ * dispute-resolution position on behalf of an operator not yet named.
++ */
++
++const ROOT = join(__dirname, "..", "..", "..");
++
++const COMPLETE: LegalEntity = {
++  configured: true,
++  name: "Beispiel Energie GmbH",
++  street: "Beispielweg 1",
++  postalCode: "60311",
++  city: "Beispielstadt",
++  country: "Deutschland",
++  representedBy: "A. Beispiel",
++  phone: "+49 69 1234567",
++  email: "kontakt@beispiel-energie.de",
++  registerCourt: "Amtsgericht Beispielstadt",
++  registerNumber: "HRB 123456",
++  vatId: "DE123456789",
++  contentResponsible: null,
++  disputeResolution: { participates: false, body: null },
++};
++
++function walk(dir: string, acc: string[] = []): string[] {
++  for (const name of readdirSync(dir)) {
++    if (["node_modules", "dist", ".git", "public"].includes(name)) continue;
++    const p = join(dir, name);
++    if (statSync(p).isDirectory()) walk(p, acc);
++    else acc.push(p);
++  }
++  return acc;
++}
++
++/** Everything that ships or generates something a visitor, a crawler or a customer reads. */
++const SHIPPED = [
++  ...["client/src", "server", "shared", "scripts", "api"].flatMap((d) => walk(join(ROOT, d))),
++  join(ROOT, "client", "index.html"),
++]
++  .filter((f) => /\.(ts|tsx|mjs|html)$/.test(f) && !/\.test\.ts$/.test(f))
++  .map((f) => relative(ROOT, f).split("\\").join("/"));
++
++const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
++
++/**
++ * Addresses that are allowed as literals because they are NOT the operator's
++ * contact mailbox. Each needs a reason; adding one here is a review decision.
++ */
++const NON_OPERATOR_ADDRESSES: Record<string, string> = {
++  "noreply@energie-teilen.de": "default Resend sender, reported by /api/health when RESEND_FROM_EMAIL is unset",
++  "noreply@ihre-domain.de": "format example inside a fix instruction",
++  "ihre@firma.de": "input placeholder for the visitor's own address",
++  "name@unternehmen.de": "input placeholder for the visitor's own address",
++};
++
++/** Static HTML cannot import the record; it is checked against it instead. */
++const MAY_SPELL_OUT_THE_MAILBOX = ["shared/legal-entity.ts", "client/index.html"];
++
++describe("the operator record's read-only views", () => {
++  it("exposes the contact mailbox, and nothing for an address that is not one", () => {
++    expect(contactEmail(COMPLETE)).toBe("kontakt@beispiel-energie.de");
++    expect(contactEmail({ ...COMPLETE, email: "kontakt(at)beispiel" })).toBeNull();
++    expect(contactEmail({ ...COMPLETE, email: "" })).toBeNull();
++  });
++
++  it("withholds name and locality until the record is publishable", () => {
++    expect(operatorName(COMPLETE)).toBe("Beispiel Energie GmbH");
++    expect(operatorLocality(COMPLETE)).toBe("Beispielstadt, Deutschland");
++    for (const entity of [{ ...COMPLETE, configured: false }, { ...COMPLETE, city: "" }]) {
++      expect(operatorName(entity)).toBeNull();
++      expect(operatorLocality(entity)).toBeNull();
++    }
++  });
++
++  it("does not publish the dispute-resolution default as the operator's declaration", () => {
++    expect(disputeResolutionStatement({ ...COMPLETE, configured: false })).toBeNull();
++    expect(disputeResolutionStatement(COMPLETE)).toMatch(/nicht bereit und nicht verpflichtet/);
++    expect(
++      disputeResolutionStatement({
++        ...COMPLETE,
++        disputeResolution: { participates: true, body: "Beispiel-Schlichtungsstelle" },
++      }),
++    ).toMatch(/Beispiel-Schlichtungsstelle/);
++  });
++
++  it("agrees with the shipped record, whatever state it is in", () => {
++    const publishable = legalEntityPublishable();
++    expect(operatorName() === null).toBe(!publishable);
++    expect(operatorLocality() === null).toBe(!publishable);
++    expect(disputeResolutionStatement() === null).toBe(!publishable);
++  });
++});
++
++describe("no surface describes the operator on its own", () => {
++  it("scans a meaningful set of files", () => {
++    expect(SHIPPED.length).toBeGreaterThan(60);
++    for (const f of [
++      "client/index.html",
++      "client/src/components/Footer.tsx",
++      "client/src/lib/report-pdf.ts",
++      "server/index.ts",
++      "scripts/build-discovery.mjs",
++    ]) {
++      expect(SHIPPED).toContain(f);
++    }
++  });
++
++  it("writes the operator mailbox only in the record (and the static shell, checked below)", () => {
++    const offenders: string[] = [];
++    for (const file of SHIPPED) {
++      const lines = readFileSync(join(ROOT, file), "utf8").split("\n");
++      lines.forEach((line, i) => {
++        for (const [address] of line.matchAll(EMAIL)) {
++          if (address === LEGAL_ENTITY.email) {
++            if (!MAY_SPELL_OUT_THE_MAILBOX.includes(file)) offenders.push(`${file}:${i + 1} ${address}`);
++          } else if (!(address in NON_OPERATOR_ADDRESSES)) {
++            offenders.push(`${file}:${i + 1} ${address} (unknown address)`);
++          }
++        }
++      });
++    }
++    expect(offenders).toEqual([]);
++  });
++
++  it("keeps the static shell's addresses equal to the record", () => {
++    const html = readFileSync(join(ROOT, "client", "index.html"), "utf8");
++    const found = [...html.matchAll(EMAIL)].map((m) => m[0]);
++    expect(found.length).toBeGreaterThan(0);
++    for (const address of found) expect(address).toBe(LEGAL_ENTITY.email);
++  });
++
++  it("states no operator location in the static shell while the record is not publishable", () => {
++    const html = readFileSync(join(ROOT, "client", "index.html"), "utf8");
++    if (!legalEntityPublishable()) {
++      expect(html).not.toMatch(/PostalAddress|LocalBusiness|addressLocality/);
++    }
++  });
++
++  it("hard-codes no operator city in shipped source", () => {
++    // The city that was shipped as the operator's location. A visitor's own
++    // project location in an input placeholder is not an operator claim.
++    const offenders: string[] = [];
++    for (const file of SHIPPED.filter((f) => f !== "shared/legal-entity.ts")) {
++      readFileSync(join(ROOT, file), "utf8")
++        .split("\n")
++        .forEach((line, i) => {
++          if (/Frankfurt/.test(line) && !/placeholder=/.test(line)) offenders.push(`${file}:${i + 1}`);
++        });
++    }
++    expect(offenders).toEqual([]);
++  });
++
++  it("reads the record on every surface that names a contact", () => {
++    for (const file of [
++      "client/src/components/Footer.tsx",
++      "client/src/lib/report-pdf.ts",
++      "client/src/pages/Home.tsx",
++      "client/src/pages/legal/Impressum.tsx",
++      "client/src/pages/legal/Datenschutz.tsx",
++      "client/src/pages/legal/Agb.tsx",
++      "server/index.ts",
++      "scripts/manifest-entry.ts",
++    ]) {
++      expect(readFileSync(join(ROOT, file), "utf8"), file).toMatch(/shared\/legal-entity/);
++    }
++    expect(readFileSync(join(ROOT, "scripts", "build-discovery.mjs"), "utf8")).toMatch(
++      /manifests\.contactEmail\(\)/,
++    );
++  });
++});
++
++describe("the go-live instructions", () => {
++  it("document every field the release gate requires", () => {
++    const runbook = readFileSync(join(ROOT, "docs", "RUNBOOK.md"), "utf8");
++    expect(runbook).toMatch(/## Operator identity/);
++    for (const field of [
++      ...REQUIRED_FIELDS,
++      "registerCourt",
++      "registerNumber",
++      "vatId",
++      "contentResponsible",
++      "disputeResolution",
++      "configured",
++    ]) {
++      expect(runbook, field).toContain(`\`${field}\``);
++    }
++  });
++});
+diff --git a/client/src/lib/report-pdf.test.ts b/client/src/lib/report-pdf.test.ts
+index 098f8ac..3d88de8 100644
+--- a/client/src/lib/report-pdf.test.ts
++++ b/client/src/lib/report-pdf.test.ts
+@@ -4,6 +4,7 @@ import { calculateMieterstrom, DEFAULTS } from "./mieterstrom";
+ import { ASSUMPTION_SET, MODEL_VERSION } from "../../../shared/assumptions";
+ import type { QualificationFacts } from "../../../shared/eligibility";
+ import type { MesskonzeptAnswers } from "./report-pdf";
++import { contactEmail, legalEntityPublishable } from "../../../shared/legal-entity";
+ 
+ const QUALIFIED: QualificationFacts = {
+   ownerConstellation: "single_owner",
+@@ -51,6 +52,15 @@ describe("buildReportDoc", () => {
+     expect(raw).toMatch(/EUR/);
+   });
+ 
++  // The report names the operator exactly as the operator record does: the
++  // record's mailbox, and no city the record does not state.
++  it("takes the contact from the operator record and invents no location", () => {
++    const raw = renderText();
++    const email = contactEmail();
++    if (email) expect(raw).toContain(email);
++    if (!legalEntityPublishable()) expect(raw).not.toContain("Frankfurt");
++  });
++
+   // P0.4 — the report must not present placeholders as facts.
+   it("carries a provenance section that names unsourced values as such", () => {
+     const raw = renderText();
+diff --git a/client/src/lib/report-pdf.ts b/client/src/lib/report-pdf.ts
+index 75f6a55..17d5495 100644
+--- a/client/src/lib/report-pdf.ts
++++ b/client/src/lib/report-pdf.ts
+@@ -27,6 +27,7 @@ import {
+   type GridConnection,
+   type Storage,
+ } from "../../../shared/messkonzept";
++import { contactEmail, operatorLocality } from "../../../shared/legal-entity";
+ 
+ /** The metering answers the qualification questions do not cover. */
+ export type MesskonzeptAnswers = {
+@@ -40,18 +41,17 @@ export type ScenarioBundle = {
+ };
+ 
+ const BRAND = { green: "#1d493a", greenDk: "#143528", gold: "#c79236", brown: "#94735b", ink: "#1a1a1a", muted: "#6b6b6b", line: "#e2e2dc", panel: "#fafaf7" };
+-// ── Edit contact + links in ONE place ──
++// ── Brand and links in ONE place. Operator identity is NOT set here: ──
++// the contact mailbox and the locality come from shared/legal-entity.ts, so a
++// report a customer forwards to an owner or a bank names the same operator as
++// the imprint, and names no city the record does not state.
+ const CONTACT = {
+   company: "Energie Teilen",
+   tagline: "Bezahlte Pilotaufnahme für lokale Energieprojekte",
+-  // Domain address only. A personal Gmail on a document a customer forwards
+-  // to an owner or a bank costs more credibility than it saves setup time.
+-  email: "kontakt@energie-teilen.de",
+   web: "energie-teilen-site.vercel.app",
+   webUrl: "https://energie-teilen-site.vercel.app/",
+   rechnerUrl: "https://energie-teilen-site.vercel.app/#rechner",
+   pilotUrl: "https://energie-teilen-site.vercel.app/#pilot-start",
+-  ort: "Frankfurt · Deutschland",
+ };
+ 
+ const eur = (n: number) => new Intl.NumberFormat("de-DE", { maximumFractionDigits: 0 }).format(Math.round(n)) + " €";
+@@ -76,14 +76,22 @@ function chrome(doc: jsPDF, pageW: number, pageH: number, margin: number, pageNo
+   doc.setDrawColor(BRAND.line).setLineWidth(0.5).line(margin, fy, pageW - margin, fy);
+   doc.setFont("helvetica", "bold").setFontSize(8).setTextColor(BRAND.green).text(CONTACT.company, margin, fy + 14);
+   doc.setFont("helvetica", "normal").setFontSize(8);
+-  // clickable email + web
+-  doc.setTextColor(BRAND.muted).textWithLink(CONTACT.email, margin, fy + 26, { url: `mailto:${CONTACT.email}` });
+-  const exW = doc.getTextWidth(CONTACT.email);
+-  doc.text("   ·   ", margin + exW, fy + 26);
+-  const sepW = doc.getTextWidth("   ·   ");
+-  doc.setTextColor(BRAND.green).textWithLink(CONTACT.web, margin + exW + sepW, fy + 26, { url: CONTACT.webUrl });
+-  const wbW = doc.getTextWidth(CONTACT.web);
+-  doc.setTextColor(BRAND.muted).text(`   ·   ${CONTACT.ort}`, margin + exW + sepW + wbW, fy + 26);
++  // clickable email + web, then the locality only if the operator record states one
++  const email = contactEmail();
++  const locality = operatorLocality();
++  const sep = "   ·   ";
++  const sepW = doc.getTextWidth(sep);
++  let x = margin;
++  if (email) {
++    doc.setTextColor(BRAND.muted).textWithLink(email, x, fy + 26, { url: `mailto:${email}` });
++    x += doc.getTextWidth(email);
++    doc.text(sep, x, fy + 26);
++    x += sepW;
++  }
++  doc.setTextColor(BRAND.green).textWithLink(CONTACT.web, x, fy + 26, { url: CONTACT.webUrl });
++  x += doc.getTextWidth(CONTACT.web);
++  if (locality) doc.setTextColor(BRAND.muted).text(`${sep}${locality}`, x, fy + 26);
++  doc.setTextColor(BRAND.muted);
+   doc.text(`Seite ${pageNo}/${pageCount}`, pageW - margin, fy + 14, { align: "right" });
+   doc.setFontSize(7).setTextColor("#a8a8a0");
+   doc.text(CONTACT.tagline, pageW - margin, fy + 26, { align: "right" });
+diff --git a/client/src/pages/Home.tsx b/client/src/pages/Home.tsx
+index fe1bfd2..bb0bbbf 100644
+--- a/client/src/pages/Home.tsx
++++ b/client/src/pages/Home.tsx
+@@ -12,6 +12,7 @@ import { AllocationPanel } from "@/components/AllocationPanel";
+ import { MarktkommunikationPanel } from "@/components/MarktkommunikationPanel";
+ import type { QualificationFacts } from "../../../shared/eligibility";
+ import { evaluateEligibility } from "../../../shared/eligibility";
++import { operatorLocality } from "../../../shared/legal-entity";
+ import { track } from "@/lib/analytics";
+ import {
+   Suspense,
+@@ -981,7 +982,7 @@ export default function Home() {
+                   <HeroRotator images={HERO_IMAGES} intervalMs={6000} />
+                 </div>
+                 <div className="hero-note lg:absolute lg:-bottom-6 lg:-left-12">
+-                  <span className="hero-note-label">Frankfurt · Deutschland</span>
++                  <span className="hero-note-label">{operatorLocality() ?? "Deutschland"}</span>
+                   <p>
+                     Energie Teilen verbindet anspruchsvolle Projektkommunikation mit
+                     einer klaren bezahlten Einstiegslinie, damit aus Interesse eine
+diff --git a/client/src/pages/legal/Impressum.tsx b/client/src/pages/legal/Impressum.tsx
+index b751bdd..f581770 100644
+--- a/client/src/pages/legal/Impressum.tsx
++++ b/client/src/pages/legal/Impressum.tsx
+@@ -2,6 +2,8 @@ import { LegalLayout, LegalSection, PendingDetail } from "@/components/LegalLayo
+ import {
+   LEGAL_ENTITY,
+   LEGAL_ENTITY_PENDING_DE,
++  contactEmail,
++  disputeResolutionStatement,
+   formattedAddress,
+   legalEntityPublishable,
+ } from "../../../../shared/legal-entity";
+@@ -21,6 +23,8 @@ import {
+ export default function Impressum() {
+   const publishable = legalEntityPublishable();
+   const address = formattedAddress();
++  const email = contactEmail();
++  const dispute = disputeResolutionStatement();
+ 
+   return (
+     <LegalLayout
+@@ -58,7 +62,7 @@ export default function Impressum() {
+       <LegalSection title="Kontakt">
+         <p>
+           E-Mail:{" "}
+-          <a href={`mailto:${LEGAL_ENTITY.email}`}>{LEGAL_ENTITY.email}</a>
++          {email ? <a href={`mailto:${email}`}>{email}</a> : <PendingDetail label="E-Mail-Adresse" />}
+         </p>
+         <p>
+           Telefon:{" "}
+@@ -100,18 +104,7 @@ export default function Impressum() {
+       ) : null}
+ 
+       <LegalSection title="Verbraucherstreitbeilegung">
+-        {LEGAL_ENTITY.disputeResolution.participates && LEGAL_ENTITY.disputeResolution.body ? (
+-          <p>
+-            Der Anbieter nimmt am Streitbeilegungsverfahren vor folgender Stelle teil:{" "}
+-            {LEGAL_ENTITY.disputeResolution.body}
+-          </p>
+-        ) : (
+-          <p>
+-            Der Anbieter ist nicht bereit und nicht verpflichtet, an
+-            Streitbeilegungsverfahren vor einer Verbraucherschlichtungsstelle
+-            teilzunehmen.
+-          </p>
+-        )}
++        {dispute ? <p>{dispute}</p> : <PendingDetail label="Erklärung zur Verbraucherstreitbeilegung" />}
+       </LegalSection>
+ 
+       <LegalSection title="Haftung für Inhalte und Links">
+diff --git a/docs/RUNBOOK.md b/docs/RUNBOOK.md
+index e2bccad..2e497ab 100644
+--- a/docs/RUNBOOK.md
++++ b/docs/RUNBOOK.md
+@@ -74,6 +74,44 @@ Each entry in `.capabilities` carries `id`, `severity`, `present`,
+ `.env` reports the presence of each variable as a boolean. No value is ever
+ returned. A monitor should alert on `status != "ok"`.
+ 
++## Operator identity
++
++`shared/legal-entity.ts` is the only place the operator is described. The
++imprint, privacy notice, terms, footer, PDF report, customer confirmation,
++`ai.txt` and `/api/health` all read it; `legal-identity.test.ts` fails if a
++contact address or an operator location is written anywhere else. Nothing in
++it may be guessed or defaulted — each value is a fact about one legal entity.
++
++| Field | Required | What goes in |
++|---|---|---|
++| `name` | yes | Registered name including legal form |
++| `street` | yes | Street and house number |
++| `postalCode` | yes | Postal code |
++| `city` | yes | City — also the locality shown in footer, hero and PDF |
++| `country` | yes | Country, written out |
++| `representedBy` | yes | Person(s) authorised to represent the entity |
++| `phone` | yes | A number that is actually answered |
++| `email` | yes | A monitored mailbox on your own domain. Shown before go-live as the only contact, so it must work today |
++| `registerCourt` | with `registerNumber` | Register court, or `null` for a form without registration |
++| `registerNumber` | with `registerCourt` | Register number, or `null` |
++| `vatId` | if issued | VAT identification number, or `null` |
++| `contentResponsible` | where applicable | `{ name, address }` of the person responsible for editorial content, or `null` |
++| `disputeResolution` | yes | `participates` and, if true, the `body`. Not shown until the record is publishable |
++| `configured` | last | Set to `true` only when everything above is real |
++
++While `configured` is `false` the legal pages say the details are being
++completed, the imprint shows no dispute-resolution declaration, the footer and
++PDF show the mailbox but no locality, and health reports `legal_entity` as a
++revenue blocker. Verify before deploying:
++
++```bash
++RELEASE_CHECK=1 pnpm test -- client/src/lib/legal-entity.test.ts
++```
++
++If `client/index.html` is changed, its contact email must equal `email`; a
++postal address may be added to its structured data only once the record is
++publishable.
++
+ ## Issuing an API key
+ 
+ ```bash
+diff --git a/scripts/build-discovery.mjs b/scripts/build-discovery.mjs
+index b63e9eb..b963249 100644
+--- a/scripts/build-discovery.mjs
++++ b/scripts/build-discovery.mjs
+@@ -347,8 +347,7 @@ writeFileSync(
+ User-agent: *
+ Allow: /
+ Citation-required: yes
+-Contact: kontakt@energie-teilen.de
+-
++${manifests.contactEmail() ? `Contact: ${manifests.contactEmail()}\n` : ""}
+ Index: ${ORIGIN}/llms.txt
+ Full-index: ${ORIGIN}/llms-full.txt
+ API: ${ORIGIN}/openapi.json
+diff --git a/scripts/manifest-entry.ts b/scripts/manifest-entry.ts
+index aba39bd..b7b5235 100644
+--- a/scripts/manifest-entry.ts
++++ b/scripts/manifest-entry.ts
+@@ -17,3 +17,4 @@ export {
+   toolByName,
+   toolListPayload,
+ } from "../shared/mcp.js";
++export { contactEmail } from "../shared/legal-entity.js";
+diff --git a/server/index.ts b/server/index.ts
+index 072ef23..996581c 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -515,10 +515,12 @@ export async function buildApp(): Promise<Express> {
+             alreadySent = fresh === null;
+           }
+ 
++          // Last resort is the operator record's own mailbox — the same
++          // address the imprint and the PDF name — never a second literal.
+           const replyTo =
+             process.env.ET_CUSTOMER_REPLY_TO ||
+             process.env.LEAD_NOTIFICATION_EMAIL ||
+-            "kontakt@energie-teilen.de";
++            LEGAL_ENTITY.email;
+ 
+           const [, customerSent] = await Promise.all([
+             // Operator notification is nice-to-have: a slow inbox must never
+diff --git a/shared/legal-entity.ts b/shared/legal-entity.ts
+index cbccaf4..c468046 100644
+--- a/shared/legal-entity.ts
++++ b/shared/legal-entity.ts
+@@ -23,6 +23,13 @@
+  * imprint, it is a page that fails its only purpose.
+  *
+  * To go live: fill every field below and set configured to true.
++ *
++ * This is the ONLY place the operator is described. The imprint, the privacy
++ * notice, the terms, the footer, the PDF report, the confirmation email, the
++ * discovery files and the health endpoint all read it through the helpers at
++ * the end of this file; legal-identity.test.ts fails if a contact address or
++ * an operator location is written anywhere else. The required fields are
++ * documented in docs/RUNBOOK.md under "Operator identity".
+  */
+ 
+ export type LegalEntity = {
+@@ -165,3 +172,54 @@ export function formattedAddress(entity: LegalEntity = LEGAL_ENTITY): string[] |
+ /** Shown in place of the details while they are not available. */
+ export const LEGAL_ENTITY_PENDING_DE =
+   "Die vollständigen Anbieterangaben werden derzeit hinterlegt und sind in Kürze an dieser Stelle abrufbar. Bis dahin erreichen Sie uns unter der angegebenen E-Mail-Adresse.";
++
++// ============================================================================
++// READ-ONLY VIEWS — what every other surface is allowed to show
++// ============================================================================
++
++const EMAIL_SHAPE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
++
++/**
++ * The one public contact mailbox.
++ *
++ * Shown even before the record is publishable, because it is how a visitor
++ * reaches the operator in the meantime (see LEGAL_ENTITY_PENDING_DE). Null if
++ * the field does not hold an address, so no surface renders a broken mailto.
++ */
++export function contactEmail(entity: LegalEntity = LEGAL_ENTITY): string | null {
++  const email = entity.email.trim();
++  return EMAIL_SHAPE.test(email) ? email : null;
++}
++
++/** Registered name, or null while the record is not publishable. */
++export function operatorName(entity: LegalEntity = LEGAL_ENTITY): string | null {
++  return legalEntityPublishable(entity) ? entity.name : null;
++}
++
++/**
++ * "City, Country", or null while the record is not publishable.
++ *
++ * A locality is a claim about where the operator is. A surface that shows one
++ * the record does not state is inventing it, so every caller omits the line
++ * on null rather than falling back to a plausible city.
++ */
++export function operatorLocality(entity: LegalEntity = LEGAL_ENTITY): string | null {
++  return legalEntityPublishable(entity) ? `${entity.city}, ${entity.country}` : null;
++}
++
++/**
++ * The consumer dispute-resolution statement, or null while the record is not
++ * publishable.
++ *
++ * `participates: false` is the record's default, not a decision anyone has
++ * taken. Declaring "not willing and not obliged" on behalf of an operator who
++ * has not yet been named would publish a default as a fact.
++ */
++export function disputeResolutionStatement(entity: LegalEntity = LEGAL_ENTITY): string | null {
++  if (!legalEntityPublishable(entity)) return null;
++  const { participates, body } = entity.disputeResolution;
++  if (participates && body) {
++    return `Der Anbieter nimmt am Streitbeilegungsverfahren vor folgender Stelle teil: ${body}`;
++  }
++  return "Der Anbieter ist nicht bereit und nicht verpflichtet, an Streitbeilegungsverfahren vor einer Verbraucherschlichtungsstelle teilzunehmen.";
++}
+-- 
+2.43.0
+
