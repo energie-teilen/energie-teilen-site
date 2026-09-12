@@ -1,0 +1,717 @@
+From 7f96e15ef504a4fa0796be6b06f2520787a31a36 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 12 Sep 2026 18:19:54 +0000
+Subject: [PATCH] feat(origin): one public address, in the running app and in
+ every artefact
+
+Why
+---
+The site told a crawler one address and a link preview another. The sitemap,
+robots.txt, llms.txt and the per-route documents were generated from APP_URL,
+while seventeen absolute URLs in client/index.html (canonical, both hreflang
+tags, og:url, og:image, twitter:image and every @id in the structured data),
+four in the PDF report and two build scripts carried the hosting address as a
+literal. Worse, the running application agreed with the literals rather than
+with the documents: shared/routes.ts read process.env.APP_URL, which does not
+exist in a browser, so every client-side navigation rewrote the canonical link
+back to the deployment address on a custom domain.
+
+shared/routes.ts is now the origin register:
+
+  * configuredOrigin() returns the operator's address or null - callers that
+    must tell "configured" from "defaulted" ask it rather than comparing
+    strings. siteOrigin() adds the fallback, siteHost() drops the scheme.
+  * Two sources: APP_URL injected at BUILD time as __APP_ORIGIN__ by
+    vite.config.ts (the browser has no process.env), then APP_URL from the
+    environment for the server, the build scripts and the tests.
+  * The fallback stays the deployment's own address, used only while APP_URL
+    is unset, and is written down in exactly one place.
+
+Everything else reads it:
+
+  * client/index.html carries %SITE_ORIGIN% in its canonical link, hreflang,
+    OpenGraph, Twitter and JSON-LD; a Vite plugin substitutes it in the build
+    AND in dev, so what a developer sees is what ships.
+  * report-pdf.ts derives the printed host and all three links, so a report
+    forwarded to an owner or a bank does not send the reader to the hosting
+    address.
+  * analytics.ts resolves the Plausible domain as VITE_PLAUSIBLE_DOMAIN, then
+    the configured origin, then the current host: a preview deployment now
+    reports to the registered site instead of a domain Plausible discards.
+  * build-static.mjs and build-discovery.mjs call manifests.siteOrigin()
+    instead of each keeping their own copy of the fallback.
+  * client/public/robots.txt and client/public/sitemap.xml are deleted. Both
+    are generated from the manifest and the origin; the checked-in copies
+    listed four routes on the hosting address and were served whenever the
+    generator had not run.
+
+Invariants preserved
+--------------------
+  * shared/routes.ts stays the only route manifest, and is now also the only
+    origin. No new dependency.
+  * Nothing is invented: no domain is written down, and the fallback is
+    unchanged. Setting APP_URL remains an operator action.
+  * shared/ stays DOM-free; the build-time constant is read through a typeof
+    guard, so the same module works in the browser, in Node and in the tests.
+  * Health (0018) still reports APP_URL as a revenue blocker and refuses a
+    localhost or plain-http value in production.
+  * The operator record (0019) remains the only source of operator identity.
+
+Tests added
+-----------
+  client/src/lib/origin.test.ts (11 cases): APP_URL wins; whitespace and
+  trailing slashes are stripped; the fallback applies only while APP_URL is
+  unset or blank; sitemap and robots.txt carry the configured origin;
+  analyticsDomain() prefers the configured origin over the current host and
+  falls back to the host when nothing is configured. Then the guard: the
+  deployment address appears in no shipped file except the register, the
+  static shell's own URLs all sit on the substituted token, the only absolute
+  URLs left in it are schema.org and Stripe, vite.config.ts substitutes the
+  token and defines the build constant, both build scripts call
+  manifests.siteOrigin(), and no static robots.txt or sitemap.xml is shipped.
+
+Not in this patch
+-----------------
+  * Buying or configuring a domain - an operator action. Set APP_URL and
+    redeploy; `pnpm doctor` says so while it is missing.
+  * Route and navigation work: the funnel's next paid step on every tool page,
+    and the missing /pilot route in the manifest (0021).
+  * README (0041).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FJwrn5CBbRT6xKGRqZJWkp
+---
+ .env.example                  |   8 +-
+ client/index.html             |  34 +++---
+ client/public/robots.txt      |   3 -
+ client/public/sitemap.xml     |   7 --
+ client/src/lib/analytics.ts   |  19 +++-
+ client/src/lib/origin.test.ts | 194 ++++++++++++++++++++++++++++++++++
+ client/src/lib/report-pdf.ts  |  19 +++-
+ docs/RUNBOOK.md               |  11 +-
+ scripts/build-discovery.mjs   |   4 +-
+ scripts/build-static.mjs      |   5 +-
+ shared/routes.ts              |  58 +++++++++-
+ vite.config.ts                |  37 ++++++-
+ 12 files changed, 351 insertions(+), 48 deletions(-)
+ delete mode 100644 client/public/robots.txt
+ delete mode 100644 client/public/sitemap.xml
+ create mode 100644 client/src/lib/origin.test.ts
+
+diff --git a/.env.example b/.env.example
+index 77e33c6..32e5fba 100644
+--- a/.env.example
++++ b/.env.example
+@@ -20,8 +20,12 @@
+ # APP — base URLs and runtime
+ # -----------------------------------------------------------------------------
+ 
+-# REQUIRED. Public base URL of your deployed site. Used in Stripe success_url
+-# and cancel_url so users land back here after checkout.
++# REQUIRED. Public base URL of your deployed site, without a trailing slash.
++# The single address the product calls itself by: Stripe success_url and
++# cancel_url, canonical links, hreflang, OpenGraph, structured data, sitemap,
++# robots.txt, llms.txt, the links inside the PDF report and the Plausible
++# domain. Read at BUILD time for the browser bundle and the generated
++# documents — change it and redeploy, a restart is not enough.
+ # Examples:
+ #   local      → http://localhost:3000
+ #   preview    → https://energie-teilen-site-git-feature.vercel.app
+diff --git a/client/index.html b/client/index.html
+index 3bc9ce9..53912e9 100644
+--- a/client/index.html
++++ b/client/index.html
+@@ -24,9 +24,9 @@
+     <meta http-equiv="Content-Language" content="de" />
+     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+ 
+-    <link rel="canonical" href="https://energie-teilen-site.vercel.app/" />
+-    <link rel="alternate" hreflang="de-DE" href="https://energie-teilen-site.vercel.app/" />
+-    <link rel="alternate" hreflang="x-default" href="https://energie-teilen-site.vercel.app/" />
++    <link rel="canonical" href="%SITE_ORIGIN%/" />
++    <link rel="alternate" hreflang="de-DE" href="%SITE_ORIGIN%/" />
++    <link rel="alternate" hreflang="x-default" href="%SITE_ORIGIN%/" />
+ 
+     <!-- =========================================================
+          IOS / ANDROID / WINDOWS APP META
+@@ -57,9 +57,9 @@
+     <meta
+       property="og:description"
+       content="Strukturierte Pilotaufnahme für Mieterstrom, gemeinschaftliche Gebäudeversorgung und Energy Sharing. Kostenloser Rendite-Rechner. Drei Pilotstufen." />
+-    <meta property="og:url" content="https://energie-teilen-site.vercel.app/" />
+-    <meta property="og:image" content="https://energie-teilen-site.vercel.app/og-image.png" />
+-    <meta property="og:image:secure_url" content="https://energie-teilen-site.vercel.app/og-image.png" />
++    <meta property="og:url" content="%SITE_ORIGIN%/" />
++    <meta property="og:image" content="%SITE_ORIGIN%/og-image.png" />
++    <meta property="og:image:secure_url" content="%SITE_ORIGIN%/og-image.png" />
+     <meta property="og:image:type" content="image/png" />
+     <meta property="og:image:width" content="1200" />
+     <meta property="og:image:height" content="630" />
+@@ -71,7 +71,7 @@
+     <meta name="twitter:card" content="summary_large_image" />
+     <meta name="twitter:title" content="Energie Teilen — Bezahlte Pilotaufnahme" />
+     <meta name="twitter:description" content="Strukturierte Pilotaufnahme für lokale Energieprojekte. Kostenloser Mieterstrom-Rechner. Drei Pilotstufen." />
+-    <meta name="twitter:image" content="https://energie-teilen-site.vercel.app/og-image.png" />
++    <meta name="twitter:image" content="%SITE_ORIGIN%/og-image.png" />
+     <meta name="twitter:image:alt" content="Energie Teilen — vernetzte urbane Energieinfrastruktur" />
+ 
+     <!-- =========================================================
+@@ -149,12 +149,12 @@
+         "@graph": [
+           {
+             "@type": "Organization",
+-            "@id": "https://energie-teilen-site.vercel.app/#organization",
++            "@id": "%SITE_ORIGIN%/#organization",
+             "name": "Energie Teilen",
+-            "url": "https://energie-teilen-site.vercel.app",
++            "url": "%SITE_ORIGIN%",
+             "logo": {
+               "@type": "ImageObject",
+-              "url": "https://energie-teilen-site.vercel.app/og-image.png",
++              "url": "%SITE_ORIGIN%/og-image.png",
+               "width": 1200,
+               "height": 630
+             },
+@@ -178,17 +178,17 @@
+           },
+           {
+             "@type": "WebSite",
+-            "@id": "https://energie-teilen-site.vercel.app/#website",
+-            "url": "https://energie-teilen-site.vercel.app",
++            "@id": "%SITE_ORIGIN%/#website",
++            "url": "%SITE_ORIGIN%",
+             "name": "Energie Teilen",
+             "inLanguage": "de-DE",
+-            "publisher": { "@id": "https://energie-teilen-site.vercel.app/#organization" }
++            "publisher": { "@id": "%SITE_ORIGIN%/#organization" }
+           },
+           {
+             "@type": "Service",
+-            "@id": "https://energie-teilen-site.vercel.app/#pilot-service",
++            "@id": "%SITE_ORIGIN%/#pilot-service",
+             "serviceType": "Strukturierte Pilotaufnahme für Energieprojekte",
+-            "provider": { "@id": "https://energie-teilen-site.vercel.app/#organization" },
++            "provider": { "@id": "%SITE_ORIGIN%/#organization" },
+             "areaServed": { "@type": "Country", "name": "Deutschland" },
+             "audience": {
+               "@type": "BusinessAudience",
+@@ -227,7 +227,7 @@
+           },
+           {
+             "@type": "FAQPage",
+-            "@id": "https://energie-teilen-site.vercel.app/#faq",
++            "@id": "%SITE_ORIGIN%/#faq",
+             "mainEntity": [
+               {
+                 "@type": "Question",
+@@ -289,7 +289,7 @@
+           },
+           {
+             "@type": "HowTo",
+-            "@id": "https://energie-teilen-site.vercel.app/#howto-rechner",
++            "@id": "%SITE_ORIGIN%/#howto-rechner",
+             "name": "Mieterstrom-Rendite berechnen",
+             "description": "In vier Schritten zu einer ersten Renditeeinordnung Ihres Mieterstrom-Vorhabens.",
+             "totalTime": "PT3M",
+diff --git a/client/public/robots.txt b/client/public/robots.txt
+deleted file mode 100644
+index 7283b34..0000000
+--- a/client/public/robots.txt
++++ /dev/null
+@@ -1,3 +0,0 @@
+-User-agent: *
+-Allow: /
+-Sitemap: https://energie-teilen-site.vercel.app/sitemap.xml
+diff --git a/client/public/sitemap.xml b/client/public/sitemap.xml
+deleted file mode 100644
+index 20d3866..0000000
+--- a/client/public/sitemap.xml
++++ /dev/null
+@@ -1,7 +0,0 @@
+-<?xml version="1.0" encoding="UTF-8"?>
+-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+-  <url><loc>https://energie-teilen-site.vercel.app/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>
+-  <url><loc>https://energie-teilen-site.vercel.app/impressum</loc><changefreq>yearly</changefreq><priority>0.3</priority></url>
+-  <url><loc>https://energie-teilen-site.vercel.app/datenschutz</loc><changefreq>yearly</changefreq><priority>0.3</priority></url>
+-  <url><loc>https://energie-teilen-site.vercel.app/agb</loc><changefreq>yearly</changefreq><priority>0.3</priority></url>
+-</urlset>
+diff --git a/client/src/lib/analytics.ts b/client/src/lib/analytics.ts
+index 72917c3..3f9e22c 100644
+--- a/client/src/lib/analytics.ts
++++ b/client/src/lib/analytics.ts
+@@ -5,7 +5,8 @@
+  *
+  * Loads the script itself so the `window.plausible` queue stub exists before
+  * any event fires, and resolves the reporting domain from
+- * VITE_PLAUSIBLE_DOMAIN with the current hostname as fallback.
++ * VITE_PLAUSIBLE_DOMAIN, then the configured site origin, then the current
++ * hostname.
+  *
+  * Rules this module enforces:
+  *   - No personal data. Event properties are enums, counts and booleans;
+@@ -14,6 +15,8 @@
+  *   - Respects Do Not Track.
+  */
+ 
++import { configuredOrigin } from "../../../shared/routes";
++
+ // ============================================================================
+ // EVENTS — the funnel, named once
+ // ============================================================================
+@@ -120,9 +123,17 @@ export function doNotTrackEnabled(): boolean {
+ export function analyticsDomain(): string {
+   const configured = import.meta.env?.VITE_PLAUSIBLE_DOMAIN as string | undefined;
+   if (configured && configured.trim().length > 0) return configured.trim();
+-  // Falling back to the actual host is correct on the custom domain; on any
+-  // other host Plausible ignores the events rather than attributing them
+-  // elsewhere.
++
++  /*
++   * Then the site's own origin, when APP_URL was set at build time. A preview
++   * deployment serves the same bundle from a different host; attributing its
++   * events to the registered site is right, and Plausible drops events whose
++   * domain is not registered.
++   */
++  const origin = configuredOrigin();
++  if (origin) return origin.replace(/^https?:\/\//, "");
++
++  // Last, the actual host: correct on the real domain, ignored elsewhere.
+   return w()?.location?.hostname ?? "";
+ }
+ 
+diff --git a/client/src/lib/origin.test.ts b/client/src/lib/origin.test.ts
+new file mode 100644
+index 0000000..f9c71c3
+--- /dev/null
++++ b/client/src/lib/origin.test.ts
+@@ -0,0 +1,194 @@
++import { describe, it, expect, afterEach } from "vitest";
++import { readFileSync, readdirSync, statSync } from "fs";
++import { join, relative } from "path";
++import {
++  ORIGIN_FALLBACK,
++  absoluteUrl,
++  buildRobots,
++  buildSitemap,
++  configuredOrigin,
++  siteHost,
++  siteOrigin,
++} from "../../../shared/routes";
++import { analyticsDomain } from "./analytics";
++
++/*
++ * One public origin.
++ *
++ * The site told Google one address and a link preview another: the canonical
++ * link, hreflang, OpenGraph, the structured data, the PDF's links and the
++ * analytics domain each carried the hosting URL as a literal, while the
++ * sitemap and the generated documents used APP_URL. These tests pin the
++ * resolution order and fail if a second address is written down anywhere.
++ */
++
++const ROOT = join(__dirname, "..", "..", "..");
++
++const previous = process.env.APP_URL;
++afterEach(() => {
++  if (previous === undefined) delete process.env.APP_URL;
++  else process.env.APP_URL = previous;
++});
++
++function withAppUrl<T>(value: string | undefined, fn: () => T): T {
++  if (value === undefined) delete process.env.APP_URL;
++  else process.env.APP_URL = value;
++  return fn();
++}
++
++describe("resolving the origin", () => {
++  it("uses APP_URL when it is set", () => {
++    withAppUrl("https://energie-teilen.de", () => {
++      expect(configuredOrigin()).toBe("https://energie-teilen.de");
++      expect(siteOrigin()).toBe("https://energie-teilen.de");
++      expect(siteHost()).toBe("energie-teilen.de");
++      expect(absoluteUrl("/")).toBe("https://energie-teilen.de/");
++      expect(absoluteUrl("/rechner")).toBe("https://energie-teilen.de/rechner");
++    });
++  });
++
++  it("strips trailing slashes and surrounding whitespace", () => {
++    withAppUrl("  https://energie-teilen.de///  ", () => {
++      expect(siteOrigin()).toBe("https://energie-teilen.de");
++      expect(absoluteUrl("/api")).toBe("https://energie-teilen.de/api");
++    });
++  });
++
++  it("falls back to the deployment address only while APP_URL is unset", () => {
++    withAppUrl(undefined, () => {
++      expect(configuredOrigin()).toBeNull();
++      expect(siteOrigin()).toBe(ORIGIN_FALLBACK);
++    });
++    withAppUrl("   ", () => {
++      expect(configuredOrigin()).toBeNull();
++    });
++  });
++
++  it("carries the configured origin into the sitemap and robots.txt", () => {
++    withAppUrl("https://energie-teilen.de", () => {
++      const xml = buildSitemap("2026-09-12");
++      expect(xml).toContain("<loc>https://energie-teilen.de/</loc>");
++      expect(xml).not.toContain(ORIGIN_FALLBACK);
++      expect(buildRobots()).toContain("Sitemap: https://energie-teilen.de/sitemap.xml");
++    });
++  });
++
++  it("reports the configured origin to Plausible before the current host", () => {
++    const original = (globalThis as { window?: unknown }).window;
++    (globalThis as { window?: unknown }).window = {
++      location: { hostname: "energie-teilen-site-git-preview.vercel.app" },
++    };
++    try {
++      withAppUrl("https://energie-teilen.de", () => {
++        expect(analyticsDomain()).toBe("energie-teilen.de");
++      });
++      withAppUrl(undefined, () => {
++        expect(analyticsDomain()).toBe("energie-teilen-site-git-preview.vercel.app");
++      });
++    } finally {
++      if (original === undefined) delete (globalThis as { window?: unknown }).window;
++      else (globalThis as { window?: unknown }).window = original;
++    }
++  });
++});
++
++// ----------------------------------------------------------------------------
++// The guard: one literal, in one file.
++// ----------------------------------------------------------------------------
++
++function walk(dir: string, acc: string[] = []): string[] {
++  for (const name of readdirSync(dir)) {
++    if (["node_modules", "dist", ".git"].includes(name)) continue;
++    const p = join(dir, name);
++    if (statSync(p).isDirectory()) walk(p, acc);
++    else acc.push(p);
++  }
++  return acc;
++}
++
++const SHIPPED = [
++  ...["client/src", "client/public", "server", "shared", "scripts", "api"].flatMap((d) =>
++    walk(join(ROOT, d)),
++  ),
++  join(ROOT, "client", "index.html"),
++  join(ROOT, "vite.config.ts"),
++]
++  .filter((f) => /\.(ts|tsx|mjs|html|txt|xml|webmanifest)$/.test(f) && !/\.test\.ts$/.test(f))
++  .map((f) => relative(ROOT, f).split("\\").join("/"));
++
++/** The only file allowed to spell the fallback out. */
++const ORIGIN_REGISTER = "shared/routes.ts";
++
++describe("no second address", () => {
++  it("scans the files that can publish an address", () => {
++    expect(SHIPPED.length).toBeGreaterThan(60);
++    expect(SHIPPED).toContain("client/index.html");
++    expect(SHIPPED).toContain("client/src/lib/report-pdf.ts");
++    expect(SHIPPED).toContain("scripts/build-discovery.mjs");
++  });
++
++  it("writes the deployment address only in the origin register", () => {
++    const host = ORIGIN_FALLBACK.replace(/^https?:\/\//, "");
++    const offenders: string[] = [];
++    for (const file of SHIPPED) {
++      if (file === ORIGIN_REGISTER) continue;
++      readFileSync(join(ROOT, file), "utf8")
++        .split("\n")
++        .forEach((line, i) => {
++          if (line.includes(host)) offenders.push(`${file}:${i + 1}`);
++        });
++    }
++    expect(offenders).toEqual([]);
++  });
++
++  it("keeps the static shell's own URLs on the token the build substitutes", () => {
++    const html = readFileSync(join(ROOT, "client", "index.html"), "utf8");
++    // Everything the page says about itself.
++    for (const pattern of [
++      /<link rel="canonical" href="%SITE_ORIGIN%\//,
++      /hreflang="de-DE" href="%SITE_ORIGIN%\//,
++      /hreflang="x-default" href="%SITE_ORIGIN%\//,
++      /property="og:url" content="%SITE_ORIGIN%\//,
++      /property="og:image" content="%SITE_ORIGIN%\//,
++      /name="twitter:image" content="%SITE_ORIGIN%\//,
++    ]) {
++      expect(html, String(pattern)).toMatch(pattern);
++    }
++    // Structured data identifies the site by the same address.
++    expect(html).toContain('"@id": "%SITE_ORIGIN%/#organization"');
++    expect(html).toContain('"@id": "%SITE_ORIGIN%/#website"');
++
++    // The only absolute URLs left are third parties the page genuinely uses.
++    const externals = [...html.matchAll(/https?:\/\/[^"' <)]+/g)].map((m) => m[0]);
++    for (const url of externals) {
++      expect(
++        ["https://schema.org", "https://js.stripe.com", "https://checkout.stripe.com"].some((allowed) =>
++          url.startsWith(allowed),
++        ),
++        url,
++      ).toBe(true);
++    }
++  });
++
++  it("substitutes the token in the build and in dev, from the same function", () => {
++    const config = readFileSync(join(ROOT, "vite.config.ts"), "utf8");
++    expect(config).toMatch(/import \{ siteOrigin \} from "\.\/shared\/routes"/);
++    expect(config).toContain("%SITE_ORIGIN%");
++    expect(config).toContain("__APP_ORIGIN__");
++  });
++
++  it("builds every generated document from the same origin function", () => {
++    for (const file of ["scripts/build-static.mjs", "scripts/build-discovery.mjs"]) {
++      expect(readFileSync(join(ROOT, file), "utf8"), file).toContain("manifests.siteOrigin()");
++    }
++    expect(readFileSync(join(ROOT, "scripts", "manifest-entry.ts"), "utf8")).toContain("siteOrigin");
++  });
++
++  it("ships no static robots.txt or sitemap.xml that the build would have to overwrite", () => {
++    // Both are generated from the route manifest and the origin. A checked-in
++    // copy served a four-route sitemap on the wrong host whenever the
++    // generator did not run.
++    expect(SHIPPED).not.toContain("client/public/robots.txt");
++    expect(SHIPPED).not.toContain("client/public/sitemap.xml");
++  });
++});
+diff --git a/client/src/lib/report-pdf.ts b/client/src/lib/report-pdf.ts
+index 17d5495..d33c19e 100644
+--- a/client/src/lib/report-pdf.ts
++++ b/client/src/lib/report-pdf.ts
+@@ -28,6 +28,7 @@ import {
+   type Storage,
+ } from "../../../shared/messkonzept";
+ import { contactEmail, operatorLocality } from "../../../shared/legal-entity";
++import { absoluteUrl, siteHost, siteOrigin } from "../../../shared/routes";
+ 
+ /** The metering answers the qualification questions do not cover. */
+ export type MesskonzeptAnswers = {
+@@ -45,13 +46,23 @@ const BRAND = { green: "#1d493a", greenDk: "#143528", gold: "#c79236", brown: "#
+ // the contact mailbox and the locality come from shared/legal-entity.ts, so a
+ // report a customer forwards to an owner or a bank names the same operator as
+ // the imprint, and names no city the record does not state.
++// The links are built from siteOrigin(), so a report downloaded from the
++// custom domain does not send its reader back to the hosting address.
+ const CONTACT = {
+   company: "Energie Teilen",
+   tagline: "Bezahlte Pilotaufnahme für lokale Energieprojekte",
+-  web: "energie-teilen-site.vercel.app",
+-  webUrl: "https://energie-teilen-site.vercel.app/",
+-  rechnerUrl: "https://energie-teilen-site.vercel.app/#rechner",
+-  pilotUrl: "https://energie-teilen-site.vercel.app/#pilot-start",
++  get web() {
++    return siteHost();
++  },
++  get webUrl() {
++    return absoluteUrl("/");
++  },
++  get rechnerUrl() {
++    return absoluteUrl("/rechner");
++  },
++  get pilotUrl() {
++    return `${siteOrigin()}/#pilot-start`;
++  },
+ };
+ 
+ const eur = (n: number) => new Intl.NumberFormat("de-DE", { maximumFractionDigits: 0 }).format(Math.round(n)) + " €";
+diff --git a/docs/RUNBOOK.md b/docs/RUNBOOK.md
+index 2e497ab..e1e6b7b 100644
+--- a/docs/RUNBOOK.md
++++ b/docs/RUNBOOK.md
+@@ -24,8 +24,15 @@ doctor exits 1, and no euro can move.
+ 2. `STRIPE_PRICE_ET_ELIGIBILITY`, `STRIPE_PRICE_ET_STRUCTURING`,
+    `STRIPE_PRICE_ET_MANDATE` [`stripe_price_et_*`] — one-time EUR prices.
+    Server-side only; the browser never learns a price ID.
+-3. `APP_URL` [`app_url`] — the public https origin. Used for Stripe return
+-   URLs; a localhost or plain-http value is refused in production.
++3. `APP_URL` [`app_url`] — the public https origin, and the only address the
++   product calls itself by: Stripe return URLs, canonical links, hreflang,
++   OpenGraph, structured data, sitemap, robots.txt, the discovery files, the
++   links in the PDF report and the Plausible domain all derive from it
++   (`siteOrigin()` in `shared/routes.ts`). It is read at BUILD time for the
++   browser bundle and the static documents, so changing it needs a redeploy,
++   not just a restart. While it is unset everything falls back to the
++   deployment's own address. A localhost or plain-http value is refused in
++   production.
+ 4. `STRIPE_WEBHOOK_SECRET` [`stripe_webhook_secret`] — endpoint
+    `<APP_URL>/api/stripe/webhook` for `checkout.session.completed` and
+    `checkout.session.async_payment_succeeded`.
+diff --git a/scripts/build-discovery.mjs b/scripts/build-discovery.mjs
+index b963249..073be20 100644
+--- a/scripts/build-discovery.mjs
++++ b/scripts/build-discovery.mjs
+@@ -24,10 +24,12 @@ import { join } from "path";
+ import { loadManifests } from "./load-manifests.mjs";
+ 
+ const DIST = join(process.cwd(), "dist", "public");
+-const ORIGIN = (process.env.APP_URL || "https://energie-teilen-site.vercel.app").replace(/\/+$/, "");
+ 
+ const manifests = await loadManifests();
+ 
++// One origin for the whole product: shared/routes.ts, reading APP_URL.
++const ORIGIN = manifests.siteOrigin();
++
+ const routes = manifests.indexableRoutes().map((r) => ({
+   path: r.path,
+   kind: r.kind,
+diff --git a/scripts/build-static.mjs b/scripts/build-static.mjs
+index 3135bcb..9ebd7b7 100644
+--- a/scripts/build-static.mjs
++++ b/scripts/build-static.mjs
+@@ -33,11 +33,12 @@ if (!existsSync(SHELL)) {
+ 
+ import { loadManifests } from "./load-manifests.mjs";
+ 
+-const ORIGIN = (process.env.APP_URL || "https://energie-teilen-site.vercel.app").replace(/\/+$/, "");
+-
+ // The manifests are executed rather than parsed, so a reformat of the source
+ // can never change what gets published. See scripts/load-manifests.mjs.
+ const manifests = await loadManifests();
++
++// One origin for the whole product: shared/routes.ts, reading APP_URL.
++const ORIGIN = manifests.siteOrigin();
+ const routes = manifests.ROUTES;
+ const faqFor = manifests.faqFor;
+ const canonicalPathFor = manifests.canonicalPathFor;
+diff --git a/shared/routes.ts b/shared/routes.ts
+index 7a11016..f2e30da 100644
+--- a/shared/routes.ts
++++ b/shared/routes.ts
+@@ -53,13 +53,61 @@ export type RouteDefinition = {
+   aliasOf?: string;
+ };
+ 
+-const ORIGIN_FALLBACK = "https://energie-teilen-site.vercel.app";
++/**
++ * The one address this site calls itself by.
++ *
++ * Everything that has to agree — canonical links, hreflang, OpenGraph, the
++ * structured data, the sitemap, robots.txt, the discovery files, the links in
++ * the PDF report and the analytics domain — reads it from here. A second
++ * literal somewhere else is how a site ends up telling Google one address and
++ * a link preview another; origin.test.ts fails if one appears.
++ *
++ * Two sources, in this order:
++ *
++ *   1. APP_URL at BUILD time, injected into the browser bundle as
++ *      __APP_ORIGIN__ by vite.config.ts. The client has no process.env, so
++ *      without this the running application would fall back while the
++ *      generated documents used the real address.
++ *   2. APP_URL in the environment, for the server, the build scripts and the
++ *      tests.
++ *
++ * The fallback below is the deployment's own address, used only while APP_URL
++ * is unset. It is a hosting URL, not an identity: setting APP_URL is what
++ * makes the product's address its own.
++ */
++export const ORIGIN_FALLBACK = "https://energie-teilen-site.vercel.app";
++
++/** Injected by vite.config.ts at build time. Absent everywhere else. */
++declare const __APP_ORIGIN__: string | undefined;
++
++function normalise(raw: string): string {
++  return raw.trim().replace(/\/+$/, "");
++}
+ 
+-/** The public origin. Overridden at build time by APP_URL. */
++/**
++ * The origin the operator configured, or null while APP_URL is unset.
++ *
++ * Callers that must distinguish "configured" from "defaulted" — the analytics
++ * domain, the health scoreboard — ask for this rather than comparing strings.
++ */
++export function configuredOrigin(): string | null {
++  const fromBuild = typeof __APP_ORIGIN__ === "string" ? __APP_ORIGIN__ : "";
++  if (fromBuild.trim().length > 0) return normalise(fromBuild);
++
++  const fromEnv = typeof process !== "undefined" ? process.env?.APP_URL : undefined;
++  if (typeof fromEnv === "string" && fromEnv.trim().length > 0) return normalise(fromEnv);
++
++  return null;
++}
++
++/** The public origin, without a trailing slash. */
+ export function siteOrigin(): string {
+-  const raw =
+-    (typeof process !== "undefined" ? process.env?.APP_URL : undefined) ?? ORIGIN_FALLBACK;
+-  return raw.replace(/\/+$/, "");
++  return configuredOrigin() ?? ORIGIN_FALLBACK;
++}
++
++/** The host alone, for display and for the analytics domain. */
++export function siteHost(): string {
++  return siteOrigin().replace(/^https?:\/\//, "");
+ }
+ 
+ export function absoluteUrl(path: string): string {
+diff --git a/vite.config.ts b/vite.config.ts
+index 063cbfa..2417e12 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -5,6 +5,7 @@ import fs from "node:fs";
+ import path from "node:path";
+ import { defineConfig, type Plugin, type ViteDevServer } from "vite";
+ import { vitePluginManusRuntime } from "vite-plugin-manus-runtime";
++import { siteOrigin } from "./shared/routes";
+ 
+ // =============================================================================
+ // Energie Teilen — Vite configuration
+@@ -98,6 +99,28 @@ function vitePluginManusDebugCollector(): Plugin {
+ 
+ const API_DEV_TARGET = process.env.VITE_DEV_API_TARGET || "http://localhost:3001";
+ 
++/**
++ * The public origin, into the two places a bundler has to put it.
++ *
++ * index.html is static, so it cannot call siteOrigin(): it carries
++ * %SITE_ORIGIN% in its canonical link, hreflang, OpenGraph, Twitter and
++ * structured data, and this replaces the token — in dev too, so what a
++ * developer sees is what ships. The browser bundle has no process.env, so the
++ * same value is defined as __APP_ORIGIN__ for shared/routes.ts to read.
++ *
++ * Both come from APP_URL through siteOrigin(), so there is one address and a
++ * missing APP_URL degrades in exactly one way.
++ */
++function siteOriginPlugin(origin: string): Plugin {
++  return {
++    name: "energie-teilen:site-origin",
++    transformIndexHtml: {
++      order: "pre",
++      handler: (html: string) => html.split("%SITE_ORIGIN%").join(origin),
++    },
++  };
++}
++
+ export default defineConfig(({ command }) => {
+   const isDev = command === "serve";
+ 
+@@ -106,8 +129,20 @@ export default defineConfig(({ command }) => {
+     ? [jsxLocPlugin(), vitePluginManusRuntime(), vitePluginManusDebugCollector()]
+     : [];
+ 
++  const origin = siteOrigin();
++
+   return {
+-    plugins: [react(), tailwindcss(), ...devPlugins],
++    plugins: [react(), tailwindcss(), siteOriginPlugin(origin), ...devPlugins],
++
++    /*
++     * The client has no process.env. Without this the running application
++     * would compute canonical and OpenGraph URLs from the fallback origin
++     * while the generated documents used APP_URL — the two answers a crawler
++     * compares.
++     */
++    define: {
++      __APP_ORIGIN__: JSON.stringify(process.env.APP_URL ?? ""),
++    },
+ 
+     resolve: {
+       alias: {
+-- 
+2.43.0
+
