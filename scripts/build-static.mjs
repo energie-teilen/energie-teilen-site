@@ -33,11 +33,12 @@ if (!existsSync(SHELL)) {
 
 import { loadManifests } from "./load-manifests.mjs";
 
-const ORIGIN = (process.env.APP_URL || "https://energie-teilen-site.vercel.app").replace(/\/+$/, "");
-
 // The manifests are executed rather than parsed, so a reformat of the source
 // can never change what gets published. See scripts/load-manifests.mjs.
 const manifests = await loadManifests();
+
+// One origin for the whole product: shared/routes.ts, reading APP_URL.
+const ORIGIN = manifests.siteOrigin();
 const routes = manifests.ROUTES;
 const faqFor = manifests.faqFor;
 const canonicalPathFor = manifests.canonicalPathFor;

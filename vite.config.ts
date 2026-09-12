@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { defineConfig, type Plugin, type ViteDevServer } from "vite";
 import { vitePluginManusRuntime } from "vite-plugin-manus-runtime";
+import { siteOrigin } from "./shared/routes";
 
 // =============================================================================
 // Energie Teilen — Vite configuration
@@ -98,6 +99,28 @@ function vitePluginManusDebugCollector(): Plugin {
 
 const API_DEV_TARGET = process.env.VITE_DEV_API_TARGET || "http://localhost:3001";
 
+/**
+ * The public origin, into the two places a bundler has to put it.
+ *
+ * index.html is static, so it cannot call siteOrigin(): it carries
+ * %SITE_ORIGIN% in its canonical link, hreflang, OpenGraph, Twitter and
+ * structured data, and this replaces the token — in dev too, so what a
+ * developer sees is what ships. The browser bundle has no process.env, so the
+ * same value is defined as __APP_ORIGIN__ for shared/routes.ts to read.
+ *
+ * Both come from APP_URL through siteOrigin(), so there is one address and a
+ * missing APP_URL degrades in exactly one way.
+ */
+function siteOriginPlugin(origin: string): Plugin {
+  return {
+    name: "energie-teilen:site-origin",
+    transformIndexHtml: {
+      order: "pre",
+      handler: (html: string) => html.split("%SITE_ORIGIN%").join(origin),
+    },
+  };
+}
+
 export default defineConfig(({ command }) => {
   const isDev = command === "serve";
 
@@ -106,8 +129,20 @@ export default defineConfig(({ command }) => {
     ? [jsxLocPlugin(), vitePluginManusRuntime(), vitePluginManusDebugCollector()]
     : [];
 
+  const origin = siteOrigin();
+
   return {
-    plugins: [react(), tailwindcss(), ...devPlugins],
+    plugins: [react(), tailwindcss(), siteOriginPlugin(origin), ...devPlugins],
+
+    /*
+     * The client has no process.env. Without this the running application
+     * would compute canonical and OpenGraph URLs from the fallback origin
+     * while the generated documents used APP_URL — the two answers a crawler
+     * compares.
+     */
+    define: {
+      __APP_ORIGIN__: JSON.stringify(process.env.APP_URL ?? ""),
+    },
 
     resolve: {
       alias: {

@@ -53,13 +53,61 @@ export type RouteDefinition = {
   aliasOf?: string;
 };
 
-const ORIGIN_FALLBACK = "https://energie-teilen-site.vercel.app";
+/**
+ * The one address this site calls itself by.
+ *
+ * Everything that has to agree — canonical links, hreflang, OpenGraph, the
+ * structured data, the sitemap, robots.txt, the discovery files, the links in
+ * the PDF report and the analytics domain — reads it from here. A second
+ * literal somewhere else is how a site ends up telling Google one address and
+ * a link preview another; origin.test.ts fails if one appears.
+ *
+ * Two sources, in this order:
+ *
+ *   1. APP_URL at BUILD time, injected into the browser bundle as
+ *      __APP_ORIGIN__ by vite.config.ts. The client has no process.env, so
+ *      without this the running application would fall back while the
+ *      generated documents used the real address.
+ *   2. APP_URL in the environment, for the server, the build scripts and the
+ *      tests.
+ *
+ * The fallback below is the deployment's own address, used only while APP_URL
+ * is unset. It is a hosting URL, not an identity: setting APP_URL is what
+ * makes the product's address its own.
+ */
+export const ORIGIN_FALLBACK = "https://energie-teilen-site.vercel.app";
 
-/** The public origin. Overridden at build time by APP_URL. */
+/** Injected by vite.config.ts at build time. Absent everywhere else. */
+declare const __APP_ORIGIN__: string | undefined;
+
+function normalise(raw: string): string {
+  return raw.trim().replace(/\/+$/, "");
+}
+
+/**
+ * The origin the operator configured, or null while APP_URL is unset.
+ *
+ * Callers that must distinguish "configured" from "defaulted" — the analytics
+ * domain, the health scoreboard — ask for this rather than comparing strings.
+ */
+export function configuredOrigin(): string | null {
+  const fromBuild = typeof __APP_ORIGIN__ === "string" ? __APP_ORIGIN__ : "";
+  if (fromBuild.trim().length > 0) return normalise(fromBuild);
+
+  const fromEnv = typeof process !== "undefined" ? process.env?.APP_URL : undefined;
+  if (typeof fromEnv === "string" && fromEnv.trim().length > 0) return normalise(fromEnv);
+
+  return null;
+}
+
+/** The public origin, without a trailing slash. */
 export function siteOrigin(): string {
-  const raw =
-    (typeof process !== "undefined" ? process.env?.APP_URL : undefined) ?? ORIGIN_FALLBACK;
-  return raw.replace(/\/+$/, "");
+  return configuredOrigin() ?? ORIGIN_FALLBACK;
+}
+
+/** The host alone, for display and for the analytics domain. */
+export function siteHost(): string {
+  return siteOrigin().replace(/^https?:\/\//, "");
 }
 
 export function absoluteUrl(path: string): string {

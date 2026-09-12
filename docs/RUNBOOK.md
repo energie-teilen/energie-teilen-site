@@ -24,8 +24,15 @@ doctor exits 1, and no euro can move.
 2. `STRIPE_PRICE_ET_ELIGIBILITY`, `STRIPE_PRICE_ET_STRUCTURING`,
    `STRIPE_PRICE_ET_MANDATE` [`stripe_price_et_*`] — one-time EUR prices.
    Server-side only; the browser never learns a price ID.
-3. `APP_URL` [`app_url`] — the public https origin. Used for Stripe return
-   URLs; a localhost or plain-http value is refused in production.
+3. `APP_URL` [`app_url`] — the public https origin, and the only address the
+   product calls itself by: Stripe return URLs, canonical links, hreflang,
+   OpenGraph, structured data, sitemap, robots.txt, the discovery files, the
+   links in the PDF report and the Plausible domain all derive from it
+   (`siteOrigin()` in `shared/routes.ts`). It is read at BUILD time for the
+   browser bundle and the static documents, so changing it needs a redeploy,
+   not just a restart. While it is unset everything falls back to the
+   deployment's own address. A localhost or plain-http value is refused in
+   production.
 4. `STRIPE_WEBHOOK_SECRET` [`stripe_webhook_secret`] — endpoint
    `<APP_URL>/api/stripe/webhook` for `checkout.session.completed` and
    `checkout.session.async_payment_succeeded`.

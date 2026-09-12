@@ -5,7 +5,8 @@
  *
  * Loads the script itself so the `window.plausible` queue stub exists before
  * any event fires, and resolves the reporting domain from
- * VITE_PLAUSIBLE_DOMAIN with the current hostname as fallback.
+ * VITE_PLAUSIBLE_DOMAIN, then the configured site origin, then the current
+ * hostname.
  *
  * Rules this module enforces:
  *   - No personal data. Event properties are enums, counts and booleans;
@@ -13,6 +14,8 @@
  *   - Never throws into a render path.
  *   - Respects Do Not Track.
  */
+
+import { configuredOrigin } from "../../../shared/routes";
 
 // ============================================================================
 // EVENTS — the funnel, named once
@@ -120,9 +123,17 @@ export function doNotTrackEnabled(): boolean {
 export function analyticsDomain(): string {
   const configured = import.meta.env?.VITE_PLAUSIBLE_DOMAIN as string | undefined;
   if (configured && configured.trim().length > 0) return configured.trim();
-  // Falling back to the actual host is correct on the custom domain; on any
-  // other host Plausible ignores the events rather than attributing them
-  // elsewhere.
+
+  /*
+   * Then the site's own origin, when APP_URL was set at build time. A preview
+   * deployment serves the same bundle from a different host; attributing its
+   * events to the registered site is right, and Plausible drops events whose
+   * domain is not registered.
+   */
+  const origin = configuredOrigin();
+  if (origin) return origin.replace(/^https?:\/\//, "");
+
+  // Last, the actual host: correct on the real domain, ignored elsewhere.
   return w()?.location?.hostname ?? "";
 }
 

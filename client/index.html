@@ -24,9 +24,9 @@
     <meta http-equiv="Content-Language" content="de" />
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
 
-    <link rel="canonical" href="https://energie-teilen-site.vercel.app/" />
-    <link rel="alternate" hreflang="de-DE" href="https://energie-teilen-site.vercel.app/" />
-    <link rel="alternate" hreflang="x-default" href="https://energie-teilen-site.vercel.app/" />
+    <link rel="canonical" href="%SITE_ORIGIN%/" />
+    <link rel="alternate" hreflang="de-DE" href="%SITE_ORIGIN%/" />
+    <link rel="alternate" hreflang="x-default" href="%SITE_ORIGIN%/" />
 
     <!-- =========================================================
          IOS / ANDROID / WINDOWS APP META
@@ -57,9 +57,9 @@
     <meta
       property="og:description"
       content="Strukturierte Pilotaufnahme für Mieterstrom, gemeinschaftliche Gebäudeversorgung und Energy Sharing. Kostenloser Rendite-Rechner. Drei Pilotstufen." />
-    <meta property="og:url" content="https://energie-teilen-site.vercel.app/" />
-    <meta property="og:image" content="https://energie-teilen-site.vercel.app/og-image.png" />
-    <meta property="og:image:secure_url" content="https://energie-teilen-site.vercel.app/og-image.png" />
+    <meta property="og:url" content="%SITE_ORIGIN%/" />
+    <meta property="og:image" content="%SITE_ORIGIN%/og-image.png" />
+    <meta property="og:image:secure_url" content="%SITE_ORIGIN%/og-image.png" />
     <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
@@ -71,7 +71,7 @@
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Energie Teilen — Bezahlte Pilotaufnahme" />
     <meta name="twitter:description" content="Strukturierte Pilotaufnahme für lokale Energieprojekte. Kostenloser Mieterstrom-Rechner. Drei Pilotstufen." />
-    <meta name="twitter:image" content="https://energie-teilen-site.vercel.app/og-image.png" />
+    <meta name="twitter:image" content="%SITE_ORIGIN%/og-image.png" />
     <meta name="twitter:image:alt" content="Energie Teilen — vernetzte urbane Energieinfrastruktur" />
 
     <!-- =========================================================
@@ -149,12 +149,12 @@
         "@graph": [
           {
             "@type": "Organization",
-            "@id": "https://energie-teilen-site.vercel.app/#organization",
+            "@id": "%SITE_ORIGIN%/#organization",
             "name": "Energie Teilen",
-            "url": "https://energie-teilen-site.vercel.app",
+            "url": "%SITE_ORIGIN%",
             "logo": {
               "@type": "ImageObject",
-              "url": "https://energie-teilen-site.vercel.app/og-image.png",
+              "url": "%SITE_ORIGIN%/og-image.png",
               "width": 1200,
               "height": 630
             },
@@ -178,17 +178,17 @@
           },
           {
             "@type": "WebSite",
-            "@id": "https://energie-teilen-site.vercel.app/#website",
-            "url": "https://energie-teilen-site.vercel.app",
+            "@id": "%SITE_ORIGIN%/#website",
+            "url": "%SITE_ORIGIN%",
             "name": "Energie Teilen",
             "inLanguage": "de-DE",
-            "publisher": { "@id": "https://energie-teilen-site.vercel.app/#organization" }
+            "publisher": { "@id": "%SITE_ORIGIN%/#organization" }
           },
           {
             "@type": "Service",
-            "@id": "https://energie-teilen-site.vercel.app/#pilot-service",
+            "@id": "%SITE_ORIGIN%/#pilot-service",
             "serviceType": "Strukturierte Pilotaufnahme für Energieprojekte",
-            "provider": { "@id": "https://energie-teilen-site.vercel.app/#organization" },
+            "provider": { "@id": "%SITE_ORIGIN%/#organization" },
             "areaServed": { "@type": "Country", "name": "Deutschland" },
             "audience": {
               "@type": "BusinessAudience",
@@ -227,7 +227,7 @@
           },
           {
             "@type": "FAQPage",
-            "@id": "https://energie-teilen-site.vercel.app/#faq",
+            "@id": "%SITE_ORIGIN%/#faq",
             "mainEntity": [
               {
                 "@type": "Question",
@@ -289,7 +289,7 @@
           },
           {
             "@type": "HowTo",
-            "@id": "https://energie-teilen-site.vercel.app/#howto-rechner",
+            "@id": "%SITE_ORIGIN%/#howto-rechner",
             "name": "Mieterstrom-Rendite berechnen",
             "description": "In vier Schritten zu einer ersten Renditeeinordnung Ihres Mieterstrom-Vorhabens.",
             "totalTime": "PT3M",

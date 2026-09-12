@@ -28,6 +28,7 @@ import {
   type Storage,
 } from "../../../shared/messkonzept";
 import { contactEmail, operatorLocality } from "../../../shared/legal-entity";
+import { absoluteUrl, siteHost, siteOrigin } from "../../../shared/routes";
 
 /** The metering answers the qualification questions do not cover. */
 export type MesskonzeptAnswers = {
@@ -45,13 +46,23 @@ const BRAND = { green: "#1d493a", greenDk: "#143528", gold: "#c79236", brown: "#
 // the contact mailbox and the locality come from shared/legal-entity.ts, so a
 // report a customer forwards to an owner or a bank names the same operator as
 // the imprint, and names no city the record does not state.
+// The links are built from siteOrigin(), so a report downloaded from the
+// custom domain does not send its reader back to the hosting address.
 const CONTACT = {
   company: "Energie Teilen",
   tagline: "Bezahlte Pilotaufnahme für lokale Energieprojekte",
-  web: "energie-teilen-site.vercel.app",
-  webUrl: "https://energie-teilen-site.vercel.app/",
-  rechnerUrl: "https://energie-teilen-site.vercel.app/#rechner",
-  pilotUrl: "https://energie-teilen-site.vercel.app/#pilot-start",
+  get web() {
+    return siteHost();
+  },
+  get webUrl() {
+    return absoluteUrl("/");
+  },
+  get rechnerUrl() {
+    return absoluteUrl("/rechner");
+  },
+  get pilotUrl() {
+    return `${siteOrigin()}/#pilot-start`;
+  },
 };
 
 const eur = (n: number) => new Intl.NumberFormat("de-DE", { maximumFractionDigits: 0 }).format(Math.round(n)) + " €";

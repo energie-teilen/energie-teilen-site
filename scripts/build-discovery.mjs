@@ -24,9 +24,11 @@ import { join } from "path";
 import { loadManifests } from "./load-manifests.mjs";
 
 const DIST = join(process.cwd(), "dist", "public");
-const ORIGIN = (process.env.APP_URL || "https://energie-teilen-site.vercel.app").replace(/\/+$/, "");
 
 const manifests = await loadManifests();
+
+// One origin for the whole product: shared/routes.ts, reading APP_URL.
+const ORIGIN = manifests.siteOrigin();
 
 const routes = manifests.indexableRoutes().map((r) => ({
   path: r.path,
